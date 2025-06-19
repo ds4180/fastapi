@@ -1,0 +1,6 @@
+.python-version
+
+__pycache__
+e2e.log
+pyproject.toml
+uv.lock
