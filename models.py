@@ -18,5 +18,5 @@ class Answer(Base):
     content = Column(Text, nullable=False)
     create_date = Column(DateTime, nullable=False)
     question_id = Column(Integer, ForeignKey('question.id'))
-    question = relationship('Question') 
+    question = relationship('Question', backref='answers')
     
