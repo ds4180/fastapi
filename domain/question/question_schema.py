@@ -2,6 +2,9 @@ import datetime
 
 from pydantic import BaseModel
 
+from domain.answer.answer_schema import Answer
+
+
 
 
 class Question(BaseModel):
@@ -10,4 +13,4 @@ class Question(BaseModel):
     subject: str
     content: str
     create_date: datetime.datetime
-
+    answers: list[Answer]=[]
