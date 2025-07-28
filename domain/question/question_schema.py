@@ -6,7 +6,6 @@ from domain.answer.answer_schema import Answer
 
 
 
-
 class Question(BaseModel):
 
     id: int
@@ -14,6 +13,10 @@ class Question(BaseModel):
     content: str
     create_date: datetime.datetime
     answers: list[Answer]=[]
+
+class QuestionList(BaseModel):
+    total: int = 0
+    question_list: list[Question] = []
 
 
 class QuestionCreate(BaseModel):
