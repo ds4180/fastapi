@@ -12,3 +12,5 @@ def create_answer(db: Session, question: Question, answer_create: AnswerCreate):
                        create_date=datetime.now())
     db.add(db_answer)
     db.commit()
+    db.refresh(db_answer)
+    return db_answer
