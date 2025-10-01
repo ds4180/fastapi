@@ -3,12 +3,18 @@ from starlette.middleware.cors import CORSMiddleware
 
 from domain.question import question_router
 from domain.answer import answer_router
+from database import engine
+
+from models import Base
 
 app = FastAPI()
 
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://192.168.200.217:5173",
+    "http://localhost:3000",  # 프로덕션 SvelteKit 서버 주소 추가
+    "http://localhost", # Nginx를 통해 접속하는 주소
 ]
 
 app.add_middleware(
