@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from fastapi import Depends, HTTPException
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from starlette import status
 
@@ -20,6 +20,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 15  # 15분
 REFRESH_TOKEN_EXPIRE_DAYS = 7  # 7일
 SECRET_KEY = "cceb75393b383115054b2195c59b3d4a5a948c8c530182855f0610b6a59083ad"  # 실제 운영 환경에서는 환경 변수 등으로 관리해야 합니다.
 ALGORITHM = "HS256"
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login")
 
 @router.post("/create", status_code=status.HTTP_204_NO_CONTENT)
 def user_create(_user_create: user_schema.UserCreate, db: Session = Depends(get_db)):
@@ -89,4 +91,23 @@ def refresh_access_token(refresh_token: user_schema.RefreshToken, db: Session = 
         }
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
-    
+
+def get_current_user(token: str = Depends(oauth2_scheme),
+                     db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    else:
+        user = user_crud.get_user(db, username=username)
+        if user is None:
+            raise credentials_exception
+        return user

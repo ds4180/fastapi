@@ -35,3 +35,10 @@ class UserLogin(BaseModel):
 
 class RefreshToken(BaseModel):
     refresh_token: str
+
+
+class User(BaseModel):
+    id: int
+    username: str
+    email: EmailStr
+    
