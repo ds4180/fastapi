@@ -31,6 +31,11 @@ module.exports = {
       cwd: '.', // FastAPI 프로젝트 루트 디렉터리 (현재 위치)
       // args를 배열로 분리하여 각 인자를 명확하게 전달합니다.
       args: ['main:app', '--host', '0.0.0.0', '--port', '8000'], // uvicorn에 전달할 인자들
+      env: {
+        // FastAPI 애플리케이션에서 사용할 환경 변수를 설정합니다.
+        // 여기에 정의된 값들은 Python 코드에서 os.environ.get('KEY') 형태로 접근할 수 있습니다.
+        // CORS 허용할 출처(origin) 목록을 콤마(,)로 구분된 문자열로 전달합니다.
+      },
     },
   ],
 };
