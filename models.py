@@ -23,6 +23,8 @@ class Question(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     user = relationship("User", back_populates="questions")
     answers = relationship("Answer", back_populates="question", cascade="all, delete-orphan")
+    modify_date = Column(DateTime, nullable=True)
+
 
 class Answer(Base):
     __tablename__ = "answer"
@@ -34,4 +36,4 @@ class Answer(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     question = relationship("Question", back_populates="answers")
     user = relationship("User", back_populates="answers")
-    
+    modify_date = Column(DateTime, nullable=True)

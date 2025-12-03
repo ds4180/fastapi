@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from domain.question.question_schema import QuestionCreate
+from domain.question.question_schema import QuestionCreate, QuestionUpdate
 
 from models import Question, User
 from sqlalchemy.orm import Session
@@ -29,5 +29,15 @@ def create_question(db:Session, question_create:QuestionCreate, user:User):
                            user=user)
     db.add(db_question)
     db.commit()
+    db.refresh(db_question)
+    return db_question
+
+def update_question(db:Session, db_question:Question, question_update:QuestionUpdate):
+    db_question.subject = question_update.subject
+    db_question.content = question_update.content
+    db_question.modify_date = datetime.now()
+    db.add(db_question)
+    db.commit()
+    
     db.refresh(db_question)
     return db_question
