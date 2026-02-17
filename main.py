@@ -5,6 +5,7 @@ from domain.question import question_router
 from domain.answer import answer_router
 from domain.user import user_router
 from domain.fileupload import fileupload_router
+from domain.dayoff import dayoff_router
 
 from database import engine
 
@@ -12,17 +13,21 @@ from models import Base
 
 app = FastAPI()
 
+import os
+
+# 기본 허용 주소 목록
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://192.168.200.217:5173",  # 개발 서버 외부 접속 주소
-    "http://localhost:3000",  # 프로덕션 SvelteKit 서버 주소 추가
-    "http://localhost",  # Nginx를 통해 접속하는 주소
-    # --- 프로덕션 환경을 위한 주소 추가 ---
-    "http://192.168.200.217:3000",  # PM2로 실행된 앱의 외부 접속 주소 (포트 3000 가정)
-    "http://192.168.200.217",       # Nginx 등을 통해 포트 없이 외부 접속하는 경우
-    "http://192.168.200.217:4173", # npm run preview origine 추가
+    "http://localhost:3000",
+    "http://localhost",
 ]
+
+# 환경 변수 ALLOW_ORIGINS가 있으면 목록에 추가합니다. (쉼표로 구분하여 여러 개 추가 가능)
+env_origins = os.getenv("ALLOW_ORIGINS")
+if env_origins:
+    # "http://192.168.200.217,http://bus1942.com" 같은 문자열을 리스트로 변환
+    origins.extend([origin.strip() for origin in env_origins.split(",")])
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,12 +46,13 @@ async def root():
         dict: A dictionary containing a greeting message.
     """
 
-    return {"message": "Hello World"}
+    return {"message": "Hello World!!"}
 
 app.include_router(question_router.router)
 app.include_router(answer_router.router)
 app.include_router(user_router.router)
 app.include_router(fileupload_router.router)
+app.include_router(dayoff_router.router)
 
 
 

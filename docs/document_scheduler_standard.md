@@ -1,0 +1,98 @@
+# 문서 변경 스케줄러 표준 정의
+
+이 문서는 중요 문서의 변경 사항을 미래의 특정 시점에 자동으로 적용하기 위한 '스케줄러'의 표준 아키텍처와 구현 워크플로우를 정의합니다.
+
+이 표준은 [document_history_standard.md](./document_history_standard.md)에 정의된 변경 이력 관리 표준을 기반으로 확장됩니다.
+
+## 1. 아키텍처 및 기본 원칙
+
+### 채택 아키텍처: FastAPI Lifespan을 이용한 비동기 방식
+
+- **원칙**: 별도의 외부 스케줄러(Cron, Celery Beat 등)를 도입하기 전 단계로, FastAPI 애플리케이션의 생명주기(`lifespan`)와 `asyncio`를 활용하여 스케줄러를 구현합니다. 애플리케이션 프로세스 내에서 비동기 루프가 동작하며, 외부 의존성을 최소화합니다.
+- **이유**: 아키텍처의 복잡성을 낮게 유지하면서도, 단일 프로세스 환경에서 안정적으로 주기적인 작업을 수행할 수 있어 효율적입니다. 기존 `main.py`의 `ping_loop`와 동일한 구조를 차용하여 일관성을 유지합니다.
+
+### 대안 아키텍처 (미채택)
+
+- **조회 시 적용 (Lazy Application)**: 사용자가 데이터를 조회하는 시점에 밀린 작업을 처리하는 방식. 아키텍처는 단순하지만, 특정 사용자의 응답 지연 및 예약 작업의 실행이 보장되지 않는 단점이 있어 채택하지 않습니다.
+- **외부 Task Queue (Celery 등)**: 대규모 분산 환경에서 가장 신뢰성 높은 방식. 하지만 현재 프로젝트 규모에서는 초기 설정의 복잡성이 높다고 판단하여, 추후 확장 시 고려할 아키텍처로 남겨둡니다.
+
+---
+
+## 2. 데이터베이스 스키마
+
+미래의 변경 계획을 저장하기 위한 `scheduled_changes` 테이블을 새로 정의합니다.
+
+### `scheduled_changes` 테이블
+
+| 컬럼명 | DB 타입 (SQLAlchemy) | Python 타입 | 설명 |
+| :--- | :--- | :--- | :--- |
+| `id` | `Integer` | `int` | Primary Key |
+| `document_id` | `Integer` | `int` | 원본 문서의 ID (FK) |
+| **`effective_date`** | **`DateTime`** | `datetime.datetime`| **변경이 적용될 예약 시각.** |
+| **`changes`** | **`JSONB`** | `list` | 적용될 변경사항 Diff 객체 (JSON) |
+| **`status`** | **`Enum`** | `str` | **작업 상태 (`PENDING`, `APPLIED`, `CANCELLED`)** |
+| `created_by_user_id`| `Integer` | `int` | 예약을 생성한 사용자 ID |
+| `created_at` | `DateTime` | `datetime.datetime`| 예약 생성 시각 |
+
+---
+
+## 3. 구현 워크플로우
+
+### 1단계: 변경 예약하기 (Scheduling)
+
+1.  사용자가 특정 시점을 지정하여 문서 변경을 요청합니다.
+2.  백엔드는 현재 문서와 수정된 내용 간의 **Diff를 생성**합니다.
+3.  실제 `documents` 테이블은 변경하지 않고, `scheduled_changes` 테이블에 `effective_date`, `changes`(Diff), 그리고 `status='PENDING'`으로 새 레코드를 생성합니다.
+
+### 2단계: 예약된 변경 적용하기 (Applying via Scheduler)
+
+1.  FastAPI `lifespan`에서 시작된 `scheduler_loop`가 주기적으로 (예: 60초마다) 실행됩니다.
+2.  `scheduler_loop`는 `scheduled_changes` 테이블에서 `status='PENDING'`이고 `effective_date`가 현재 시각 이전인 작업을 모두 조회합니다.
+3.  발견된 각 작업에 대해 아래 절차를 수행합니다.
+    a. `documents` 테이블의 원본 문서를 찾아 저장된 Diff를 적용하여 **실제 데이터를 변경**합니다.
+    b. `document_history` 테이블에 해당 변경 내용을 **과거 이력으로 기록**합니다.
+    c. `scheduled_changes` 작업의 `status`를 `APPLIED`로 변경하여 중복 실행을 방지합니다.
+
+### 3단계: 데이터 조회하기 (Viewing)
+
+1.  사용자는 항상 `documents` 테이블의 최신 데이터를 보게 됩니다.
+2.  UI에서는 `scheduled_changes` 테이블을 추가로 조회하여, 특정 문서에 `PENDING` 상태인 예약 작업이 있을 경우 "N월 N일에 변경이 예약되어 있습니다"와 같은 알림을 표시해 줄 수 있습니다.
+
+---
+
+## 4. 구현 가이드
+
+애플리케이션의 안정성을 위해 스케줄러 구현 시 아래 사항을 반드시 준수합니다.
+
+- **독립적인 로직 파일**: 스케줄러 관련 로직(`scheduler_loop`, `process_due_tasks`)은 `scheduler.py`와 같이 별도의 파일로 분리하여 관리합니다.
+
+- **`lifespan`에 등록**: `main.py`의 `lifespan` 관리자 내에서 `asyncio.create_task(scheduler_loop())`를 호출하여 애플리케이션 시작과 함께 스케줄러를 실행합니다.
+
+- **오류 처리 및 DB 세션 관리**:
+    - `scheduler_loop`의 작업 단위(`process_due_tasks`) 내부는 반드시 `try...except` 블록으로 감싸, 특정 작업의 실패가 전체 스케줄러 루프를 중단시키지 않도록 합니다.
+    - 스케줄러는 API 요청 컨텍스트 외부에서 실행되므로, DB 세션을 명시적으로 생성하고 `finally` 블록에서 `close()`하여 항상 반환하도록 처리해야 합니다.
+
+- **구현 예시 (`scheduler.py`)**:
+    ```python
+    import asyncio
+
+    async def process_due_tasks():
+        """핵심 로직: DB 세션을 열고, 예약된 작업을 처리하고, 세션을 닫습니다."""
+        # db = create_session()
+        try:
+            # ... 작업 처리 로직 ...
+            # db.commit()
+            pass
+        except Exception as e:
+            print(f"Scheduler Error: {e}")
+            # db.rollback()
+        finally:
+            # db.close()
+            pass
+
+    async def scheduler_loop():
+        """주기적으로 로직을 실행하는 무한 루프"""
+        while True:
+            await process_due_tasks()
+            await asyncio.sleep(60) # 60초마다 반복
+    ```

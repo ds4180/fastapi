@@ -29,9 +29,8 @@ async def upload_files(files: List[UploadFile] = File(...)):
     - Returns:
         - dict: 업로드 성공 시, 성공 메시지와 업로드된 파일 수를 포함하는 JSON 객체를 반환합니다.
     """
-    # 1. 업로드된 파일을 저장할 디렉터리를 지정하고, 디렉터리가 존재하지 않으면 생성합니다.
-    #    `exist_ok=True` 옵션은 디렉터리가 이미 존재해도 오류를 발생시키지 않습니다.
-    upload_dir = "uploads"
+    # 1. 업로드된 파일을 저장할 디렉터리를 환경 변수에서 가져옵니다. 정의되지 않았으면 기본값 'uploads'를 사용합니다.
+    upload_dir = os.getenv("UPLOAD_DIR", "uploads")
     os.makedirs(upload_dir, exist_ok=True)
 
     # 2. 클라이언트가 보낸 모든 파일에 대해 반복 작업을 수행합니다.
