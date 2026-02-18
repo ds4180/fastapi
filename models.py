@@ -1,7 +1,14 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, UniqueConstraint, Boolean, Table
 from sqlalchemy.orm import relationship 
 
 from database import Base
+
+question_read_user = Table(
+    'question_read_user',
+    Base.metadata,
+    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True),
+    Column('question_id', Integer, ForeignKey('question.id'), primary_key=True)
+)
 
 class User(Base):
     __tablename__ = "users"
@@ -25,6 +32,10 @@ class Question(Base):
     user = relationship("User", back_populates="questions")
     answers = relationship("Answer", back_populates="question", cascade="all, delete-orphan")
     modify_date = Column(DateTime, nullable=True)
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    delete_date = Column(DateTime, nullable=True)
+    read_users = relationship("User", secondary=question_read_user, backref="read_questions")
+    reactions = relationship("QuestionReaction", back_populates="question", cascade="all, delete-orphan")
 
 
 class Answer(Base):
@@ -56,3 +67,12 @@ class DayOff(Base):
     __table_args__ = (
         UniqueConstraint('user_id', 'date', name='uq_user_dayoff_date'),
     )
+
+class QuestionReaction(Base):
+    __tablename__ = 'question_reaction'
+    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
+    question_id = Column(Integer, ForeignKey('question.id'), primary_key=True)
+    reaction_type = Column(String, nullable=False) # 'like', 'dislike', 'soso'
+
+    user = relationship("User", backref="reactions")
+    question = relationship("Question", back_populates="reactions")

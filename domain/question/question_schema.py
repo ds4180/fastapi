@@ -16,6 +16,12 @@ class Question(BaseModel):
     create_date: datetime.datetime
     answers: list[Answer]=[]
     user: User | None
+    is_read: bool = False
+    read_count: int = 0
+    like_count: int = 0
+    dislike_count: int = 0
+    soso_count: int = 0
+    my_reaction: str | None = None
 
 class QuestionList(BaseModel):
     total: int = 0
@@ -35,3 +41,11 @@ class QuestionCreate(BaseModel):
 
 class QuestionUpdate(QuestionCreate):
     question_id: int
+
+
+class QuestionDelete(BaseModel):
+    question_id: int
+
+class QuestionReactionCreate(BaseModel):
+    question_id: int
+    reaction_type: str # 'like', 'dislike', 'soso'
