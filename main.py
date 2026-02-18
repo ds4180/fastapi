@@ -11,9 +11,20 @@ from database import engine
 
 from models import Base
 
+from fastapi.staticfiles import StaticFiles
+import os
+
 app = FastAPI()
 
-import os
+# 정적 파일(이미지 등) 서빙 설정
+upload_dir = os.getenv("UPLOAD_DIR", "uploads")
+os.makedirs(upload_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
+
+# 썸네일 전용 경로 추가 (이미지 서빙 최적화)
+thumb_dir = os.path.join(upload_dir, "thumbnails")
+os.makedirs(thumb_dir, exist_ok=True)
+app.mount("/uploads/thumbnails", StaticFiles(directory=thumb_dir), name="thumbnails")
 
 # 기본 허용 주소 목록
 origins = [

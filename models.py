@@ -36,6 +36,18 @@ class Question(Base):
     delete_date = Column(DateTime, nullable=True)
     read_users = relationship("User", secondary=question_read_user, backref="read_questions")
     reactions = relationship("QuestionReaction", back_populates="question", cascade="all, delete-orphan")
+    images = relationship("QuestionImage", back_populates="question", cascade="all, delete-orphan")
+
+
+class QuestionImage(Base) :
+    __tablename__ = "question_image"
+    id = Column(Integer, primary_key=True)
+    filename = Column(String, nullable=False)
+    original_name = Column(String, nullable=False)
+    thumbnail_filename = Column(String, nullable=True)
+    question_id = Column(Integer, ForeignKey('question.id'))
+
+    question = relationship("Question", back_populates="images")
 
 
 class Answer(Base):

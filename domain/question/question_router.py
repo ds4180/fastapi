@@ -19,10 +19,10 @@ router = APIRouter(
 
 @router.get("/list", response_model=question_schema.QuestionList)
 def question_list(db: Session = Depends(get_db),
-                  page: int = 0, size: int = 10,
+                  page: int = 0, size: int = 10, keyword: str = "",
                   current_user: User = Depends(get_current_user_optional)):
     total, _question_list = question_crud.get_question_list(
-        db, skip=page*size, limit=size, user=current_user)
+        db, skip=page*size, limit=size, user=current_user, keyword=keyword)
     return {
         'total': total,
         'question_list': _question_list

@@ -8,6 +8,17 @@ from domain.user.user_schema import User
 
 
 
+class QuestionImage(BaseModel):
+    id: int
+    filename: str
+    original_name: str
+    thumbnail_filename: str | None = None
+    question_id: int
+
+    class Config:
+        from_attributes = True
+
+
 class Question(BaseModel):
 
     id: int
@@ -22,6 +33,10 @@ class Question(BaseModel):
     dislike_count: int = 0
     soso_count: int = 0
     my_reaction: str | None = None
+    images: list[QuestionImage] = []
+
+    class Config:
+        from_attributes = True
 
 class QuestionList(BaseModel):
     total: int = 0
@@ -31,6 +46,7 @@ class QuestionList(BaseModel):
 class QuestionCreate(BaseModel):
     subject: str
     content: str
+    image_files: list[dict] = [] # [{'filename': '...', 'original_name': '...'}]
 
     @field_validator('subject', 'content')
     def not_empty(cls, v):
@@ -41,6 +57,7 @@ class QuestionCreate(BaseModel):
 
 class QuestionUpdate(QuestionCreate):
     question_id: int
+    image_files: list[dict] = [] # [{'filename': '...', 'original_name': '...'}]
 
 
 class QuestionDelete(BaseModel):

@@ -2,15 +2,27 @@ from datetime import datetime
 
 from domain.question.question_schema import QuestionCreate, QuestionUpdate
 
-from models import Question, User, QuestionReaction
+from models import Question, User, QuestionReaction, QuestionImage
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
+from domain.fileupload import fileupload_service
 
-
-def get_question_list(db: Session, skip: int = 0, limit: int = 10, user: User = None):
+def get_question_list(db: Session, skip: int = 0, limit: int = 10, user: User = None, keyword: str = ""):
     _question_list = db.query(Question)\
-        .filter(Question.is_deleted == False)\
-        .order_by(Question.create_date.desc())
+        .outerjoin(User)\
+        .filter(Question.is_deleted == False)
+    
+    if keyword:
+        search = f"%%{keyword}%%"
+        _question_list = _question_list.filter(
+            or_(
+                Question.subject.ilike(search),        # 질문 제목
+                Question.content.ilike(search),        # 질문 내용
+                User.username.ilike(search)            # 질문 작성자
+            )
+        ).distinct()
 
+    _question_list = _question_list.order_by(Question.create_date.desc())
     total = _question_list.count()
     question_list = _question_list.offset(skip).limit(limit).all()
 
@@ -61,6 +73,17 @@ def create_question(db:Session, question_create:QuestionCreate, user:User):
                            create_date=datetime.now(),
                            user=user)
     db.add(db_question)
+    
+    # 이미지 파일 정보 저장
+    for image_data in question_create.image_files:
+        db_image = QuestionImage(
+            filename=image_data['filename'],
+            original_name=image_data['original_name'],
+            thumbnail_filename=image_data.get('thumbnail_filename'),
+            question=db_question
+        )
+        db.add(db_image)
+
     db.commit()
     db.refresh(db_question)
     return db_question
@@ -102,6 +125,11 @@ def toggle_reaction(db: Session, db_question: Question, user: User, reaction_typ
 def delete_question(db: Session, db_question: Question):
     db_question.is_deleted = True
     db_question.delete_date = datetime.now()
+    
+    # 질문 삭제 시 모든 이미지 파일 격리
+    for image in db_question.images:
+        fileupload_service.rename_to_deleted(image.filename, image.thumbnail_filename)
+        
     db.add(db_question)
     db.commit()
 
@@ -109,8 +137,30 @@ def update_question(db:Session, db_question:Question, question_update:QuestionUp
     db_question.subject = question_update.subject
     db_question.content = question_update.content
     db_question.modify_date = datetime.now()
+    
+    # 1. 수정 중 삭제된 이미지 파일 식별 및 격리
+    existing_images = {img.filename: img for img in db_question.images}
+    new_filenames = {img_data['filename'] for img_data in question_update.image_files}
+    
+    for filename, img_obj in existing_images.items():
+        if filename not in new_filenames:
+            # 새로운 리스트에 없는 기존 파일은 격리 대상
+            fileupload_service.rename_to_deleted(img_obj.filename, img_obj.thumbnail_filename)
+
+    # 2. 기존 이미지 관계 삭제 (컬렉션을 비우면 delete-orphan 설정에 의해 DB에서도 삭제됨)
+    db_question.images.clear()
+    
+    # 3. 새로운 이미지 리스트 등록
+    for image_data in question_update.image_files:
+        db_image = QuestionImage(
+            filename=image_data['filename'],
+            original_name=image_data['original_name'],
+            thumbnail_filename=image_data.get('thumbnail_filename'),
+            question=db_question
+        )
+        db.add(db_image)
+
     db.add(db_question)
     db.commit()
-    
     db.refresh(db_question)
     return db_question
