@@ -18,4 +18,11 @@ class Answer(BaseModel):
     id: int
     content: str
     create_date: datetime.datetime
+    modify_date: datetime.datetime | None = None
     user: User | None
+
+class AnswerUpdate(AnswerCreate):
+    answer_id: int
+
+class AnswerDelete(BaseModel):
+    answer_id: int

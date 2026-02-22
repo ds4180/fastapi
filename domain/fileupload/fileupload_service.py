@@ -62,7 +62,7 @@ async def save_upload_files(files: List[UploadFile]) -> List[Dict[str, str]]:
     return uploaded_info
 
 def finalize_uploads(image_files: List[Dict]) -> List[Dict]:
-    """2단계: 최종 이동 및 썸네일 생성"""
+    """2단계: 최종 이동 및 WebP 썸네일 생성"""
     final_files = []
     now = datetime.now()
     date_path = os.path.join(str(now.year), str(now.month).zfill(2), str(now.day).zfill(2))
@@ -102,14 +102,21 @@ def finalize_uploads(image_files: List[Dict]) -> List[Dict]:
                     thumb_dir = os.path.join(UPLOAD_DIR, thumb_subdir)
                     os.makedirs(thumb_dir, exist_ok=True)
 
-                    thumbnail_filename = f"thumb_{os.path.splitext(filename)[0]}.jpg"
+                    # WebP 형식으로 변경
+                    thumbnail_filename = f"thumb_{os.path.splitext(filename)[0]}.webp"
                     thumb_path = os.path.join(thumb_dir, thumbnail_filename)
 
                     with Image.open(final_path) as img:
-                        if img.mode in ("RGBA", "P", "CMYK"):
+                        # WebP는 RGBA를 지원하므로 RGB 변환이 필수는 아니나, 
+                        # 일관성을 위해 투명도가 없는 경우 RGB로 처리하면 용량이 더 줄어듭니다.
+                        if img.mode in ("P", "CMYK"):
                             img = img.convert("RGB")
-                        img.thumbnail((600, 600))
-                        img.save(thumb_path, "JPEG", quality=80, optimize=True)
+                        
+                        # 1200px 크기는 대화면에서도 선명하게 보일 만큼 고화질입니다.
+                        img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+                        # WebP 저장 (품질 80, method 6은 압축률 최적화)
+                        img.save(thumb_path, "WEBP", quality=80, method=6)
+                    print(f"Created high-res WebP thumbnail: {thumb_path}")
                 except Exception as e:
                     print(f"Thumbnail error: {e}")
 
@@ -126,10 +133,7 @@ def finalize_uploads(image_files: List[Dict]) -> List[Dict]:
     return final_files
 
 def rename_to_deleted(relative_path: str, thumbnail_relative_path: Optional[str] = None) -> Tuple[str, Optional[str]]:
-    """
-    3단계: 파일명 앞에 'delete_' 접두어 추가
-    새로운 상대 경로를 반환합니다.
-    """
+    """3단계: delete_ 접두어 추가"""
     def rename_file(rel_path: str) -> str:
         if not rel_path:
             return rel_path
@@ -138,20 +142,13 @@ def rename_to_deleted(relative_path: str, thumbnail_relative_path: Optional[str]
         if os.path.exists(src_path):
             directory = os.path.dirname(src_path)
             filename = os.path.basename(src_path)
-            
-            # 이미 delete_가 붙어있지 않은 경우에만 추가
             if not filename.startswith("delete_"):
                 new_filename = f"delete_{filename}"
                 dest_path = os.path.join(directory, new_filename)
                 try:
                     os.rename(src_path, dest_path)
-                    print(f"Renamed: {src_path} -> {dest_path}")
-                    # 새로운 상대 경로 생성
                     return os.path.join(os.path.dirname(rel_path), new_filename).replace("\\", "/")
-                except Exception as e:
-                    print(f"Failed to rename {src_path}: {e}")
+                except: pass
         return rel_path
 
-    new_fn = rename_file(relative_path)
-    new_tfn = rename_file(thumbnail_relative_path)
-    return new_fn, new_tfn
+    return rename_file(relative_path), rename_file(thumbnail_relative_path)
