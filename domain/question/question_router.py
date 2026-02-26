@@ -14,7 +14,7 @@ from models import User
 
 
 router = APIRouter(
-    prefix="/api/question",
+    prefix="/question",
 )
 
 @router.get("/list", response_model=question_schema.QuestionList)

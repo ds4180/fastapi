@@ -26,3 +26,6 @@ def create_user(db: Session, user_create: UserCreate):
                    email=user_create.email)
     db.add(db_user)
     db.commit()
+
+def get_user_list(db: Session):
+    return db.query(User).all()

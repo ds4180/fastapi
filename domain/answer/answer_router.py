@@ -11,7 +11,7 @@ from models import User
 
 
 router = APIRouter(
-    prefix="/api/answer",
+    prefix="/answer",
 )
 
 

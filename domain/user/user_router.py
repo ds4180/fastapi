@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 
 router = APIRouter(
-    prefix="/api/users",
+    prefix="/users",
 )
 
 
@@ -21,7 +21,7 @@ REFRESH_TOKEN_EXPIRE_DAYS = 7  # 7일
 SECRET_KEY = "cceb75393b383115054b2195c59b3d4a5a948c8c530182855f0610b6a59083ad"  # 실제 운영 환경에서는 환경 변수 등으로 관리해야 합니다.
 ALGORITHM = "HS256"
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/users/login")
 
 @router.post("/create", status_code=status.HTTP_204_NO_CONTENT)
 def user_create(_user_create: user_schema.UserCreate, db: Session = Depends(get_db)):
@@ -125,3 +125,7 @@ def get_current_user_optional(token: str = Depends(oauth2_scheme),
         return None
     else:
         return user_crud.get_user(db, username=username)
+@router.get("/list", response_model=user_schema.UserList)
+def user_list(db: Session = Depends(get_db)):
+    users = user_crud.get_user_list(db)
+    return {"users": users}

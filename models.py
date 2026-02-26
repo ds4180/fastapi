@@ -98,3 +98,28 @@ class PushSubscription(Base):
     auth = Column(String, nullable=False) # 인증 시크릿
     
     user = relationship("User", backref="push_subscriptions")
+
+class Alert(Base):
+    """
+    업무 지시 및 알림 테이블.
+    단순 팝업부터 Level 4(강제 정독) 공지까지 관리합니다.
+    """
+    __tablename__ = "alert"
+
+    id = Column(Integer, primary_key=True)
+    message = Column(Text, nullable=False) # "배차 확인 요망" 등 2~3줄의 핵심 지시
+    level = Column(Integer, default=1)     # 1(일반 팝업) ~ 4(강제 확인 모달)
+    style = Column(String, default="info")     # info, success, warning, danger
+    position = Column(String, default="top")  # top(상단), bottom(하단)
+    route = Column(String, nullable=True)  # 노출 특정 경로 (비어있으면 전역 노출)
+    redirect_url = Column(String, nullable=True) # 확인 클릭 시 강제 이동할 주소 (공지 본문 등)
+    is_active = Column(Boolean, default=True)    # 적용/중지 수동 제어
+    start_date = Column(DateTime, nullable=True) # 예약 시작 시점
+    end_date = Column(DateTime, nullable=True)   # 노출 자동 종료 시점
+    target_users = Column(Text, nullable=True)   # 대상 필터 (JSON 형식 등으로 저장)
+    confirm_text = Column(String, default="확인하였습니다") # 버튼 문구
+    reset_sec = Column(Integer, default=0)       # Level 4 전용 강제 대기 초
+    create_date = Column(DateTime, nullable=False) # 생성 일시
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True) # 작성 관리자
+
+    user = relationship("User", backref="created_alerts")

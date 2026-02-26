@@ -8,7 +8,7 @@ from domain.user.user_router import get_current_user
 from models import User
 
 router = APIRouter(
-    prefix="/api/dayoff",
+    prefix="/dayoff",
 )
 
 @router.post("/create", status_code=status.HTTP_204_NO_CONTENT)
