@@ -26,14 +26,14 @@ def active_alert_list(db: Session = Depends(get_db)):
     return alert_crud.get_active_alerts(db)
 
 @router.post("/create", status_code=status.HTTP_201_CREATED, response_model=alert_schema.Alert)
-def alert_create(_alert_create: alert_schema.AlertCreate,
+async def alert_create(_alert_create: alert_schema.AlertCreate,
                  db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
     """
     새로운 알림 생성
     """
     # TODO: 임시로 모든 로그인 유저가 생성 가능하게 함. 나중에 관리자 권한 체크 추가 필요.
-    return alert_crud.create_alert(db, alert_create=_alert_create, user=current_user)
+    return await alert_crud.create_alert(db, alert_create=_alert_create, user=current_user)
 
 @router.delete("/delete/{alert_id}", status_code=status.HTTP_204_NO_CONTENT)
 def alert_delete(alert_id: int, 
@@ -50,7 +50,7 @@ def alert_delete(alert_id: int,
     alert_crud.delete_alert(db, db_alert)
 
 @router.post("/toggle/{alert_id}", response_model=alert_schema.Alert)
-def alert_toggle(alert_id: int, 
+async def alert_toggle(alert_id: int, 
                  db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
     """

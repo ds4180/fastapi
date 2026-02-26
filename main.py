@@ -1,3 +1,6 @@
+import os
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
@@ -8,15 +11,20 @@ from domain.fileupload import fileupload_router
 from domain.dayoff import dayoff_router
 from domain.push import push_router
 from domain.alert import alert_router
+from domain.ws import ws_router, ws_service
 
 from database import engine
-
 from models import Base
-
 from fastapi.staticfiles import StaticFiles
-import os
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 애플리케이션 시작 시: 백그라운드 핑 루프 시작
+    asyncio.create_task(ws_service.ping_loop())
+    yield
+    # 애플리케이션 종료 시: 필요하면 여기에 정리 로직 추가
+
+app = FastAPI(lifespan=lifespan)
 
 # 정적 파일(이미지 등) 서빙 설정
 upload_dir = os.getenv("UPLOAD_DIR", "uploads")
@@ -47,13 +55,6 @@ app.add_middleware(
 
 @app.get("/hello")
 async def root():
-    """
-    Handles GET requests to the root endpoint.
-
-    Returns:
-        dict: A dictionary containing a greeting message.
-    """
-
     return {"message": "Hello World!!"}
 
 app.include_router(question_router.router)
@@ -63,6 +64,7 @@ app.include_router(fileupload_router.router)
 app.include_router(dayoff_router.router)
 app.include_router(push_router.router)
 app.include_router(alert_router.router)
+app.include_router(ws_router.router)
 
 
 

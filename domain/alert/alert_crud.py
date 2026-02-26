@@ -20,7 +20,10 @@ def get_active_alerts(db: Session):
             a.position = 'top'
     return alerts
 
-def create_alert(db: Session, alert_create: AlertCreate, user: User):
+from domain.ws.ws_service import manager
+import asyncio
+
+async def create_alert(db: Session, alert_create: AlertCreate, user: User):
     db_alert = Alert(
         message=alert_create.message,
         level=alert_create.level,
@@ -38,6 +41,13 @@ def create_alert(db: Session, alert_create: AlertCreate, user: User):
     )
     db.add(db_alert)
     db.commit()
+    
+    # 🔔 실시간 웹소켓 알림 전송 (새 알림이 있음을 모든 클라이언트에 알림)
+    try:
+        await manager.broadcast({"type": "new_alert"})
+    except Exception as e:
+        print(f"WebSocket broadcast error: {e}")
+        
     return db_alert
 
 def delete_alert(db: Session, db_alert: Alert):
@@ -47,7 +57,14 @@ def delete_alert(db: Session, db_alert: Alert):
 def get_alert(db: Session, alert_id: int):
     return db.query(Alert).filter(Alert.id == alert_id).first()
 
-def toggle_alert(db: Session, db_alert: Alert):
+async def toggle_alert(db: Session, db_alert: Alert):
     db_alert.is_active = not db_alert.is_active
     db.commit()
+    
+    # 활성 상태가 변경되었으므로 갱신 신호 발송
+    try:
+        await manager.broadcast({"type": "new_alert"})
+    except Exception as e:
+        print(f"WebSocket broadcast error: {e}")
+        
     return db_alert
