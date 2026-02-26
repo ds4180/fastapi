@@ -86,5 +86,15 @@ class QuestionReaction(Base):
     question_id = Column(Integer, ForeignKey('question.id'), primary_key=True)
     reaction_type = Column(String, nullable=False) # 'like', 'dislike', 'soso'
 
-    user = relationship("User", backref="reactions")
     question = relationship("Question", back_populates="reactions")
+
+class PushSubscription(Base):
+    __tablename__ = "push_subscription"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True) # 알림을 받는 유저
+    endpoint = Column(String, unique=True, nullable=False) # 푸시 서버 주소 (중복 허용 안함)
+    p256dh = Column(String, nullable=False) # 브라우저 공개키
+    auth = Column(String, nullable=False) # 인증 시크릿
+    
+    user = relationship("User", backref="push_subscriptions")
