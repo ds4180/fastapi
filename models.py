@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, UniqueConstraint, Boolean, Table
 from sqlalchemy.orm import relationship 
+from datetime import datetime
 
 from database import Base
 
@@ -123,3 +124,25 @@ class Alert(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True) # 작성 관리자
 
     user = relationship("User", backref="created_alerts")
+
+class UserSession(Base):
+    """
+    접속 로그 및 세션 슬롯 관리 테이블.
+    - device_category: MOBILE(폰) / WORKSPACE(PC, 패드)
+    - status: ACTIVE(접속중), KICKED_OUT(밀려남), LOGGED_OUT(로그아웃)
+    """
+    __tablename__ = "user_session"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    session_key = Column(String, unique=True, nullable=False, index=True) # JWT의 JTI(고유아이디)
+    device_category = Column(String, nullable=False, index=True)          # MOBILE / WORKSPACE
+    status = Column(String, default="ACTIVE", index=True)                # ACTIVE, KICKED_OUT, LOGGED_OUT
+    device_name = Column(String, nullable=True)                          # "iPhone 15", "Windows Chrome"
+    ip_address = Column(String, nullable=True)
+    login_at = Column(DateTime, default=datetime.now, index=True)
+    logout_at = Column(DateTime, nullable=True)
+    last_activity = Column(DateTime, default=datetime.now, index=True)   # 좀비 세션 체크용
+
+    user = relationship("User", backref="sessions")
+    

@@ -1,5 +1,6 @@
 from pydantic import BaseModel, field_validator, EmailStr, constr
 from pydantic_core.core_schema import FieldValidationInfo
+from datetime import datetime
 
 
 class UserCreate(BaseModel):
@@ -44,4 +45,19 @@ class User(BaseModel):
 
 class UserList(BaseModel):
     users: list[User]
+
+class UserSessionResponse(BaseModel):
+    id: int
+    user_id: int
+    username: str
+    device_category: str
+    status: str
+    device_name: str | None
+    ip_address: str | None
+    login_at: datetime
+    logout_at: datetime | None
+    last_activity: datetime
+
+    class Config:
+        from_attributes = True
     

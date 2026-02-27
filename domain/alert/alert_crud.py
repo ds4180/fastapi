@@ -21,9 +21,11 @@ def get_active_alerts(db: Session):
     return alerts
 
 from domain.ws.ws_service import manager
+from domain.push import push_service
 import asyncio
+from fastapi import BackgroundTasks
 
-async def create_alert(db: Session, alert_create: AlertCreate, user: User):
+async def create_alert(db: Session, alert_create: AlertCreate, user: User, background_tasks: BackgroundTasks):
     db_alert = Alert(
         message=alert_create.message,
         level=alert_create.level,
@@ -47,6 +49,15 @@ async def create_alert(db: Session, alert_create: AlertCreate, user: User):
         await manager.broadcast({"type": "new_alert"})
     except Exception as e:
         print(f"WebSocket broadcast error: {e}")
+
+    # 🚨 Level 5 (비상 점유) 알림일 경우 웹 푸시 자동 발송
+    if db_alert.level == 5:
+        try:
+            # 푸시 발송은 오래 걸릴 수 있으므로 백그라운드 태스크로 처리합니다.
+            # db 세션 대신 None을 전달하여 태스크 내에서 새 세션을 생성하게 합니다.
+            background_tasks.add_task(push_service.send_push_to_all, None, f"[긴급] {db_alert.message}")
+        except Exception as e:
+            print(f"Push notification error: {e}")
         
     return db_alert
 
