@@ -1,6 +1,7 @@
-from pydantic import BaseModel, field_validator, EmailStr, constr
+from pydantic import BaseModel, field_validator, EmailStr
 from pydantic_core.core_schema import FieldValidationInfo
 from datetime import datetime
+from typing import Optional
 
 
 class UserCreate(BaseModel):
@@ -41,7 +42,11 @@ class RefreshToken(BaseModel):
 class User(BaseModel):
     id: int
     username: str
-    email: EmailStr
+    email: Optional[str] = None  # 필수 해제
+    rank_level: int = 0
+
+    class Config:
+        from_attributes = True
 
 class UserList(BaseModel):
     users: list[User]
@@ -52,12 +57,11 @@ class UserSessionResponse(BaseModel):
     username: str
     device_category: str
     status: str
-    device_name: str | None
-    ip_address: str | None
+    device_name: Optional[str] = None
+    ip_address: Optional[str] = None
     login_at: datetime
-    logout_at: datetime | None
+    logout_at: Optional[datetime] = None
     last_activity: datetime
 
     class Config:
         from_attributes = True
-    

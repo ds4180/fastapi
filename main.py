@@ -24,6 +24,9 @@ async def lifespan(app: FastAPI):
     yield
     # 애플리케이션 종료 시: 필요하면 여기에 정리 로직 추가
 
+from domain.v1.board import board_router as v1_board_router
+from domain.v1.admin import admin_router as v1_admin_router
+
 app = FastAPI(lifespan=lifespan)
 
 # 정적 파일(이미지 등) 서빙 설정
@@ -65,6 +68,8 @@ app.include_router(dayoff_router.router)
 app.include_router(push_router.router)
 app.include_router(alert_router.router)
 app.include_router(ws_router.router)
+app.include_router(v1_board_router.router)
+app.include_router(v1_admin_router.router)
 
 
 
