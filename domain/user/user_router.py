@@ -25,6 +25,14 @@ ALGORITHM = "HS256"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/users/login")
 
+@router.post("/create", status_code=status.HTTP_204_NO_CONTENT)
+def user_create(_user_create: user_schema.UserCreate, db: Session = Depends(get_db)):
+    user = user_crud.get_existing_user(db, user_create=_user_create)
+    if user:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="이미 존재하는 사용자입니다.")
+    user_crud.create_user(db, user_create=_user_create)
+
 @router.post("/login", response_model=user_schema.TokenResponse)
 def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(),
                            device_category: str = "WORKSPACE", # MOBILE 또는 WORKSPACE (기본값)
@@ -81,9 +89,17 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(),
     }
     access_token = jwt.encode(access_token_data, SECRET_KEY, algorithm=ALGORITHM)
 
+    refresh_token_data = {
+        "sub": user.username,
+        "jti": jti, # 리프레시 토큰도 같은 JTI를 공유하여 세션 묶음
+        "category": device_category,
+        "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    }
+    refresh_token = jwt.encode(refresh_token_data, SECRET_KEY, algorithm=ALGORITHM)
+
     return {
         "access_token": access_token,
-        "refresh_token": "not_used_in_this_flow", # 단순화를 위해 일단 고정값
+        "refresh_token": refresh_token,
         "token_type": "bearer",
         "username": user.username
     }
@@ -126,6 +142,49 @@ def get_current_user(token: str = Depends(oauth2_scheme),
     except JWTError:
         raise credentials_exception
 
+@router.post("/refresh", response_model=user_schema.Token)
+def refresh_access_token(refresh_token: user_schema.RefreshToken, db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(refresh_token.refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        jti: str = payload.get("jti")
+        category: str = payload.get("category")
+
+        if username is None or jti is None or category is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+        
+        user = user_crud.get_user(db, username=username)
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+        # 🚨 Redis 세션 검증 (밀려났는지 확인)
+        redis_key = f"session:{user.id}:{category}"
+        active_jti = rd.get(redis_key)
+        
+        if active_jti is None or active_jti != jti:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="세션이 만료되었거나 다른 기기에서 로그인되었습니다.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # 새로운 액세스 토큰 생성
+        access_token_data = {
+            "sub": user.username,
+            "jti": jti,
+            "category": category,
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        }
+        new_access_token = jwt.encode(access_token_data, SECRET_KEY, algorithm=ALGORITHM)
+
+        return {
+            "access_token": new_access_token,
+            "token_type": "bearer",
+            "username": user.username
+        }
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
+
 def get_current_user_optional(token: str = Depends(oauth2_scheme),
                               db: Session = Depends(get_db)):
     if not token:
@@ -139,6 +198,33 @@ def get_current_user_optional(token: str = Depends(oauth2_scheme),
         return None
     else:
         return user_crud.get_user(db, username=username)
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(db: Session = Depends(get_db),
+           current_user: User = Depends(get_current_user),
+           token: str = Depends(oauth2_scheme)):
+    """
+    현재 기기의 로그아웃을 처리하고 Redis 세션 및 DB 상태를 정리합니다.
+    """
+    try:
+        # 토큰에서 세션 정보 추출
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        jti = payload.get("jti")
+        category = payload.get("category")
+
+        # 1. Redis 세션 삭제
+        redis_key = f"session:{current_user.id}:{category}"
+        rd.delete(redis_key)
+
+        # 2. DB 세션 상태 업데이트 (LOGOUT)
+        db.query(UserSession).filter(UserSession.session_key == jti).update({
+            "status": "LOGOUT",
+            "logout_at": datetime.now()
+        })
+        db.commit()
+    except Exception as e:
+        print(f"Logout processing error: {e}")
+        # 에러가 나더라도 클라이언트 로그아웃을 방해하지 않기 위해 예외만 로깅
+
 @router.get("/sessions", response_model=list[user_schema.UserSessionResponse])
 def session_list(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
