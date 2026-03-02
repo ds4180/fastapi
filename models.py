@@ -1,11 +1,12 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, UniqueConstraint, Boolean, Table, JSON
-from sqlalchemy.orm import relationship, backref 
+from sqlalchemy.orm import relationship, backref
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 
 from database import Base
 
-# --- Legacy v0 Models (Keep as is) ---
+# --- M2M 및 관계 테이블 ---
+
 question_read_user = Table(
     'question_read_user',
     Base.metadata,
@@ -13,164 +14,57 @@ question_read_user = Table(
     Column('question_id', Integer, ForeignKey('question.id'), primary_key=True)
 )
 
+post_tag = Table(
+    'post_tag',
+    Base.metadata,
+    Column('post_id', Integer, ForeignKey('post.id'), primary_key=True),
+    Column('tag_id', Integer, ForeignKey('tag.id'), primary_key=True)
+)
+
+# --- Core Models (User & Session) ---
+
 class User(Base):
     __tablename__ = "users"
-
     id = Column(Integer, primary_key=True)
     username = Column(String, unique=True, nullable=False)
     password = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
     real_name = Column(String, nullable=True)
     phone = Column(String, nullable=True)
-    
-    # Relationships
+
     questions = relationship("Question", back_populates="user")
     answers = relationship("Answer", back_populates="user")
     dayoffs = relationship("DayOff", back_populates="user")
-    
-    # CMS v1 Relationships
     profile = relationship("UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
     posts = relationship("Post", back_populates="user")
     comments = relationship("Comment", back_populates="user")
     read_histories = relationship("PostRead", back_populates="user")
 
-    @property
     def rank(self):
-        """프로필에서 rank_level을 가져오거나 기본값(0) 반환"""
         return self.profile.rank_level if self.profile else 0
 
     @property
     def role(self):
-        """계산된 Role 문자열 반환 (BoardConfig의 JSON 키와 매칭용)"""
-        if self.rank == 0:
-            return "ROLE_DRIVER"
-        if self.rank == 3:
-            return "ROLE_ADMIN"
-        return f"ROLE_STAFF_L{self.rank}"
-
-    def get_scope(self, board_config, action="read"):
-        """게시판 설정에서 나의 권한 범위(OWN, GLOBAL, NONE)를 조회"""
-        perms = board_config.perm_read if action == "read" else board_config.perm_write
-        if not perms:
-            return "NONE"
-        return perms.get(self.role, "NONE")
+        r = self.rank()
+        if r == 0: return "ROLE_GUEST"
+        if r == 4: return "ROLE_ADMIN"
+        return f"ROLE_STAFF_L{r}"
 
 class UserProfile(Base):
-    """사용자 업무 상세 정보 및 권한 레벨 관리 (1:1 relationship with User)"""
     __tablename__ = "user_profiles"
-
     user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
-    rank_level = Column(Integer, default=0)       # 0:운전원, 1:실무, 2:관리, 3:최고관리
+    rank_level = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
-    employee_no = Column(String, nullable=True)    # 사번
-    resident_no = Column(String, nullable=True)    # 주민번호 (양방향 암호화 필요)
+    employee_no = Column(String, nullable=True)
+    resident_no = Column(String, nullable=True)
     joined_date = Column(Date, nullable=True)
     bank_name = Column(String, nullable=True)
     account_no = Column(String, nullable=True)
     admin_memo = Column(Text, nullable=True)
-
     user = relationship("User", back_populates="profile")
-
-class Question(Base):
-    __tablename__ ="question"
-
-    id = Column(Integer, primary_key=True)
-    subject = Column(String, nullable=False)
-    content = Column(Text, nullable=False)
-    create_date = Column(DateTime, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    user = relationship("User", back_populates="questions")
-    answers = relationship("Answer", back_populates="question", cascade="all, delete-orphan")
-    modify_date = Column(DateTime, nullable=True)
-    is_deleted = Column(Boolean, default=False, nullable=False)
-    delete_date = Column(DateTime, nullable=True)
-    read_users = relationship("User", secondary=question_read_user, backref="read_questions")
-    reactions = relationship("QuestionReaction", back_populates="question", cascade="all, delete-orphan")
-    images = relationship("QuestionImage", back_populates="question", cascade="all, delete-orphan")
-
-class QuestionImage(Base) :
-    __tablename__ = "question_image"
-    id = Column(Integer, primary_key=True)
-    filename = Column(String, nullable=False)
-    original_name = Column(String, nullable=False)
-    thumbnail_filename = Column(String, nullable=True)
-    question_id = Column(Integer, ForeignKey('question.id'))
-
-    question = relationship("Question", back_populates="images")
-
-class Answer(Base):
-    __tablename__ = "answer"
-
-    id = Column(Integer, primary_key=True)
-    content = Column(Text, nullable=False)
-    create_date = Column(DateTime, nullable=False)
-    question_id = Column(Integer, ForeignKey('question.id'))
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    question = relationship("Question", back_populates="answers")
-    user = relationship("User", back_populates="answers")
-    modify_date = Column(DateTime, nullable=True)
-
-class DayOff(Base):
-    __tablename__ = "dayoff"
-
-    id = Column(Integer, primary_key=True)
-    date = Column(Date, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    type = Column(String, nullable=False)
-    status = Column(String, nullable=False)
-    category = Column(String, nullable=True)
-    memo = Column(Text, nullable=True)
-    create_date = Column(DateTime, nullable=False)
-    
-    user = relationship("User", back_populates="dayoffs")
-
-    __table_args__ = (
-        UniqueConstraint('user_id', 'date', name='uq_user_dayoff_date'),
-    )
-
-class QuestionReaction(Base):
-    __tablename__ = 'question_reaction'
-    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
-    question_id = Column(Integer, ForeignKey('question.id'), primary_key=True)
-    reaction_type = Column(String, nullable=False) # 'like', 'dislike', 'soso'
-
-    question = relationship("Question", back_populates="reactions")
-
-class PushSubscription(Base):
-    __tablename__ = "push_subscription"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True) # 알림을 받는 유저
-    endpoint = Column(String, unique=True, nullable=False) # 푸시 서버 주소 (중복 허용 안함)
-    p256dh = Column(String, nullable=False) # 브라우저 공개키
-    auth = Column(String, nullable=False) # 인증 시크릿
-    
-    user = relationship("User", backref="push_subscriptions")
-
-class Alert(Base):
-    __tablename__ = "alert"
-
-    id = Column(Integer, primary_key=True)
-    message = Column(Text, nullable=False)
-    level = Column(Integer, default=1)
-    style = Column(String, default="info")
-    position = Column(String, default="top")
-    route = Column(String, nullable=True)
-    redirect_url = Column(String, nullable=True)
-    is_active = Column(Boolean, default=True)
-    start_date = Column(DateTime, nullable=True)
-    end_date = Column(DateTime, nullable=True)
-    target_users = Column(Text, nullable=True)
-    confirm_text = Column(String, default="확인하였습니다")
-    reset_sec = Column(Integer, default=0)
-    create_date = Column(DateTime, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-
-    user = relationship("User", backref="created_alerts")
 
 class UserSession(Base):
     __tablename__ = "user_session"
-
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     session_key = Column(String, unique=True, nullable=False, index=True)
@@ -181,131 +75,189 @@ class UserSession(Base):
     login_at = Column(DateTime, default=datetime.now, index=True)
     logout_at = Column(DateTime, nullable=True)
     last_activity = Column(DateTime, default=datetime.now, index=True)
-
     user = relationship("User", backref="sessions")
 
-# --- CMS v1 Models (New Construction) ---
+# --- CMS Core ---
 
-# Table-based M2M: Tags (Simple mapping)
-post_tag = Table(
-    'post_tag',
-    Base.metadata,
-    Column('post_id', Integer, ForeignKey('post.id'), primary_key=True),
-    Column('tag_id', Integer, ForeignKey('tag.id'), primary_key=True)
-)
+class SystemConfig(Base):
+    __tablename__ = "system_config"
+    key = Column(String, primary_key=True, index=True)
+    value = Column(JSONB, nullable=False)
+    description = Column(String, nullable=True)
+    updated_date = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class Menu(Base):
+    __tablename__ = "menu"
+    id = Column(Integer, primary_key=True)
+    parent_id = Column(Integer, ForeignKey("menu.id"), nullable=True)
+    title = Column(String, nullable=False)
+    icon_name = Column(String, nullable=True)
+    icon_color = Column(String, nullable=True)
+    link_type = Column(String, default="URL")
+    external_url = Column(String, nullable=True)
+    order = Column(Integer, default=0)
+    is_visible = Column(Boolean, default=True)
+    min_rank = Column(Integer, default=0)
+    sub_menus = relationship("Menu", backref=backref("parent", remote_side=[id]), cascade="all, delete-orphan")
+
+# --- CMS Board & Post ---
 
 class BoardConfig(Base):
-    """게시판 설정: CMS의 설계도"""
     __tablename__ = "board_config"
-
     id = Column(Integer, primary_key=True)
-    slug = Column(String, unique=True, nullable=False, index=True) # URL 경로
-    name = Column(String, nullable=False)                         # 보드 명칭
-    description = Column(String, nullable=True)                  
-    layout_type = Column(String, default="list")                 # list, gallery, split_view, landing
+    slug = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    layout_type = Column(String, default="list")
+    
+    # 레거시와 호환성 유지를 위해 필드 보존
     items_per_page = Column(Integer, default=10)
+    fields_def = Column(JSONB, default=list) 
+    options = Column(JSONB, default=dict)
     
-    # 동적 필드 및 모듈 옵션 (JSONB)
-    fields_def = Column(JSONB, default=list)                     # 커스텀 필드 정의
-    options = Column(JSONB, default=dict)                        # 기능 스위치 (comment, push, ws 등)
-    
-    # 권한 설정 (JSONB)
-    perm_read = Column(JSONB, default=dict)                      # 읽기 권한
-    perm_write = Column(JSONB, default=dict)                     # 쓰기 권한
-    
+    perm_read = Column(JSONB, default={"ROLE_GUEST": "GLOBAL"})
+    perm_write = Column(JSONB, default={"ROLE_USER": "GLOBAL"})
     is_active = Column(Boolean, default=True)
-    create_date = Column(DateTime, default=datetime.now)
-    
-    posts = relationship("Post", back_populates="board")
+    create_date = Column(DateTime, nullable=False, default=datetime.now)
+
+    # Post 모델과의 양방향 관계 설정
+    posts = relationship("Post", back_populates="board", cascade="all, delete-orphan")
 
 class Post(Base):
-    """통합 콘텐츠: CMS의 모든 글/페이지 본체"""
     __tablename__ = "post"
-
     id = Column(Integer, primary_key=True)
     board_id = Column(Integer, ForeignKey("board_config.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     title = Column(String, nullable=False)
-    content_json = Column(JSONB, nullable=False)                 # TipTap JSON 본문
-    extra_data = Column(JSONB, default=dict)                     # 보드별 특수 데이터
+    content = Column(Text, nullable=True)
+    content_json = Column(JSONB, nullable=False) # TipTap JSON
+    extra_data = Column(JSONB, default=dict)
     
-    status = Column(String, default="published")                 # published, draft, private, deleted
+    status = Column(String, default="published")
     view_count = Column(Integer, default=0)
     create_date = Column(DateTime, default=datetime.now)
     modify_date = Column(DateTime, nullable=True)
-    
-    # Relationships
-    board = relationship("BoardConfig", back_populates="posts")
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    delete_date = Column(DateTime, nullable=True)
+
     user = relationship("User", back_populates="posts")
+    board = relationship("BoardConfig", back_populates="posts")
     comments = relationship("Comment", back_populates="post", cascade="all, delete-orphan")
     tags = relationship("Tag", secondary=post_tag, backref="posts")
     read_histories = relationship("PostRead", back_populates="post", cascade="all, delete-orphan")
 
-class Comment(Base):
-    """통합 댓글: CMS 모든 포스트의 댓글"""
-    __tablename__ = "comment"
+class Tag(Base):
+    __tablename__ = "tag"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True, nullable=False)
+    color = Column(String, nullable=True)
 
+class Comment(Base):
+    __tablename__ = "comment"
     id = Column(Integer, primary_key=True)
     post_id = Column(Integer, ForeignKey("post.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    parent_id = Column(Integer, ForeignKey("comment.id"), nullable=True) # 대댓글용
-    
+    parent_id = Column(Integer, ForeignKey("comment.id"), nullable=True)
     content = Column(Text, nullable=False)
     create_date = Column(DateTime, default=datetime.now)
     modify_date = Column(DateTime, nullable=True)
-    
+
     post = relationship("Post", back_populates="comments")
     user = relationship("User", back_populates="comments")
-    replies = relationship("Comment", backref="parent", remote_side=[id])
+    sub_comments = relationship("Comment", backref=backref("parent", remote_side=[id]), cascade="all, delete-orphan")
 
 class PostRead(Base):
-    """클래스형 M2M: 읽음 이력 및 조회 통계"""
     __tablename__ = "post_read"
-
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     post_id = Column(Integer, ForeignKey("post.id"), nullable=False)
-    
     first_read_at = Column(DateTime, default=datetime.now)
     last_read_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     read_count = Column(Integer, default=1)
-    device_category = Column(String, nullable=True)              # MOBILE / WORKSPACE
+    device_category = Column(String, nullable=True)
 
     user = relationship("User", back_populates="read_histories")
     post = relationship("Post", back_populates="read_histories")
+    __table_args__ = (UniqueConstraint('user_id', 'post_id', name='uq_user_post_read'),)
 
-    __table_args__ = (
-        UniqueConstraint('user_id', 'post_id', name='uq_user_post_read'),
-    )
+# --- Legacy Question/Answer ---
 
-class Tag(Base):
-    """태그 마스터: 분류용 #태그 사전"""
-    __tablename__ = "tag"
-
+class Question(Base):
+    __tablename__ ="question"
     id = Column(Integer, primary_key=True)
-    name = Column(String, unique=True, nullable=False)
-    color = Column(String, default="#6c757d")                    # UI용 색상
+    subject = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    create_date = Column(DateTime, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    modify_date = Column(DateTime, nullable=True)
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    delete_date = Column(DateTime, nullable=True)
+    user = relationship("User", back_populates="questions")
+    answers = relationship("Answer", back_populates="question", cascade="all, delete-orphan")
+    read_users = relationship("User", secondary=question_read_user, backref="read_questions")
+    reactions = relationship("QuestionReaction", back_populates="question", cascade="all, delete-orphan")
+    images = relationship("QuestionImage", back_populates="question", cascade="all, delete-orphan")
 
-class Menu(Base):
-    """메뉴 관리: 사이트 네비게이션 트리"""
-    __tablename__ = "menu"
-
+class Answer(Base):
+    __tablename__ = "answer"
     id = Column(Integer, primary_key=True)
-    parent_id = Column(Integer, ForeignKey("menu.id"), nullable=True)
-    title = Column(String, nullable=False)
-    icon_name = Column(String, nullable=True)                    # Iconify 아이콘 문자열
-    icon_color = Column(String, nullable=True)
+    question_id = Column(Integer, ForeignKey("question.id"))
+    content = Column(Text, nullable=False)
+    create_date = Column(DateTime, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     
-    link_type = Column(String, default="BOARD")                  # BOARD, PAGE, URL, DIVIDER
-    board_id = Column(Integer, ForeignKey("board_config.id"), nullable=True)
-    page_id = Column(Integer, ForeignKey("post.id"), nullable=True)
-    external_url = Column(String, nullable=True)
-    
-    order = Column(Integer, default=0)
-    is_visible = Column(Boolean, default=True)
-    min_rank = Column(Integer, default=0)                        # 노출 최소 권한 (0~3)
+    # 중복된 backref 제거 후 back_populates 사용
+    question = relationship("Question", back_populates="answers")
+    user = relationship("User", back_populates="answers")
 
-    sub_menus = relationship("Menu", backref=backref("parent", remote_side=[id]), cascade="all, delete-orphan")
+class QuestionReaction(Base):
+    __tablename__ = "question_reaction"
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    question_id = Column(Integer, ForeignKey("question.id"), primary_key=True)
+    reaction_type = Column(String, nullable=False)
+    question = relationship("Question", back_populates="reactions")
 
-    
+class QuestionImage(Base):
+    __tablename__ = "question_image"
+    id = Column(Integer, primary_key=True)
+    filename = Column(String, nullable=False)
+    original_name = Column(String, nullable=False)
+    question_id = Column(Integer, ForeignKey("question.id"))
+    thumbnail_filename = Column(String, nullable=True)
+    question = relationship("Question", back_populates="images")
+
+# --- Others ---
+
+class DayOff(Base):
+    __tablename__ = "dayoff"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=False)
+    reason = Column(Text, nullable=True)
+    status = Column(String, default="pending")
+    user = relationship("User", back_populates="dayoffs")
+
+class Alert(Base):
+    __tablename__ = "alert"
+    id = Column(Integer, primary_key=True)
+    message = Column(Text, nullable=False)
+    level = Column(Integer, default=1)
+    style = Column(String, default="info")
+    position = Column(String, default="top")
+    route = Column(String, nullable=True)
+    redirect_url = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    start_date = Column(DateTime, nullable=True)
+    end_date = Column(DateTime, nullable=True)
+    create_date = Column(DateTime, nullable=False, default=datetime.now)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user = relationship("User", backref="created_alerts")
+
+class PushSubscription(Base):
+    __tablename__ = "push_subscription"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    endpoint = Column(Text, nullable=False, unique=True)
+    p256dh = Column(String, nullable=False)
+    auth = Column(String, nullable=False)
