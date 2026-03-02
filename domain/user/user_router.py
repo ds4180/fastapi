@@ -20,7 +20,6 @@ router = APIRouter(
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 
 SECRET_KEY = "cceb75393b383115054b2195c59b3d4a5a948c8c530182855f0610b6a59083ad" 
 ALGORITHM = "HS256"
-MAX_SESSIONS_PER_CATEGORY = 2
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login", auto_error=False)
 
@@ -62,16 +61,17 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(),
     redis_key = f"session:{user.id}:{device_category}"
 
     try:
-        if rd.exists(redis_key) and rd.type(redis_key) != b'set':
+        # 🚨 [안정성 추가] Redis 타입이 String이 아니면 삭제 (WRONGTYPE 에러 방지)
+        rtype = rd.type(redis_key)
+        if rtype not in [b'string', 'string', b'none', 'none']:
             rd.delete(redis_key)
-        rd.sadd(redis_key, jti)
-        rd.expire(redis_key, 60*60*24*7)
 
-        all_jtis = rd.smembers(redis_key)
-        if len(all_jtis) > MAX_SESSIONS_PER_CATEGORY:
-            removed_jti = rd.spop(redis_key)
-            if removed_jti:
-                db.query(UserSession).filter(UserSession.session_key == removed_jti.decode()).update({"status": "KICKED_OUT", "logout_at": datetime.now()})
+        # 1. DB 로그 기록 및 기존 세션 밀어내기
+        db.query(UserSession).filter(
+            UserSession.user_id == user.id,
+            UserSession.device_category == device_category,
+            UserSession.status == "ACTIVE"
+        ).update({"status": "KICKED_OUT", "logout_at": datetime.now()})
 
         db_session = UserSession(
             user_id=user.id, session_key=jti, device_category=device_category,
@@ -79,6 +79,10 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(),
         )
         db.add(db_session)
         db.commit()
+
+        # 2. Redis 슬롯 점유 (단일 값으로 덮어쓰기)
+        rd.set(redis_key, jti, ex=60*60*24*7)
+        
     except Exception as e:
         print(f"Session error: {e}")
 
@@ -101,8 +105,25 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
         username, jti, category = payload.get("sub"), payload.get("jti"), payload.get("category")
         user = user_crud.get_user(db, username=username)
         if not user: raise HTTPException(status_code=401)
-        if not rd.sismember(f"session:{user.id}:{category}", jti):
+        
+        # 🚨 [중요] Redis 단일 세션 검증 (밀려났는지 확인)
+        redis_key = f"session:{user.id}:{category}"
+        
+        # 타입 체크 (WRONGTYPE 방지)
+        rtype = rd.type(redis_key)
+        if rtype not in [b'string', 'string']:
+            if rtype not in [b'none', 'none']:
+                rd.delete(redis_key)
             raise HTTPException(status_code=401, detail="다른 기기에서 로그인하여 접속이 종료되었습니다.")
+            
+        active_jti = rd.get(redis_key)
+        
+        # bytes 대응 및 비교
+        active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
+        
+        if active_jti_str is None or active_jti_str != jti:
+            raise HTTPException(status_code=401, detail="다른 기기에서 로그인하여 접속이 종료되었습니다.")
+            
         return user
     except JWTError:
         raise HTTPException(status_code=401, detail="인증이 만료되었습니다.")
@@ -117,7 +138,18 @@ def get_current_user_optional(token: Optional[str] = Depends(oauth2_scheme),
         username, jti, category = payload.get("sub"), payload.get("jti"), payload.get("category")
         user = user_crud.get_user(db, username=username)
         if not user: return None
-        if not rd.sismember(f"session:{user.id}:{category}", jti): return None
+        
+        redis_key = f"session:{user.id}:{category}"
+        
+        # 타입 체크 (WRONGTYPE 방지)
+        rtype = rd.type(redis_key)
+        if rtype not in [b'string', 'string']:
+            return None
+            
+        active_jti = rd.get(redis_key)
+        active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
+        
+        if active_jti_str != jti: return None
         return user
     except: return None
 
@@ -134,13 +166,31 @@ def session_list(db: Session = Depends(get_db), current_user: User = Depends(get
 def kick_user_session(session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
     if user_rank < 4: raise HTTPException(status_code=403)
-    db_session = db.query(UserSession).filter(UserSession.id == session_id).first()
-    if db_session:
-        rd.srem(f"session:{db_session.user_id}:{db_session.device_category}", db_session.session_key)
-        db_session.status = "KICKED_OUT"
-        db.commit()
+    
+    result = user_crud.kick_session(db, session_id=session_id)
+    if result:
         return {"message": "success"}
     return {"error": "Session not found"}
+
+@router.post("/logout")
+def logout(token: Optional[str] = Depends(oauth2_scheme),
+           access_token: Optional[str] = Cookie(None),
+           db: Session = Depends(get_db)):
+    final_token = token or access_token
+    if not final_token: return {"message": "success"}
+    try:
+        payload = jwt.decode(final_token, SECRET_KEY, algorithms=[ALGORITHM])
+        jti, uid, cat = payload.get("jti"), payload.get("sub"), payload.get("category")
+        user = user_crud.get_user(db, username=uid)
+        if user:
+            # Redis 삭제 및 DB 업데이트
+            rd.delete(f"session:{user.id}:{cat}")
+            db.query(UserSession).filter(UserSession.session_key == jti).update({
+                "status": "LOGOUT", "logout_at": datetime.now()
+            })
+            db.commit()
+    except: pass
+    return {"message": "success"}
 
 @router.get("/list", response_model=user_schema.UserList)
 def user_list(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

@@ -94,6 +94,8 @@ class Menu(Base):
     icon_name = Column(String, nullable=True)
     icon_color = Column(String, nullable=True)
     link_type = Column(String, default="URL")
+    board_id = Column(Integer, ForeignKey("board_config.id"), nullable=True)
+    page_id = Column(Integer, nullable=True)
     external_url = Column(String, nullable=True)
     order = Column(Integer, default=0)
     is_visible = Column(Boolean, default=True)
@@ -145,6 +147,15 @@ class Post(Base):
     comments = relationship("Comment", back_populates="post", cascade="all, delete-orphan")
     tags = relationship("Tag", secondary=post_tag, backref="posts")
     read_histories = relationship("PostRead", back_populates="post", cascade="all, delete-orphan")
+    reactions = relationship("PostReaction", back_populates="post", cascade="all, delete-orphan")
+
+class PostReaction(Base):
+    __tablename__ = "post_reaction"
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    post_id = Column(Integer, ForeignKey("post.id"), primary_key=True)
+    reaction_type = Column(String, nullable=False) # 'like', 'dislike', 'soso'
+    post = relationship("Post", back_populates="reactions")
+    user = relationship("User", backref="post_reactions")
 
 class Tag(Base):
     __tablename__ = "tag"
@@ -156,7 +167,7 @@ class Comment(Base):
     __tablename__ = "comment"
     id = Column(Integer, primary_key=True)
     post_id = Column(Integer, ForeignKey("post.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     parent_id = Column(Integer, ForeignKey("comment.id"), nullable=True)
     content = Column(Text, nullable=False)
     create_date = Column(DateTime, default=datetime.now)
@@ -188,7 +199,7 @@ class Question(Base):
     subject = Column(String, nullable=False)
     content = Column(Text, nullable=False)
     create_date = Column(DateTime, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     modify_date = Column(DateTime, nullable=True)
     is_deleted = Column(Boolean, default=False, nullable=False)
     delete_date = Column(DateTime, nullable=True)
@@ -204,7 +215,7 @@ class Answer(Base):
     question_id = Column(Integer, ForeignKey("question.id"))
     content = Column(Text, nullable=False)
     create_date = Column(DateTime, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     # 중복된 backref 제거 후 back_populates 사용
     question = relationship("Question", back_populates="answers")
@@ -251,13 +262,13 @@ class Alert(Base):
     start_date = Column(DateTime, nullable=True)
     end_date = Column(DateTime, nullable=True)
     create_date = Column(DateTime, nullable=False, default=datetime.now)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     user = relationship("User", backref="created_alerts")
 
 class PushSubscription(Base):
     __tablename__ = "push_subscription"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     endpoint = Column(Text, nullable=False, unique=True)
     p256dh = Column(String, nullable=False)
     auth = Column(String, nullable=False)

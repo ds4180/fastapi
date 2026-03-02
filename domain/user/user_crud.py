@@ -11,7 +11,6 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 def get_session_list(db: Session, limit: int = 50):
     """최근 접속순으로 세션 목록 조회"""
     sessions = db.query(UserSession).join(User).order_by(UserSession.login_at.desc()).limit(limit).all()
-    # Pydantic 응답을 위해 username을 추가로 담아줍니다.
     for s in sessions:
         s.username = s.user.username
     return sessions
@@ -27,13 +26,22 @@ def kick_session(db: Session, session_id: int):
     db_session.logout_at = datetime.now()
     db.commit()
 
-    # 2. Redis에서 해당 슬롯 삭제 (즉시 차단)
-    # 현재 로그인 로직에서 session:{user_id}:{category} 키를 사용하고 있습니다.
-    # 만약 Redis에 저장된 jti가 이 세션의 jti와 같다면 삭제합니다.
+    # 2. Redis에서 해당 슬롯 삭제
     redis_key = f"session:{db_session.user_id}:{db_session.device_category}"
+    
+    # 타입 체크 (WRONGTYPE 방지)
+    rtype = rd.type(redis_key)
+    if rtype not in [b'string', 'string']:
+        if rtype not in [b'none', 'none']:
+            rd.delete(redis_key)
+        return db_session
+
     active_jti = rd.get(redis_key)
     
-    if active_jti == db_session.session_key:
+    # bytes 대응
+    active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
+    
+    if active_jti_str == db_session.session_key:
         rd.delete(redis_key)
         
     return db_session
@@ -49,8 +57,6 @@ def get_user(db: Session, username: str):
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
-
-
 
 def create_user(db: Session, user_create: UserCreate):
     db_user = User(username=user_create.username, 

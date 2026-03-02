@@ -52,3 +52,39 @@ class PostSimpleAdminSchema(BaseModel):
     
     class Config:
         from_attributes = True
+
+# --- BoardConfig Management ---
+
+class BoardConfigBase(BaseModel):
+    slug: str
+    name: str
+    description: Optional[str] = None
+    layout_type: str = "list"
+    items_per_page: int = 10
+    fields_def: List[Any] = []
+    options: Dict[str, Any] = {}
+    perm_read: Dict[str, Any] = {"ROLE_GUEST": "GLOBAL"}
+    perm_write: Dict[str, Any] = {"ROLE_USER": "GLOBAL"}
+    is_active: bool = True
+
+class BoardConfigCreate(BoardConfigBase):
+    pass
+
+class BoardConfigUpdate(BaseModel):
+    slug: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    layout_type: Optional[str] = None
+    items_per_page: Optional[int] = None
+    fields_def: Optional[List[Any]] = None
+    options: Optional[Dict[str, Any]] = None
+    perm_read: Optional[Dict[str, Any]] = None
+    perm_write: Optional[Dict[str, Any]] = None
+    is_active: Optional[bool] = None
+
+class BoardConfigAdminSchema(BoardConfigBase):
+    id: int
+    create_date: datetime
+
+    class Config:
+        from_attributes = True

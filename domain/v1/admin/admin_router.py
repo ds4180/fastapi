@@ -3,7 +3,11 @@ from sqlalchemy.orm import Session, joinedload
 from database import get_db
 from models import User, BoardConfig, Post, Menu, SystemConfig
 from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker, check_rank
-from domain.v1.admin.admin_schema import MenuCreate, MenuUpdate, MenuSchema, BoardSimpleSchema, PostSimpleAdminSchema
+from domain.v1.admin.admin_schema import (
+    MenuCreate, MenuUpdate, MenuSchema, 
+    BoardSimpleSchema, PostSimpleAdminSchema,
+    BoardConfigCreate, BoardConfigUpdate, BoardConfigAdminSchema
+)
 from typing import List, Optional, Any
 
 router = APIRouter(
@@ -116,6 +120,50 @@ def update_config(key: str, value: Any = Body(...), db: Session = Depends(get_db
 def get_public_configs(db: Session = Depends(get_db)):
     configs = db.query(SystemConfig).all()
     return {c.key: c.value for c in configs}
+
+# --- Board Configuration Management (게시판 설정 관리) ---
+
+@router.get("/boards", response_model=List[BoardConfigAdminSchema])
+def get_all_boards(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    """관리자용 전체 게시판 설정 목록"""
+    return db.query(BoardConfig).order_by(BoardConfig.id).all()
+
+@router.post("/boards", response_model=BoardConfigAdminSchema)
+def create_board_config(board_in: BoardConfigCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    """새 게시판 설정 생성"""
+    if db.query(BoardConfig).filter(BoardConfig.slug == board_in.slug).first():
+        raise HTTPException(status_code=400, detail="이미 존재하는 슬러그입니다.")
+    
+    db_board = BoardConfig(**board_in.dict())
+    db.add(db_board)
+    db.commit()
+    db.refresh(db_board)
+    return db_board
+
+@router.put("/boards/{board_id}", response_model=BoardConfigAdminSchema)
+def update_board_config(board_id: int, board_in: BoardConfigUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    """게시판 설정 수정"""
+    db_board = db.query(BoardConfig).filter(BoardConfig.id == board_id).first()
+    if not db_board:
+        raise HTTPException(status_code=404, detail="게시판 설정을 찾을 수 없습니다.")
+    
+    for key, value in board_in.dict(exclude_unset=True).items():
+        setattr(db_board, key, value)
+        
+    db.commit()
+    db.refresh(db_board)
+    return db_board
+
+@router.delete("/boards/{board_id}")
+def delete_board_config(board_id: int, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    """게시판 설정 삭제"""
+    db_board = db.query(BoardConfig).filter(BoardConfig.id == board_id).first()
+    if not db_board:
+        raise HTTPException(status_code=404, detail="게시판 설정을 찾을 수 없습니다.")
+    
+    db.delete(db_board)
+    db.commit()
+    return {"message": "success"}
 
 # --- Selection Lists ---
 

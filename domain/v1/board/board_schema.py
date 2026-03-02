@@ -27,9 +27,18 @@ class PostSimpleSchema(BaseModel):
     status: str
     view_count: int
     create_date: datetime
+    user_name: Optional[str] = None # 작성자 이름 추가
+    is_read: bool = False # 읽음 여부 (M2M)
+    like_count: int = 0
+    comment_count: int = 0
 
     class Config:
         from_attributes = True
+
+class PostListSchema(BaseModel):
+    total: int = 0
+    posts: List[PostSimpleSchema] = []
+    board: BoardConfigSchema
 
 class LandingPageResponse(BaseModel):
     config: Optional[BoardConfigSchema] = None
