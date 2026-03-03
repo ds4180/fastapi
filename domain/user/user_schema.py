@@ -42,11 +42,15 @@ class RefreshToken(BaseModel):
 class User(BaseModel):
     id: int
     username: str
-    email: Optional[str] = None  # 필수 해제
-    rank_level: int = 0
+    email: EmailStr # EmailStr로 타입 강화
+    rank_level: int = 0 # UserProfile에서 가져올 것임
 
     class Config:
         from_attributes = True
+        # UserProfile의 rank_level을 User 스키마의 rank_level로 매핑
+        model_computed_fields = {
+            'rank_level': (lambda user: user.rank() if user.profile else 0, False)
+        }
 
 class UserList(BaseModel):
     users: list[User]

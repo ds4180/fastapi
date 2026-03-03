@@ -39,8 +39,8 @@ class MenuSchema(MenuBase):
 
 # --- 유저 관리 스키마 (기존 유지) ---
 class UserProfileSchema(BaseModel):
-    rank_level: int
-    is_active: bool
+    rank_level: int = 0
+    is_active: bool = True
     employee_no: Optional[str] = None
     joined_date: Optional[date] = None
 

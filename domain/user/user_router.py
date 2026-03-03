@@ -184,6 +184,13 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
     except JWTError:
         raise HTTPException(status_code=401, detail="인증이 만료되었습니다.")
 
+@router.post("/create", response_model=user_schema.User, status_code=status.HTTP_201_CREATED)
+def create_user(user_create: user_schema.UserCreate, db: Session = Depends(get_db)):
+    db_user = user_crud.get_existing_user(db, user_create=user_create)
+    if db_user:
+        raise HTTPException(status_code=409, detail="이미 등록된 사용자입니다.")
+    return user_crud.create_user(db=db, user_create=user_create)
+
 def get_current_user_optional(token: Optional[str] = Depends(oauth2_scheme),
                               access_token: Optional[str] = Cookie(None),
                               db: Session = Depends(get_db)):

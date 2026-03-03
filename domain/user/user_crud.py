@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 from domain.user.user_schema import UserCreate
-from models import User, UserSession
+from models import User, UserSession, UserProfile # UserProfile 임포트 추가
 from redis_config import rd
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -59,11 +59,19 @@ def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
 def create_user(db: Session, user_create: UserCreate):
+    # 1. User 생성
     db_user = User(username=user_create.username, 
                    password=pwd_context.hash(user_create.password1),
                    email=user_create.email)
     db.add(db_user)
     db.commit()
+    db.refresh(db_user) # ID 할당을 위해 refresh
+
+    # 2. UserProfile 생성 (기본 Rank 0 부여)
+    db_profile = UserProfile(user_id=db_user.id) # rank_level은 default=0 적용
+    db.add(db_profile)
+    db.commit()
+    return db_user # 생성된 User 객체 반환
 
 def get_user_list(db: Session):
     return db.query(User).all()
