@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from models import User, BoardConfig, Post, Menu, SystemConfig
+from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig
 from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker, check_rank
 from domain.v1.admin.admin_schema import (
     MenuCreate, MenuUpdate, MenuSchema, 
     BoardSimpleSchema, PostSimpleAdminSchema,
-    BoardConfigCreate, BoardConfigUpdate, BoardConfigAdminSchema
+    BoardConfigCreate, BoardConfigUpdate, BoardConfigAdminSchema,
+    UserAdminSchema, UserRankUpdate
 )
 from typing import List, Optional, Any
 
@@ -15,7 +16,7 @@ router = APIRouter(
     tags=["admin_v1"]
 )
 
-# 편리한 최고 관리자 체크 의존성 (사용자 요청에 따라 Rank 4 기준)
+# 편리한 최고 관리자 체크 의존성 (Rank 4 기준)
 check_admin = check_rank(required_rank=4)
 
 @router.get("/dashboard")
@@ -34,6 +35,49 @@ def get_dashboard_summary(
         "post_count": post_count,
         "admin_name": admin.real_name or admin.username
     }
+
+# --- User Management (유저 관리) ---
+
+@router.get("/users", response_model=List[UserAdminSchema])
+def list_users(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """전체 유저 목록 조회 (관리자용)"""
+    return db.query(User).options(joinedload(User.profile)).all()
+
+@router.get("/users/{user_id}", response_model=UserAdminSchema)
+def get_user_detail(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """유저 상세 정보 조회"""
+    user = db.query(User).options(joinedload(User.profile)).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="유저를 찾을 수 없습니다.")
+    return user
+
+@router.put("/users/{user_id}/rank")
+def update_user_rank(
+    user_id: int,
+    rank_in: UserRankUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """유저의 Rank 등급 및 승인 상태 수정"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="유저를 찾을 수 없습니다.")
+    
+    if not user.profile:
+        # 프로필이 없는 유저라면 생성
+        user.profile = UserProfile(user_id=user.id)
+        db.add(user.profile)
+    
+    user.profile.rank_level = rank_in.rank_level
+    db.commit()
+    return {"message": "success", "username": user.username, "new_rank": rank_in.rank_level}
 
 # --- Menu Management (메뉴 관리) ---
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Cookie, Body
+from fastapi import APIRouter, Depends, HTTPException, Cookie, Body, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from starlette import status
@@ -17,7 +17,8 @@ router = APIRouter(
 )
 
 # JWT 및 세션 정책
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 # 합의 설정: 1시간
+REFRESH_TOKEN_EXPIRE_DAYS = 3     # 합의 설정: 3일
 SECRET_KEY = "cceb75393b383115054b2195c59b3d4a5a948c8c530182855f0610b6a59083ad" 
 ALGORITHM = "HS256"
 
@@ -30,9 +31,7 @@ class RankChecker:
     def __init__(self, required_rank: int):
         self.required_rank = required_rank
 
-    def __call__(self, current_user: User = Depends(get_db)): # 👈 아래 get_current_user를 직접 쓰기 위해 순서 조정
-        # 이 메소드는 내부에서 get_current_user를 직접 호출하지 않고 
-        # API 엔드포인트에서 Depends()로 엮어서 사용됩니다.
+    def __call__(self, current_user: User = Depends(get_db)):
         pass
 
 def check_rank(required_rank: int):
@@ -61,12 +60,10 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(),
     redis_key = f"session:{user.id}:{device_category}"
 
     try:
-        # 🚨 [안정성 추가] Redis 타입이 String이 아니면 삭제 (WRONGTYPE 에러 방지)
         rtype = rd.type(redis_key)
         if rtype not in [b'string', 'string', b'none', 'none']:
             rd.delete(redis_key)
 
-        # 1. DB 로그 기록 및 기존 세션 밀어내기
         db.query(UserSession).filter(
             UserSession.user_id == user.id,
             UserSession.device_category == device_category,
@@ -80,20 +77,87 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(),
         db.add(db_session)
         db.commit()
 
-        # 2. Redis 슬롯 점유 (단일 값으로 덮어쓰기)
-        rd.set(redis_key, jti, ex=60*60*24*7)
+        rd.set(redis_key, jti, ex=60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
         
     except Exception as e:
         print(f"Session error: {e}")
 
+    # Access Token 생성
     access_token_data = {
-        "sub": user.username, "jti": jti, "category": device_category,
+        "sub": user.username, "jti": jti, "category": device_category, "type": "access",
         "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     }
+    # Refresh Token 생성
+    refresh_token_data = {
+        "sub": user.username, "jti": jti, "category": device_category, "type": "refresh",
+        "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    }
+
     return {
         "access_token": jwt.encode(access_token_data, SECRET_KEY, algorithm=ALGORITHM),
-        "refresh_token": "not_used", "token_type": "bearer", "username": user.username
+        "refresh_token": jwt.encode(refresh_token_data, SECRET_KEY, algorithm=ALGORITHM),
+        "token_type": "bearer", 
+        "username": user.username
     }
+
+@router.post("/refresh", response_model=user_schema.TokenResponse)
+def refresh_access_token(request: Request,
+                         authorization: Optional[str] = Depends(oauth2_scheme),
+                         refresh_token_cookie: Optional[str] = Cookie(None, alias="refresh_token"),
+                         db: Session = Depends(get_db)):
+    """Refresh Token을 사용하여 새로운 Access Token 및 연장된 Refresh Token 발급"""
+    token = None
+    if authorization:
+        token = authorization
+    elif refresh_token_cookie:
+        token = refresh_token_cookie
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Refresh token is missing")
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        
+        username = payload.get("sub")
+        jti = payload.get("jti")
+        category = payload.get("category")
+        
+        user = user_crud.get_user(db, username=username)
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+
+        # 🚨 [중요] 세션 검증 (밀려났는지 확인)
+        redis_key = f"session:{user.id}:{category}"
+        active_jti = rd.get(redis_key)
+        active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
+        
+        if active_jti_str != jti:
+            raise HTTPException(status_code=401, detail="Session expired or kicked out")
+
+        # 활동 중이므로 Redis 세션 만료 시간을 다시 3일로 연장
+        rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
+
+        # 2. 새로운 Access Token 생성
+        access_token_data = {
+            "sub": user.username, "jti": jti, "category": category, "type": "access",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        }
+        # 3. 새로운 Refresh Token 생성 (Sliding Window: 만료 시간 재연장)
+        refresh_token_data = {
+            "sub": user.username, "jti": jti, "category": category, "type": "refresh",
+            "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        }
+
+        return {
+            "access_token": jwt.encode(access_token_data, SECRET_KEY, algorithm=ALGORITHM),
+            "refresh_token": jwt.encode(refresh_token_data, SECRET_KEY, algorithm=ALGORITHM),
+            "token_type": "bearer",
+            "username": user.username
+        }
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
 
 def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
                      access_token: Optional[str] = Cookie(None),
@@ -102,23 +166,15 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
     if not final_token: raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     try:
         payload = jwt.decode(final_token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") == "refresh":
+             raise HTTPException(status_code=401, detail="Access token required")
+
         username, jti, category = payload.get("sub"), payload.get("jti"), payload.get("category")
         user = user_crud.get_user(db, username=username)
         if not user: raise HTTPException(status_code=401)
         
-        # 🚨 [중요] Redis 단일 세션 검증 (밀려났는지 확인)
         redis_key = f"session:{user.id}:{category}"
-        
-        # 타입 체크 (WRONGTYPE 방지)
-        rtype = rd.type(redis_key)
-        if rtype not in [b'string', 'string']:
-            if rtype not in [b'none', 'none']:
-                rd.delete(redis_key)
-            raise HTTPException(status_code=401, detail="다른 기기에서 로그인하여 접속이 종료되었습니다.")
-            
         active_jti = rd.get(redis_key)
-        
-        # bytes 대응 및 비교
         active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
         
         if active_jti_str is None or active_jti_str != jti:
@@ -135,17 +191,13 @@ def get_current_user_optional(token: Optional[str] = Depends(oauth2_scheme),
     if not final_token: return None
     try:
         payload = jwt.decode(final_token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") == "refresh": return None
+        
         username, jti, category = payload.get("sub"), payload.get("jti"), payload.get("category")
         user = user_crud.get_user(db, username=username)
         if not user: return None
         
         redis_key = f"session:{user.id}:{category}"
-        
-        # 타입 체크 (WRONGTYPE 방지)
-        rtype = rd.type(redis_key)
-        if rtype not in [b'string', 'string']:
-            return None
-            
         active_jti = rd.get(redis_key)
         active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
         
@@ -183,7 +235,6 @@ def logout(token: Optional[str] = Depends(oauth2_scheme),
         jti, uid, cat = payload.get("jti"), payload.get("sub"), payload.get("category")
         user = user_crud.get_user(db, username=uid)
         if user:
-            # Redis 삭제 및 DB 업데이트
             rd.delete(f"session:{user.id}:{cat}")
             db.query(UserSession).filter(UserSession.session_key == jti).update({
                 "status": "LOGOUT", "logout_at": datetime.now()
