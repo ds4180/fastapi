@@ -86,6 +86,48 @@ class SystemConfig(Base):
     description = Column(String, nullable=True)
     updated_date = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class AppRegistry(Base):
+    """독립 실행형 APP 엔진 (전체 화면)"""
+    __tablename__ = "app_registry"
+    app_id = Column(String, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    frontend_route = Column(String, nullable=True)
+    main_component = Column(String, nullable=True)
+    api_module = Column(String, nullable=True)
+    admin_page = Column(String, nullable=True)
+    config_schema = Column(JSONB, default=dict)
+    min_rank = Column(Integer, default=1)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class ServiceRegistry(Base):
+    """조립용 SERVICE 엔진 (댓글, 반응 등)"""
+    __tablename__ = "service_registry"
+    service_id = Column(String, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    main_component = Column(String, nullable=True) # 예: 'CommentEngine'
+    api_module = Column(String, nullable=True)
+    config_schema = Column(JSONB, default=dict) # 서비스 기본 설정
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+class AppServiceBinding(Base):
+    """APP 인스턴스와 SERVICE를 연결"""
+    __tablename__ = "app_service_binding"
+    id = Column(Integer, primary_key=True)
+    parent_app_id = Column(String, nullable=False) # 상위 앱 ID (예: board_engine)
+    parent_instance_id = Column(Integer, nullable=False) # 상위 인스턴스 ID (예: board_id)
+    service_id = Column(String, ForeignKey("service_registry.service_id"), nullable=False)
+    
+    order = Column(Integer, default=0) # 표시 순서
+    config_data = Column(JSONB, default=dict) # 해당 결합에서만 쓰는 세부 설정
+    is_active = Column(Boolean, default=True)
+
+    service = relationship("ServiceRegistry")
+
 class Menu(Base):
     __tablename__ = "menu"
     id = Column(Integer, primary_key=True)
@@ -93,8 +135,9 @@ class Menu(Base):
     title = Column(String, nullable=False)
     icon_name = Column(String, nullable=True)
     icon_color = Column(String, nullable=True)
-    link_type = Column(String, default="URL")
-    board_id = Column(Integer, ForeignKey("board_config.id"), nullable=True)
+    link_type = Column(String, default="URL") # URL, APP, PAGE, DIVIDER
+    app_id = Column(String, ForeignKey("app_registry.app_id"), nullable=True) # 연결된 App 엔진 ID
+    app_instance_id = Column(Integer, nullable=True) # 해당 App의 인스턴스 ID (예: board_id)
     page_id = Column(Integer, nullable=True)
     external_url = Column(String, nullable=True)
     order = Column(Integer, default=0)

@@ -6,7 +6,7 @@
 - JSDOC을 사용한다.
 - DOCKER 환경을 기준으로 하고, 명령어 사용에 반영한다. 
 - ./docs 문서 작성 시 기존 문서와 비슷한 레이아웃 형식을 따른다. 
-- 코딩 질문은 python fastapi sveltkit svelte5 html5 css 에 대응한다.
+- 코딩 질문은 python fastapi sveltekit svelte5 html5 css 에 대응한다.
 - 코딩 예제 질문에는 주석을 많이 사용 할 것.
 - 코드 수정, 명령어 실행 전에는 항상 내용을 보여 주고 실행 여부를 물어 볼 것. 
 - 리뷰 요청에는 악마의 대변인으로 독하게 피드백 할 것.

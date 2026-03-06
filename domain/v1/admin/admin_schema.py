@@ -2,17 +2,18 @@ from pydantic import BaseModel, EmailStr
 from typing import List, Optional, Any, Dict
 from datetime import datetime, date
 
-# --- 메뉴 스키마 (기존 유지) ---
+# --- 메뉴 스키마 ---
 class MenuBase(BaseModel):
     title: str
     icon_name: Optional[str] = None
     icon_color: Optional[str] = None
-    link_type: str = "URL"
+    link_type: str = "URL" # URL, APP, PAGE, DIVIDER
     external_url: Optional[str] = None
     order: int = 0
     is_visible: bool = True
     min_rank: int = 0
-    board_id: Optional[int] = None
+    app_id: Optional[str] = None
+    app_instance_id: Optional[int] = None
     page_id: Optional[int] = None
 
 class MenuCreate(MenuBase):
@@ -27,7 +28,8 @@ class MenuUpdate(BaseModel):
     order: Optional[int] = None
     is_visible: Optional[bool] = None
     min_rank: Optional[int] = None
-    board_id: Optional[int] = None
+    app_id: Optional[str] = None
+    app_instance_id: Optional[int] = None
     page_id: Optional[int] = None
 
 class MenuSchema(MenuBase):
@@ -37,7 +39,7 @@ class MenuSchema(MenuBase):
     class Config:
         from_attributes = True
 
-# --- 유저 관리 스키마 (기존 유지) ---
+# --- 유저 관리 스키마 ---
 class UserProfileSchema(BaseModel):
     rank_level: int = 0
     is_active: bool = True
@@ -60,6 +62,39 @@ class UserAdminSchema(BaseModel):
 class UserRankUpdate(BaseModel):
     rank_level: int
 
+# --- 시스템 App 관리 스키마 ---
+class AppRegistryBase(BaseModel):
+    app_id: str
+    name: str
+    description: Optional[str] = None
+    frontend_route: Optional[str] = None
+    main_component: Optional[str] = None
+    api_module: Optional[str] = None
+    admin_page: Optional[str] = None
+    config_schema: Dict[str, Any] = {}
+    min_rank: int = 1
+    is_active: bool = True
+
+class AppRegistryCreate(AppRegistryBase):
+    pass
+
+class AppRegistryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    frontend_route: Optional[str] = None
+    main_component: Optional[str] = None
+    api_module: Optional[str] = None
+    admin_page: Optional[str] = None
+    config_schema: Optional[Dict[str, Any]] = None
+    min_rank: Optional[int] = None
+    is_active: Optional[bool] = None
+
+class AppRegistrySchema(AppRegistryBase):
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
 # --- 게시판/포스트 공통 스키마 ---
 class BoardSimpleSchema(BaseModel):
     id: int
@@ -73,32 +108,31 @@ class PostSimpleAdminSchema(BaseModel):
     create_date: datetime
     class Config: from_attributes = True
 
-# --- BoardConfig 베이스 스키마 (fields_def 포함) ---
+# --- BoardConfig 베이스 스키마 ---
 class BoardConfigBase(BaseModel):
     slug: str
     name: str
     description: Optional[str] = None
     layout_type: str = "list"
     items_per_page: int = 10
-    fields_def: List[Any] = [] # <--- 여기에 fields_def가 정의됨
+    fields_def: List[Any] = []
     options: Dict[str, Any] = {}
-    is_active: bool = True # Base에 추가
+    is_active: bool = True
 
-# --- BoardConfig 생성/수정/조회 스키마 ---
-class BoardConfigCreate(BoardConfigBase): # Base 상속
+class BoardConfigCreate(BoardConfigBase):
     pass
 
-class BoardConfigUpdate(BaseModel): # 일부 필드만 Optional로 업데이트
+class BoardConfigUpdate(BaseModel):
     slug: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
     layout_type: Optional[str] = None
     items_per_page: Optional[int] = None
-    fields_def: Optional[List[Any]] = None # <--- 여기에 fields_def 포함
+    fields_def: Optional[List[Any]] = None
     options: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
 
-class BoardConfigAdminSchema(BoardConfigBase): # Base 상속
+class BoardConfigAdminSchema(BoardConfigBase):
     id: int
     create_date: datetime
     class Config:

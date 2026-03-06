@@ -147,6 +147,44 @@ def post_create(
     # 4. 생성 실행
     return board_crud.create_post(db, board_id=board.id, user_id=current_user.id, post_in=post_in)
 
+@router.put("/update/{post_id}")
+def post_update(
+    post_id: int,
+    post_in: board_schema.PostUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """게시물 수정 (작성자 또는 관리자 확인)"""
+    db_post = board_crud.get_post_detail(db, post_id=post_id)
+    if not db_post:
+        raise HTTPException(status_code=404, detail="게시물을 찾을 수 없습니다.")
+    
+    # 권한 체크: 작성자 본인이거나 Rank 4 이상(최고 관리자)
+    user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
+    if db_post.user_id != current_user.id and user_rank < 4:
+        raise HTTPException(status_code=403, detail="수정 권한이 없습니다.")
+        
+    return board_crud.update_post(db, db_post=db_post, post_in=post_in)
+
+@router.delete("/delete/{post_id}")
+def post_delete(
+    post_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """게시물 삭제 (작성자 또는 관리자 확인)"""
+    db_post = board_crud.get_post_detail(db, post_id=post_id)
+    if not db_post:
+        raise HTTPException(status_code=404, detail="게시물을 찾을 수 없습니다.")
+    
+    # 권한 체크: 작성자 본인이거나 Rank 4 이상(최고 관리자)
+    user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
+    if db_post.user_id != current_user.id and user_rank < 4:
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다.")
+        
+    board_crud.delete_post(db, db_post=db_post)
+    return {"message": "success"}
+
 @router.get("/landing", response_model=board_schema.LandingPageResponse)
 def get_landing_info(
     db: Session = Depends(get_db),
