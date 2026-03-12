@@ -28,11 +28,12 @@ class DayOffCreate(BaseModel):
 
 class DayOffResponse(BaseModel):
     id: int
-    date: datetime.date
+    date: str # 날짜 또는 날짜 범위 문자열
     type: DayOffType
     status: DayOffStatus
     category: Optional[str] = None
     memo: Optional[str] = None
+    group_id: Optional[str] = None
     create_date: datetime.datetime
     user_id: int
     

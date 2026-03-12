@@ -1,16 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry
+from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry, DayOff, ServiceRegistry, ServiceEngine, ServiceBinding
 from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker, check_rank
-from domain.v1.admin.admin_schema import (
-    MenuCreate, MenuUpdate, MenuSchema, 
-    BoardSimpleSchema, PostSimpleAdminSchema,
-    BoardConfigCreate, BoardConfigUpdate, BoardConfigAdminSchema,
-    UserAdminSchema, UserRankUpdate,
-    AppRegistryCreate, AppRegistryUpdate, AppRegistrySchema
-)
+from domain.v1.admin import admin_schema
 from typing import List, Optional, Any
+import re
+import models
 
 router = APIRouter(
     prefix="/v1/admin",
@@ -41,7 +37,7 @@ def get_dashboard_summary(
 
 # --- User Management (유저 관리) ---
 
-@router.get("/users", response_model=List[UserAdminSchema])
+@router.get("/users", response_model=List[admin_schema.UserAdminSchema])
 def list_users(
     db: Session = Depends(get_db),
     admin: User = Depends(check_admin)
@@ -49,7 +45,7 @@ def list_users(
     """전체 유저 목록 조회 (관리자용)"""
     return db.query(User).options(joinedload(User.profile)).all()
 
-@router.get("/users/{user_id}", response_model=UserAdminSchema)
+@router.get("/users/{user_id}", response_model=admin_schema.UserAdminSchema)
 def get_user_detail(
     user_id: int,
     db: Session = Depends(get_db),
@@ -64,7 +60,7 @@ def get_user_detail(
 @router.put("/users/{user_id}/rank")
 def update_user_rank(
     user_id: int,
-    rank_in: UserRankUpdate,
+    rank_in: admin_schema.UserRankUpdate,
     db: Session = Depends(get_db),
     admin: User = Depends(check_admin)
 ):
@@ -81,32 +77,56 @@ def update_user_rank(
     db.commit()
     return {"message": "success", "username": user.username, "new_rank": rank_in.rank_level}
 
-# --- System App Registry (시스템 앱 관리) ---
+# --- [v1.5] App Registry 관리 API (시스템 확장성 핵심) ---
 
-@router.get("/apps", response_model=List[AppRegistrySchema])
-def list_apps(db: Session = Depends(get_db)):
-    """설치된 앱 목록 조회 (전체 공개)"""
-    return db.query(AppRegistry).all()
+@router.get("/apps", response_model=List[admin_schema.AppRegistrySchema])
+def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    """시스템에 등록된 모든 App 엔진 목록 조회 (관리자용)"""
+    return db.query(AppRegistry).order_by(AppRegistry.app_id).all()
 
-@router.post("/apps", response_model=AppRegistrySchema)
-def create_app(app_in: AppRegistryCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
-    """새로운 앱 등록"""
-    if db.query(AppRegistry).filter(AppRegistry.app_id == app_in.app_id).first():
-        raise HTTPException(status_code=400, detail="이미 존재하는 App ID입니다.")
+@router.get("/apps/{app_id}", response_model=admin_schema.AppRegistrySchema)
+def get_app_detail(app_id: str, db: Session = Depends(get_db)):
+    """특정 앱의 메타데이터 및 설정 스키마 조회 (전체 공개 가능 - 권한 점검 시 사용)"""
+    db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
+    if not db_app:
+        raise HTTPException(status_code=404, detail="등록되지 않은 앱 엔진입니다.")
+    return db_app
+
+@router.post("/apps", response_model=admin_schema.AppRegistrySchema)
+def create_app_registry(
+    app_in: admin_schema.AppRegistryCreate, 
+    db: Session = Depends(get_db), 
+    admin: User = Depends(check_admin)
+):
+    """신규 App 엔진 및 메타데이터 등록"""
+    # 중복 ID 체크
+    existing = db.query(AppRegistry).filter(AppRegistry.app_id == app_in.app_id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="이미 등록된 앱 식별자입니다.")
+    
     db_app = AppRegistry(**app_in.dict())
     db.add(db_app)
     db.commit()
     db.refresh(db_app)
     return db_app
 
-@router.put("/apps/{app_id}", response_model=AppRegistrySchema)
-def update_app(app_id: str, app_in: AppRegistryUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
-    """앱 정보 수정"""
+@router.patch("/apps/{app_id}", response_model=admin_schema.AppRegistrySchema)
+def update_app_registry(
+    app_id: str, 
+    app_in: admin_schema.AppRegistryUpdate, 
+    db: Session = Depends(get_db), 
+    admin: User = Depends(check_admin)
+):
+    """App 엔진 메타데이터 수정 (권한, 경로, 관리자 권한 위임 등)"""
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not db_app:
         raise HTTPException(status_code=404, detail="앱을 찾을 수 없습니다.")
-    for key, value in app_in.dict(exclude_unset=True).items():
+    
+    # 전달된 필드만 부분 업데이트 (exclude_unset=True)
+    update_data = app_in.dict(exclude_unset=True)
+    for key, value in update_data.items():
         setattr(db_app, key, value)
+    
     db.commit()
     db.refresh(db_app)
     return db_app
@@ -124,29 +144,43 @@ def delete_app(app_id: str, db: Session = Depends(get_db), admin: User = Depends
 # --- Menu Management (지능형 메뉴 관리) ---
 
 def resolve_menu_url(menu: Menu, db: Session) -> str:
-    """메뉴 설정에 따른 최종 접속 URL 계산 (추상화의 핵심)"""
-    if menu.link_type == "APP" and menu.app_id:
-        # 1. 앱 엔진 메타데이터 조회
-        app = db.query(AppRegistry).filter(AppRegistry.app_id == menu.app_id).first()
-        if not app or not app.frontend_route:
-            return menu.external_url or "#"
+    """[v1.5] 데이터 기반 동적 URL 해석기 (하드코딩 제거)"""
+    if menu.link_type != "APP" or not menu.app_id:
+        # 페이지(PAGE) 타입인 경우 기본 경로 반환
+        if menu.link_type == "PAGE" and menu.page_id:
+            return f"/v1/board/page/{menu.page_id}"
+        return menu.external_url or "#"
         
-        # 2. 인스턴스 정보가 있는 경우 (예: 게시판 슬러그)
-        if menu.app_instance_id:
-            # 게시판 앱인 경우 특별 처리 (향후 다른 앱들도 확장 가능)
-            if menu.app_id == "board":
-                board = db.query(BoardConfig).filter(BoardConfig.id == menu.app_instance_id).first()
-                if board:
-                    # /board/[slug] -> /board/notice
-                    return app.frontend_route.replace("[slug]", board.slug)
+    app = db.query(AppRegistry).filter(AppRegistry.app_id == menu.app_id).first()
+    if not app or not app.frontend_route:
+        return menu.external_url or "#"
+    
+    url = app.frontend_route
+    
+    # [핵심] 인스턴스 정보와 앱 설정 내 해석 메타데이터가 있는 경우 동적 치환
+    instance_meta = (app.config_schema or {}).get("instance_info")
+    if menu.app_instance_id and instance_meta:
+        model_name = instance_meta.get("model_name")
+        # models 모듈에서 모델 클래스를 동적으로 가져옴 (getattr 활용)
+        model_cls = getattr(models, model_name, None)
         
-        # 3. 인스턴스 정보가 없는 앱 메인 경로
-        return app.frontend_route.split("/[")[0] # /board/[slug] -> /board
+        if model_cls:
+            lookup_field = instance_meta.get("lookup_field", "id")
+            return_field = instance_meta.get("return_field", "slug")
+            placeholder = instance_meta.get("placeholder", "[slug]")
+            
+            # 동적 필터 쿼리 실행
+            instance = db.query(model_cls).filter(
+                getattr(model_cls, lookup_field) == menu.app_instance_id
+            ).first()
+            
+            if instance:
+                # 템플릿 치환 (예: [slug] -> notice)
+                val = getattr(instance, return_field, "")
+                url = url.replace(placeholder, str(val))
         
-    elif menu.link_type == "PAGE" and menu.page_id:
-        return f"/v1/board/page/{menu.page_id}"
-        
-    return menu.external_url or "#"
+    # 치환되지 않은 나머지 [parameter] 제거 후 최종 경로 반환
+    return re.sub(r'/\[.*?\]', '', url)
 
 def filter_menu_tree(menus: List[Menu], user_rank: int, db: Session):
     """재귀적 메뉴 필터링 및 동적 URL 주입"""
@@ -167,7 +201,7 @@ def filter_menu_tree(menus: List[Menu], user_rank: int, db: Session):
             filtered.append(menu_data)
     return filtered
 
-@router.get("/menu/public", response_model=List[MenuSchema])
+@router.get("/menu/public", response_model=List[admin_schema.MenuSchema])
 def get_public_menus(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional)
@@ -183,21 +217,21 @@ def get_public_menus(
     
     return filter_menu_tree(root_menus, user_rank, db)
 
-@router.get("/menu", response_model=List[MenuSchema])
+@router.get("/menu", response_model=List[admin_schema.MenuSchema])
 def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     """관리자용 전체 메뉴 트리"""
     return db.query(Menu).options(joinedload(Menu.sub_menus)).filter(Menu.parent_id == None).order_by(Menu.order).all()
 
-@router.post("/menu", response_model=MenuSchema)
-def create_menu(menu_in: MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+@router.post("/menu", response_model=admin_schema.MenuSchema)
+def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     db_menu = Menu(**menu_in.dict())
     db.add(db_menu)
     db.commit()
     db.refresh(db_menu)
     return db_menu
 
-@router.put("/menu/{menu_id}", response_model=MenuSchema)
-def update_menu(menu_id: int, menu_in: MenuUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+@router.put("/menu/{menu_id}", response_model=admin_schema.MenuSchema)
+def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     db_menu = db.query(Menu).filter(Menu.id == menu_id).first()
     if not db_menu: raise HTTPException(status_code=404)
     for key, value in menu_in.dict(exclude_unset=True).items():
@@ -238,12 +272,12 @@ def get_public_configs(db: Session = Depends(get_db)):
 
 # --- Board Configuration Management (게시판 설정 관리) ---
 
-@router.get("/boards", response_model=List[BoardConfigAdminSchema])
+@router.get("/boards", response_model=List[admin_schema.BoardConfigAdminSchema])
 def get_all_boards(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     return db.query(BoardConfig).order_by(BoardConfig.id).all()
 
-@router.post("/boards", response_model=BoardConfigAdminSchema)
-def create_board_config(board_in: BoardConfigCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+@router.post("/boards", response_model=admin_schema.BoardConfigAdminSchema)
+def create_board_config(board_in: admin_schema.BoardConfigCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     if db.query(BoardConfig).filter(BoardConfig.slug == board_in.slug).first():
         raise HTTPException(status_code=400, detail="이미 존재하는 슬러그입니다.")
     db_board = BoardConfig(**board_in.dict())
@@ -252,8 +286,8 @@ def create_board_config(board_in: BoardConfigCreate, db: Session = Depends(get_d
     db.refresh(db_board)
     return db_board
 
-@router.put("/boards/{board_id}", response_model=BoardConfigAdminSchema)
-def update_board_config(board_id: int, board_in: BoardConfigUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+@router.put("/boards/{board_id}", response_model=admin_schema.BoardConfigAdminSchema)
+def update_board_config(board_id: int, board_in: admin_schema.BoardConfigUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     db_board = db.query(BoardConfig).filter(BoardConfig.id == board_id).first()
     if not db_board:
         raise HTTPException(status_code=404, detail="게시판 설정을 찾을 수 없습니다.")
@@ -274,10 +308,57 @@ def delete_board_config(board_id: int, db: Session = Depends(get_db), admin: Use
 
 # --- Selection Lists ---
 
-@router.get("/boards/list", response_model=List[BoardSimpleSchema])
+@router.get("/boards/list", response_model=List[admin_schema.BoardSimpleSchema])
 def list_boards_for_selection(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     return db.query(BoardConfig).filter(BoardConfig.is_active == True).order_by(BoardConfig.name).all()
 
-@router.get("/posts/list", response_model=List[PostSimpleAdminSchema])
+@router.get("/posts/list", response_model=List[admin_schema.PostSimpleAdminSchema])
 def list_posts_for_selection(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     return db.query(Post).order_by(Post.create_date.desc()).limit(100).all()
+
+# --- DayOff Management (전체 휴무 관리) ---
+
+@router.get("/dayoffs")
+def admin_get_all_dayoffs(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    """모든 사용자의 휴무 신청 내역 조회 (관리자용 - 원본 데이터)"""
+    dayoffs = db.query(DayOff).join(User).filter(DayOff.is_deleted == False).order_by(DayOff.date.desc()).all()
+    
+    result = []
+    for d in dayoffs:
+        result.append({
+            "id": d.id,
+            "user_id": d.user_id,
+            "username": d.user.username,
+            "real_name": d.user.real_name,
+            "date": str(d.date),
+            "type": d.type,
+            "status": d.status,
+            "memo": d.memo,
+            "group_id": d.group_id,
+            "create_date": d.create_date
+        })
+    return result
+
+@router.put("/dayoffs/{dayoff_id}/status")
+def admin_update_dayoff_status(
+    dayoff_id: int, 
+    status_update: dict = Body(...), 
+    db: Session = Depends(get_db), 
+    admin: User = Depends(check_admin)
+):
+    """휴무 신청 상태 변경 (승인/반려 등)"""
+    new_status = status_update.get("status")
+    db_dayoff = db.query(DayOff).filter(DayOff.id == dayoff_id).first()
+    if not db_dayoff:
+        raise HTTPException(status_code=404, detail="내역을 찾을 수 없습니다.")
+    
+    # 그룹 전체 상태 동기화
+    if db_dayoff.group_id:
+        items = db.query(DayOff).filter(DayOff.group_id == db_dayoff.group_id).all()
+        for item in items:
+            item.status = new_status
+    else:
+        db_dayoff.status = new_status
+        
+    db.commit()
+    return {"message": "success", "new_status": new_status}

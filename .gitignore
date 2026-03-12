@@ -1,9 +1,13 @@
 .python-version
-
-__pycache__
-e2e.log
+__pycache__/
+*.log
 pyproject.toml
 uv.lock
-svelte
-node_modules
+node_modules/
+svelte/node_modules/
 
+# Scripts & Environment
+scripts/
+.env
+AGENT.md
+.venv/

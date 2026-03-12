@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, UniqueConstraint, Boolean, Table, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, UniqueConstraint, Boolean, Table, JSON, Index, and_
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
@@ -87,46 +87,63 @@ class SystemConfig(Base):
     updated_date = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AppRegistry(Base):
-    """독립 실행형 APP 엔진 (전체 화면)"""
     __tablename__ = "app_registry"
-    app_id = Column(String, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    description = Column(Text, nullable=True)
-    frontend_route = Column(String, nullable=True)
-    main_component = Column(String, nullable=True)
-    api_module = Column(String, nullable=True)
-    admin_page = Column(String, nullable=True)
-    config_schema = Column(JSONB, default=dict)
-    min_rank = Column(Integer, default=1)
+    app_id = Column(String, primary_key=True, index=True) # 앱 고유 식별자
+    name = Column(String, nullable=False) # 앱 이름
+    title = Column(String, nullable=True) # 공식 명칭 (UI 표시용)
+    description = Column(Text, nullable=True) # 타이틀 하단 요약 설명
+    
+    # 추상화 및 경로 메타데이터
+    app_type = Column(String, default="INSTANCE") # INSTANCE, STATIC, SYSTEM
+    frontend_route = Column(String, nullable=True) # Svelte 라우트 경로
+    main_component = Column(String, nullable=True) # 메인 컴포넌트 파일명 (Dynamic Import용)
+    icon_default = Column(String, nullable=True) # 기본 아이콘
+    
+    # 보안 주권 설정 (v1.3)
+    min_read_rank = Column(Integer, default=0) # 읽기/진입 최소 권한
+    min_write_rank = Column(Integer, default=2) # 쓰기/행위 최소 권한
+    admin_ids = Column(JSONB, default=list) # 해당 앱 자치 관리자 리스트 ([user_id, ...])
+    
+    config_schema = Column(JSONB, default=dict) # 앱 인스턴스 전용 설정 스키마 (Meta Service)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class ServiceRegistry(Base):
-    """조립용 SERVICE 엔진 (댓글, 반응 등)"""
+    """서비스 앱 대분류 (댓글, 추천, 업로드 등)"""
     __tablename__ = "service_registry"
-    service_id = Column(String, primary_key=True, index=True)
+    id = Column(String, primary_key=True) # "comment", "upload"
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
-    main_component = Column(String, nullable=True) # 예: 'CommentEngine'
-    api_module = Column(String, nullable=True)
-    config_schema = Column(JSONB, default=dict) # 서비스 기본 설정
+
+class ServiceEngine(Base):
+    """실제 작동하는 레고 엔진 (v1, v2 등)"""
+    __tablename__ = "service_engine"
+    id = Column(String, primary_key=True) # "basic_comment_v1"
+    registry_id = Column(String, ForeignKey("service_registry.id"), nullable=False)
+    version = Column(String, nullable=False, default="1.0.0")
+    
+    frontend_plugin = Column(String, nullable=True) # 렌더링할 Svelte 컴포넌트 경로
+    config_schema = Column(JSONB, default=dict) # 엔진별 필수 설정 스키마
+    
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
 
-class AppServiceBinding(Base):
-    """APP 인스턴스와 SERVICE를 연결"""
-    __tablename__ = "app_service_binding"
+class ServiceBinding(Base):
+    """앱 인스턴스와 레고 엔진의 연결 (접착제)"""
+    __tablename__ = "service_binding"
     id = Column(Integer, primary_key=True)
-    parent_app_id = Column(String, nullable=False) # 상위 앱 ID (예: board_engine)
-    parent_instance_id = Column(Integer, nullable=False) # 상위 인스턴스 ID (예: board_id)
-    service_id = Column(String, ForeignKey("service_registry.service_id"), nullable=False)
+    target_app = Column(String, index=True) # "board", "dashboard"
+    target_id = Column(Integer, index=True) # 인스턴스 ID (board_id 등)
+    engine_id = Column(String, ForeignKey("service_engine.id"), nullable=False)
     
-    order = Column(Integer, default=0) # 표시 순서
-    config_data = Column(JSONB, default=dict) # 해당 결합에서만 쓰는 세부 설정
+    # 개별 바인딩 커스텀 설정
+    custom_config = Column(JSONB, default=dict) # {"grid_span": 2, "color": "blue"}
+    min_write_rank = Column(Integer, nullable=True) # 엔진별 행위 권한 (null이면 앱설정 상속)
+    order = Column(Integer, default=0)
+    
     is_active = Column(Boolean, default=True)
-
-    service = relationship("ServiceRegistry")
+    created_at = Column(DateTime, default=datetime.now)
 
 class Menu(Base):
     __tablename__ = "menu"
@@ -286,10 +303,22 @@ class DayOff(Base):
     __tablename__ = "dayoff"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    start_date = Column(DateTime, nullable=False)
-    end_date = Column(DateTime, nullable=False)
-    reason = Column(Text, nullable=True)
-    status = Column(String, default="pending")
+    date = Column(Date, nullable=False)
+    type = Column(String, nullable=False)
+    status = Column(String, default="REQUESTED")
+    memo = Column(Text, nullable=True)
+    
+    # 그룹화 및 Soft Delete 필드 추가
+    group_id = Column(String, nullable=True, index=True)
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    delete_date = Column(DateTime, nullable=True)
+    create_date = Column(DateTime, nullable=False, default=datetime.now)
+
+    __table_args__ = (
+        Index('ix_dayoff_user_date_active', 'user_id', 'date', 
+              unique=True, postgresql_where=(is_deleted == False)),
+    )
+
     user = relationship("User", back_populates="dayoffs")
 
 class Alert(Base):

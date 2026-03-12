@@ -84,6 +84,12 @@ def get_board_posts(
     board = db.query(BoardConfig).filter(BoardConfig.slug == slug).first()
     if not board:
         raise HTTPException(status_code=404, detail="존재하지 않는 게시판입니다.")
+    
+    # 기능 활성화 체크 (List)
+    if not board.options.get("use_list", True):
+        user_rank = current_user.rank() if (current_user and callable(current_user.rank)) else (current_user.rank if current_user else 0)
+        if user_rank < 4:
+            raise HTTPException(status_code=403, detail="이 게시판은 목록 조회가 비활성화되어 있습니다.")
         
     total, posts = board_crud.get_post_list(
         db, board_id=board.id, skip=page * size, limit=size, user=current_user, keyword=keyword
@@ -106,6 +112,12 @@ def get_post_detail(
     # 2. 지능형 보안 체크 (해당 게시판의 리스트 접근 권한이 있는지 확인)
     verify_access_by_menu(f"/board/{post.board.slug}", db, current_user)
     
+    # 2-1. 상세 보기 비활성화 체크
+    if not post.board.options.get("use_view", True):
+        user_rank = current_user.rank() if (current_user and callable(current_user.rank)) else (current_user.rank if current_user else 0)
+        if user_rank < 4:
+            raise HTTPException(status_code=403, detail="이 게시판은 상세 보기가 비활성화되어 있습니다.")
+
     # 3. 조회수 증가 (단순 증가)
     post.view_count += 1
     db.commit()
@@ -143,6 +155,11 @@ def post_create(
     # 3. 글쓰기 허용 여부 체크
     if board.options.get("editor_type") == "none":
         raise HTTPException(status_code=403, detail="이 게시판은 글쓰기가 허용되지 않습니다.")
+
+    if not board.options.get("use_write", True):
+        user_rank = current_user.rank() if (current_user and callable(current_user.rank)) else (current_user.rank if current_user else 0)
+        if user_rank < 4:
+            raise HTTPException(status_code=403, detail="이 게시판은 글 작성이 비활성화되어 있습니다.")
         
     # 4. 생성 실행
     return board_crud.create_post(db, board_id=board.id, user_id=current_user.id, post_in=post_in)
