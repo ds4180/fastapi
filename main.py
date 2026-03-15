@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI):
 
 from domain.v1.board import board_router as v1_board_router
 from domain.v1.admin import admin_router as v1_admin_router
+from domain.page import page_router
 
 app = FastAPI(lifespan=lifespan)
 
@@ -70,6 +71,7 @@ app.include_router(alert_router.router)
 app.include_router(ws_router.router)
 app.include_router(v1_board_router.router)
 app.include_router(v1_admin_router.router)
+app.include_router(page_router.router)
 
 
 

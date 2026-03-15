@@ -340,6 +340,35 @@ class Alert(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     user = relationship("User", backref="created_alerts")
 
+# --- Page Engine (v1.0) ---
+
+class Page(Base):
+    """독립형 고정 컨텐츠 페이지 엔진 모델"""
+    __tablename__ = "page"
+    id = Column(Integer, primary_key=True)
+    slug = Column(String, unique=True, index=True, nullable=False) # URL 주소용 식별자
+    title = Column(String, nullable=False)                         # 페이지 제목
+    content = Column(Text, nullable=True)                          # 일반 텍스트/HTML 본문
+    content_json = Column(JSONB, nullable=False)                   # TipTap 에디터 데이터
+    
+    status = Column(String, default="DRAFT")                       # DRAFT, PUBLISHED
+    is_active = Column(Boolean, default=True)                      # 활성 여부
+    min_rank = Column(Integer, default=0)                          # 열람 가능한 최소 등급
+    
+    # [v1.0.4] 리다이렉트 기능 추가
+    redirect_url = Column(String, nullable=True)
+    
+    # [표준] Soft Delete 정책 반영
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    delete_date = Column(DateTime, nullable=True)
+    
+    published_at = Column(DateTime, nullable=False, default=datetime.now) # 게시 시작 시각
+    expired_at = Column(DateTime, nullable=True)                         # 게시 종료 시각 (선택)
+    
+    view_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 class PushSubscription(Base):
     __tablename__ = "push_subscription"
     id = Column(Integer, primary_key=True)
