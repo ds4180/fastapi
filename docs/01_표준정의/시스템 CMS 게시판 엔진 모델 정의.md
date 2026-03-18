@@ -1,13 +1,6 @@
----
-제목: 게시판 모델 표준 정의 (v1.1)
-날짜: 2026-03-09
-작성자: Antigravity (AI)
-카테고리: 01_표준정의
-태그: #Board #CMS #Architecture #Standard
-상태: Completed
----
+# 📋 시스템: CMS 게시판 엔진 모델 정의
 
-# 📋 게시판 모델 표준 정의 (Board Model Standard)
+> 이 문서는 단순한 게시판을 넘어, **설정 기반의 무한 확장형 CMS(Content Management System)** 엔진의 구조와 설계 철학을 정의합니다.
 
 > 이 문서는 단순한 게시판 구현을 넘어, **설정 기반의 유연한 CMS(Content Management System)**로 확장하기 위한 게시판 모델의 구조와 철학을 정의합니다.
 
