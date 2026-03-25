@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Cookie, Body, Request
+from fastapi import APIRouter, Depends, HTTPException, Cookie, Body, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from starlette import status
@@ -48,141 +48,87 @@ def check_rank(required_rank: int):
 
 # ----------------------------
 
-@router.post("/login", response_model=user_schema.TokenResponse)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(),
-                           device_category: str = "WORKSPACE",
-                           db: Session = Depends(get_db)):
+@router.post("/login")
+def login_for_access_token(response: Response, request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = user_crud.get_user(db, username=form_data.username)
     if not user or not user_crud.pwd_context.verify(form_data.password, user.password):
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 틀렸습니다.")
 
-    jti = str(uuid.uuid4())
+    # User-Agent를 통한 디바이스 유형 분석
+    user_agent = request.headers.get("user-agent", "").lower()
+    if "mobi" in user_agent or "android" in user_agent or "iphone" in user_agent:
+        device_category = "MOBILE"
+    else:
+        device_category = "DESKTOP"
+
+    # 밀어내기 로직: 기존 세션 삭제
     redis_key = f"session:{user.id}:{device_category}"
-
-    try:
-        rtype = rd.type(redis_key)
-        if rtype not in [b'string', 'string', b'none', 'none']:
-            rd.delete(redis_key)
-
-        db.query(UserSession).filter(
-            UserSession.user_id == user.id,
-            UserSession.device_category == device_category,
-            UserSession.status == "ACTIVE"
-        ).update({"status": "KICKED_OUT", "logout_at": datetime.now()})
-
-        db_session = UserSession(
-            user_id=user.id, session_key=jti, device_category=device_category,
-            status="ACTIVE", login_at=datetime.now()
-        )
-        db.add(db_session)
+    old_jti = rd.get(redis_key)
+    if old_jti:
+        # DB의 기존 세션 상태 업데이트 (선택적)
+        db.query(UserSession).filter(UserSession.session_key == old_jti).update({"status": "KICKED_OUT", "logout_at": datetime.now()})
         db.commit()
 
-        rd.set(redis_key, jti, ex=60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
-        
-    except Exception as e:
-        print(f"Session error: {e}")
+    # 새 세션 생성
+    jti = str(uuid.uuid4())
+    rd.set(redis_key, jti, ex=60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
 
-    # Access Token 생성
-    access_token_data = {
-        "sub": user.username, "jti": jti, "category": device_category, "type": "access",
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    }
-    # Refresh Token 생성
-    refresh_token_data = {
-        "sub": user.username, "jti": jti, "category": device_category, "type": "refresh",
-        "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    }
-
-    return {
-        "access_token": jwt.encode(access_token_data, SECRET_KEY, algorithm=ALGORITHM),
-        "refresh_token": jwt.encode(refresh_token_data, SECRET_KEY, algorithm=ALGORITHM),
-        "token_type": "bearer", 
-        "username": user.username
-    }
-
-@router.post("/refresh", response_model=user_schema.TokenResponse)
-def refresh_access_token(request: Request,
-                         authorization: Optional[str] = Depends(oauth2_scheme),
-                         refresh_token_cookie: Optional[str] = Cookie(None, alias="refresh_token"),
-                         db: Session = Depends(get_db)):
-    """Refresh Token을 사용하여 새로운 Access Token 및 연장된 Refresh Token 발급"""
-    token = None
-    if authorization:
-        token = authorization
-    elif refresh_token_cookie:
-        token = refresh_token_cookie
+    # DB에 새 세션 기록
+    db_session = UserSession(
+        user_id=user.id, session_key=jti, device_category=device_category,
+        status="ACTIVE", login_at=datetime.now()
+    )
+    db.add(db_session)
+    db.commit()
     
-    if not token:
-        raise HTTPException(status_code=401, detail="Refresh token is missing")
+    # httpOnly 쿠키에 세션 ID 설정
+    response.set_cookie(
+        key="session_id",
+        value=jti,
+        httponly=True,
+        max_age=60*60*24*REFRESH_TOKEN_EXPIRE_DAYS,
+        samesite="lax",
+        secure=False # 개발 환경에서는 False, 프로덕션에서는 True
+    )
+    
+    return {"message": "Login successful", "username": user.username}
 
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get("type") != "refresh":
-            raise HTTPException(status_code=401, detail="Invalid token type")
+
+
+def get_current_user(request: Request, session_id: Optional[str] = Cookie(None), db: Session = Depends(get_db)):
+    if not session_id:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+
+    # User-Agent를 통한 디바이스 유형 분석
+    user_agent = request.headers.get("user-agent", "").lower()
+    if "mobi" in user_agent or "android" in user_agent or "iphone" in user_agent:
+        device_category = "MOBILE"
+    else:
+        device_category = "DESKTOP"
+
+    # DB에서 세션 정보를 조회하여 user_id를 찾음
+    db_session = db.query(UserSession).filter(UserSession.session_key == session_id).first()
+    if not db_session or db_session.status != "ACTIVE":
+        raise HTTPException(status_code=401, detail="세션이 유효하지 않습니다.")
         
-        username = payload.get("sub")
-        jti = payload.get("jti")
-        category = payload.get("category")
+    user = db.query(User).filter(User.id == db_session.user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
+
+    # Redis에서 세션 유효성 검증
+    redis_key = f"session:{user.id}:{device_category}"
+    active_jti = rd.get(redis_key)
+    
+    if active_jti is None or active_jti != session_id:
+        # DB 세션 상태를 EXPIRED로 업데이트 (선택적)
+        db_session.status = "EXPIRED"
+        db.commit()
+        raise HTTPException(status_code=401, detail="다른 기기에서 로그인하여 접속이 종료되었습니다.")
         
-        user = user_crud.get_user(db, username=username)
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-
-        # 🚨 [중요] 세션 검증 (밀려났는지 확인)
-        redis_key = f"session:{user.id}:{category}"
-        active_jti = rd.get(redis_key)
-        active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
-        
-        if active_jti_str != jti:
-            raise HTTPException(status_code=401, detail="Session expired or kicked out")
-
-        # 활동 중이므로 Redis 세션 만료 시간을 다시 3일로 연장
-        rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
-
-        # 2. 새로운 Access Token 생성
-        access_token_data = {
-            "sub": user.username, "jti": jti, "category": category, "type": "access",
-            "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        }
-        # 3. 새로운 Refresh Token 생성 (Sliding Window: 만료 시간 재연장)
-        refresh_token_data = {
-            "sub": user.username, "jti": jti, "category": category, "type": "refresh",
-            "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-        }
-
-        return {
-            "access_token": jwt.encode(access_token_data, SECRET_KEY, algorithm=ALGORITHM),
-            "refresh_token": jwt.encode(refresh_token_data, SECRET_KEY, algorithm=ALGORITHM),
-            "token_type": "bearer",
-            "username": user.username
-        }
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
-
-def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
-                     access_token: Optional[str] = Cookie(None),
-                     db: Session = Depends(get_db)):
-    final_token = token or access_token
-    if not final_token: raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
-    try:
-        payload = jwt.decode(final_token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get("type") == "refresh":
-             raise HTTPException(status_code=401, detail="Access token required")
-
-        username, jti, category = payload.get("sub"), payload.get("jti"), payload.get("category")
-        user = user_crud.get_user(db, username=username)
-        if not user: raise HTTPException(status_code=401)
-        
-        redis_key = f"session:{user.id}:{category}"
-        active_jti = rd.get(redis_key)
-        active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
-        
-        if active_jti_str is None or active_jti_str != jti:
-            raise HTTPException(status_code=401, detail="다른 기기에서 로그인하여 접속이 종료되었습니다.")
-            
-        return user
-    except JWTError:
-        raise HTTPException(status_code=401, detail="인증이 만료되었습니다.")
+    # 세션 만료 시간 연장 (활동 기준)
+    rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
+    
+    return user
 
 @router.post("/create", response_model=user_schema.User, status_code=status.HTTP_201_CREATED)
 def create_user(user_create: user_schema.UserCreate, db: Session = Depends(get_db)):
@@ -191,26 +137,32 @@ def create_user(user_create: user_schema.UserCreate, db: Session = Depends(get_d
         raise HTTPException(status_code=409, detail="이미 등록된 사용자입니다.")
     return user_crud.create_user(db=db, user_create=user_create)
 
-def get_current_user_optional(token: Optional[str] = Depends(oauth2_scheme),
-                              access_token: Optional[str] = Cookie(None),
-                              db: Session = Depends(get_db)):
-    final_token = token or access_token
-    if not final_token: return None
+def get_current_user_optional(request: Request, session_id: Optional[str] = Cookie(None), db: Session = Depends(get_db)):
+    if not session_id:
+        return None
+
     try:
-        payload = jwt.decode(final_token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get("type") == "refresh": return None
-        
-        username, jti, category = payload.get("sub"), payload.get("jti"), payload.get("category")
-        user = user_crud.get_user(db, username=username)
-        if not user: return None
-        
-        redis_key = f"session:{user.id}:{category}"
+        user_agent = request.headers.get("user-agent", "").lower()
+        device_category = "MOBILE" if "mobi" in user_agent or "android" in user_agent or "iphone" in user_agent else "DESKTOP"
+
+        db_session = db.query(UserSession).filter(UserSession.session_key == session_id, UserSession.status == "ACTIVE").first()
+        if not db_session:
+            return None
+            
+        user = db.query(User).filter(User.id == db_session.user_id).first()
+        if not user:
+            return None
+
+        redis_key = f"session:{user.id}:{device_category}"
         active_jti = rd.get(redis_key)
-        active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
         
-        if active_jti_str != jti: return None
+        if active_jti is None or active_jti != session_id:
+            return None
+            
+        rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
         return user
-    except: return None
+    except Exception:
+        return None
 
 @router.get("/me", response_model=user_schema.User)
 def read_users_me(current_user: User = Depends(get_current_user)):
@@ -221,34 +173,33 @@ def read_users_me(current_user: User = Depends(get_current_user)):
 def session_list(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return user_crud.get_session_list(db)
 
-@router.post("/sessions/kick/{session_id}")
-def kick_user_session(session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@router.post("/sessions/kick/{target_session_id}")
+def kick_user_session(target_session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
     if user_rank < 4: raise HTTPException(status_code=403)
     
-    result = user_crud.kick_session(db, session_id=session_id)
+    result = user_crud.kick_session(db, session_id=target_session_id)
     if result:
         return {"message": "success"}
     return {"error": "Session not found"}
 
 @router.post("/logout")
-def logout(token: Optional[str] = Depends(oauth2_scheme),
-           access_token: Optional[str] = Cookie(None),
-           db: Session = Depends(get_db)):
-    final_token = token or access_token
-    if not final_token: return {"message": "success"}
-    try:
-        payload = jwt.decode(final_token, SECRET_KEY, algorithms=[ALGORITHM])
-        jti, uid, cat = payload.get("jti"), payload.get("sub"), payload.get("category")
-        user = user_crud.get_user(db, username=uid)
-        if user:
-            rd.delete(f"session:{user.id}:{cat}")
-            db.query(UserSession).filter(UserSession.session_key == jti).update({
-                "status": "LOGOUT", "logout_at": datetime.now()
-            })
+def logout(response: Response, session_id: Optional[str] = Cookie(None), db: Session = Depends(get_db)):
+    if session_id:
+        db_session = db.query(UserSession).filter(UserSession.session_key == session_id).first()
+        if db_session:
+            # Redis에서 세션 삭제
+            redis_key = f"session:{db_session.user_id}:{db_session.device_category}"
+            rd.delete(redis_key)
+            
+            # DB 세션 상태 업데이트
+            db_session.status = "LOGOUT"
+            db_session.logout_at = datetime.now()
             db.commit()
-    except: pass
-    return {"message": "success"}
+
+    # 클라이언트의 쿠키 삭제
+    response.delete_cookie(key="session_id")
+    return {"message": "Logout successful"}
 
 @router.get("/list", response_model=user_schema.UserList)
 def user_list(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
