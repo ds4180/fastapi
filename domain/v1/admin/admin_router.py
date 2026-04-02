@@ -215,7 +215,10 @@ def get_public_menus(
         Menu.parent_id == None, Menu.is_visible == True, Menu.min_rank <= user_rank
     ).order_by(Menu.order).all()
     
-    return filter_menu_tree(root_menus, user_rank, db)
+    print(f"DEBUG: Root menus fetched: {root_menus}")
+    filtered_menus = filter_menu_tree(root_menus, user_rank, db)
+    print(f"DEBUG: Filtered menus to return: {filtered_menus}")
+    return filtered_menus
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])
 def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_admin)):

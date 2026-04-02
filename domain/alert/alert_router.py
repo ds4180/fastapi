@@ -50,6 +50,21 @@ def alert_delete(alert_id: int,
     # TODO: 관리자 권한 체크 필요
     alert_crud.delete_alert(db, db_alert)
 
+@router.put("/update/{alert_id}", response_model=alert_schema.Alert)
+async def alert_update(alert_id: int, 
+                 _alert_update: alert_schema.AlertUpdate,
+                 db: Session = Depends(get_db),
+                 current_user: User = Depends(get_current_user)):
+    """
+    알림 수정
+    """
+    db_alert = alert_crud.get_alert(db, alert_id)
+    if not db_alert:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="알림을 찾을 수 없습니다.")
+    
+    # TODO: 관리자 권한 체크 필요
+    return alert_crud.update_alert(db, db_alert=db_alert, alert_update=_alert_update)
+
 @router.post("/toggle/{alert_id}", response_model=alert_schema.Alert)
 async def alert_toggle(alert_id: int, 
                  db: Session = Depends(get_db),

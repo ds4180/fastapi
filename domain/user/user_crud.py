@@ -8,11 +8,29 @@ from redis_config import rd
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def get_session_list(db: Session, limit: int = 50):
-    """최근 접속순으로 세션 목록 조회"""
+def get_session_list(db: Session, limit: int = 100):
+    """최근 접속순으로 세션 목록 조회 및 실시간 Redis 동기화 (최대 100개)"""
     sessions = db.query(UserSession).join(User).order_by(UserSession.login_at.desc()).limit(limit).all()
+    
+    modified = False
     for s in sessions:
         s.username = s.user.username
+        
+        # 📌 Redis 실시간 생존 확인 (Redis 리부트 대응)
+        if s.status == "ACTIVE":
+            redis_key = f"session:{s.user_id}:{s.device_category}"
+            active_jti = rd.get(redis_key)
+            
+            # Redis에 없거나 JTI가 다르면 세션 만료 처리
+            active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
+            if not active_jti_str or active_jti_str != s.session_key:
+                s.status = "EXPIRED"
+                s.logout_at = datetime.now()
+                modified = True
+    
+    if modified:
+        db.commit()
+        
     return sessions
 
 def kick_session(db: Session, session_id: int):

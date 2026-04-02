@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
 from models import Alert, User
-from domain.alert.alert_schema import AlertCreate
+from domain.alert.alert_schema import AlertCreate, AlertUpdate
 
 def get_alert_list(db: Session):
     return db.query(Alert).order_by(Alert.create_date.desc()).all()
@@ -21,11 +21,9 @@ def get_active_alerts(db: Session):
     return alerts
 
 from domain.ws.ws_service import manager
-from domain.push import push_service
-import asyncio
-from fastapi import BackgroundTasks
 
-async def create_alert(db: Session, alert_create: AlertCreate, user: User, background_tasks: BackgroundTasks):
+
+async def create_alert(db: Session, alert_create: AlertCreate, user: User):
     db_alert = Alert(
         message=alert_create.message,
         level=alert_create.level,
@@ -49,17 +47,9 @@ async def create_alert(db: Session, alert_create: AlertCreate, user: User, backg
         await manager.broadcast({"type": "new_alert"})
     except Exception as e:
         print(f"WebSocket broadcast error: {e}")
-
-    # 🚨 Level 5 (비상 점유) 알림일 경우 웹 푸시 자동 발송
-    if db_alert.level == 5:
-        try:
-            # 푸시 발송은 오래 걸릴 수 있으므로 백그라운드 태스크로 처리합니다.
-            # db 세션 대신 None을 전달하여 태스크 내에서 새 세션을 생성하게 합니다.
-            background_tasks.add_task(push_service.send_push_to_all, None, f"[긴급] {db_alert.message}")
-        except Exception as e:
-            print(f"Push notification error: {e}")
         
     return db_alert
+
 
 def delete_alert(db: Session, db_alert: Alert):
     db.delete(db_alert)
@@ -78,4 +68,11 @@ async def toggle_alert(db: Session, db_alert: Alert):
     except Exception as e:
         print(f"WebSocket broadcast error: {e}")
         
+    return db_alert
+
+def update_alert(db: Session, db_alert: Alert, alert_update: AlertUpdate):
+    for key, value in alert_update.model_dump(exclude_unset=True).items():
+        setattr(db_alert, key, value)
+    db.commit()
+    db.refresh(db_alert)
     return db_alert

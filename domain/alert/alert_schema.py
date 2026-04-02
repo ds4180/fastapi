@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 class Alert(BaseModel):
     """
@@ -38,6 +38,23 @@ class AlertCreate(BaseModel):
     target_users: Optional[str] = None
     confirm_text: str = "확인하였습니다"
     reset_sec: int = 0
+
+class AlertUpdate(BaseModel):
+    """
+    업무 지시 및 알림 수정 스키마
+    """
+    message: Optional[str] = None
+    level: Optional[int] = None
+    style: Optional[str] = None
+    position: Optional[str] = None
+    route: Optional[str] = None
+    redirect_url: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    target_users: Optional[str] = None
+    confirm_text: Optional[str] = None
+    reset_sec: Optional[int] = None
+    is_active: Optional[bool] = None
 
 class AlertList(BaseModel):
     """
