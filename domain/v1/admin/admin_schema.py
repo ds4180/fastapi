@@ -20,6 +20,7 @@ class MenuCreate(MenuBase):
     parent_id: Optional[int] = None
 
 class MenuUpdate(BaseModel):
+    parent_id: Optional[int] = None
     title: Optional[str] = None
     icon_name: Optional[str] = None
     icon_color: Optional[str] = None

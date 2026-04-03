@@ -9,6 +9,7 @@ from domain.answer import answer_router
 from domain.user import user_router
 from domain.fileupload import fileupload_router
 from domain.dayoff import dayoff_router
+from domain.push import push_router
 from domain.alert import alert_router
 from domain.ws import ws_router, ws_service
 
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
 
 from domain.v1.board import board_router as v1_board_router
 from domain.v1.admin import admin_router as v1_admin_router
+from domain.v1.comment import comment_router
 from domain.page import page_router
 
 app = FastAPI(lifespan=lifespan)
@@ -65,10 +67,12 @@ app.include_router(answer_router.router)
 app.include_router(user_router.router)
 app.include_router(fileupload_router.router)
 app.include_router(dayoff_router.router)
+app.include_router(push_router.router)
 app.include_router(alert_router.router)
 app.include_router(ws_router.router)
 app.include_router(v1_board_router.router)
 app.include_router(v1_admin_router.router)
+app.include_router(comment_router.router)
 app.include_router(page_router.router)
 
 

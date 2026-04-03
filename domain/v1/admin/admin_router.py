@@ -8,8 +8,11 @@ from typing import List, Optional, Any
 import re
 import models
 
+# API 및 주소 체계 버전 관리 변수 (v2.0 규격 반영)
+API_VERSION_PREFIX = "/v1"
+
 router = APIRouter(
-    prefix="/v1/admin",
+    prefix=f"{API_VERSION_PREFIX}/admin",
     tags=["admin_v1"]
 )
 
@@ -144,11 +147,11 @@ def delete_app(app_id: str, db: Session = Depends(get_db), admin: User = Depends
 # --- Menu Management (지능형 메뉴 관리) ---
 
 def resolve_menu_url(menu: Menu, db: Session) -> str:
-    """[v1.5] 데이터 기반 동적 URL 해석기 (하드코딩 제거)"""
+    """[v2.0] 플랫폼 통합 주소 체계 규격 준수 URL 해석기 (v1.5 하드코딩 제거 및 v2.0 레이어 반영)"""
     if menu.link_type != "APP" or not menu.app_id:
-        # 페이지(PAGE) 타입인 경우 기본 경로 반환
+        # [v2.0] 페이지(PAGE) 타입인 경우 정적 콘텐츠 레이어 경로 반환
         if menu.link_type == "PAGE" and menu.page_id:
-            return f"/v1/board/page/{menu.page_id}"
+            return f"{API_VERSION_PREFIX}/pages/{menu.page_id}"
         return menu.external_url or "#"
         
     app = db.query(AppRegistry).filter(AppRegistry.app_id == menu.app_id).first()
@@ -156,6 +159,13 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
         return menu.external_url or "#"
     
     url = app.frontend_route
+    
+    # [v2.0] 관리자 전용 모드(-1) 처리: /v1/app/ -> /v1/admin/ 으로 레이어 전환
+    if menu.app_instance_id == -1:
+        # URL 내의 /v1/app/ 부분을 /v1/admin/ 으로 치환 (버전 변수 활용)
+        url = url.replace(f"{API_VERSION_PREFIX}/app/", f"{API_VERSION_PREFIX}/admin/")
+        # 동적 파라미터 [slug] 등 제거 후 최종 경로 반환
+        return re.sub(r'/\[.*?\]', '', url)
     
     # [핵심] 인스턴스 정보와 앱 설정 내 해석 메타데이터가 있는 경우 동적 치환
     instance_meta = (app.config_schema or {}).get("instance_info")
@@ -215,9 +225,7 @@ def get_public_menus(
         Menu.parent_id == None, Menu.is_visible == True, Menu.min_rank <= user_rank
     ).order_by(Menu.order).all()
     
-    print(f"DEBUG: Root menus fetched: {root_menus}")
     filtered_menus = filter_menu_tree(root_menus, user_rank, db)
-    print(f"DEBUG: Filtered menus to return: {filtered_menus}")
     return filtered_menus
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])
