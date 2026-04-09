@@ -19,11 +19,11 @@ def get_session_list(db: Session, limit: int = 100):
         # 📌 Redis 실시간 생존 확인 (Redis 리부트 대응)
         if s.status == "ACTIVE":
             redis_key = f"session:{s.user_id}:{s.device_category}"
-            active_jti = rd.get(redis_key)
+            # Redis Set 내에 해당 JTI(session_key)가 존재하는지 확인
+            is_member = rd.sismember(redis_key, s.session_key)
             
-            # Redis에 없거나 JTI가 다르면 세션 만료 처리
-            active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
-            if not active_jti_str or active_jti_str != s.session_key:
+            # Redis에 없으면 세션 만료 처리
+            if not is_member:
                 s.status = "EXPIRED"
                 s.logout_at = datetime.now()
                 modified = True
@@ -44,23 +44,9 @@ def kick_session(db: Session, session_id: int):
     db_session.logout_at = datetime.now()
     db.commit()
 
-    # 2. Redis에서 해당 슬롯 삭제
+    # 2. Redis Set에서 해당 JTI 삭제
     redis_key = f"session:{db_session.user_id}:{db_session.device_category}"
-    
-    # 타입 체크 (WRONGTYPE 방지)
-    rtype = rd.type(redis_key)
-    if rtype not in [b'string', 'string']:
-        if rtype not in [b'none', 'none']:
-            rd.delete(redis_key)
-        return db_session
-
-    active_jti = rd.get(redis_key)
-    
-    # bytes 대응
-    active_jti_str = active_jti.decode() if isinstance(active_jti, bytes) else active_jti
-    
-    if active_jti_str == db_session.session_key:
-        rd.delete(redis_key)
+    rd.srem(redis_key, db_session.session_key)
         
     return db_session
 

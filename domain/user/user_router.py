@@ -37,9 +37,7 @@ def get_current_user(request: Request, session_id: Optional[str] = Cookie(None),
     if not user: raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
 
     redis_key = f"session:{user.id}:{db_session.device_category}"
-    active_jti = rd.get(redis_key)
-    
-    if active_jti is None or active_jti != session_id:
+    if not rd.sismember(redis_key, session_id):
         db_session.status = "EXPIRED"
         db.commit()
         raise HTTPException(status_code=401, detail="다른 기기에서 로그인하여 접속이 종료되었습니다.")
@@ -58,8 +56,7 @@ def get_current_user_optional(request: Request, session_id: Optional[str] = Cook
         user = db.query(User).filter(User.id == db_session.user_id).first()
         if not user: return None
         redis_key = f"session:{user.id}:{device_category}"
-        active_jti = rd.get(redis_key)
-        if active_jti is None or active_jti != session_id: return None
+        if not rd.sismember(redis_key, session_id): return None
         rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
         return user
     except: return None
@@ -101,15 +98,19 @@ def login_for_access_token(response: Response, request: Request, form_data: OAut
     device_category = "MOBILE" if any(x in user_agent_full.lower() for x in ["mobi", "android", "iphone"]) else "DESKTOP"
 
     redis_key = f"session:{user.id}:{device_category}"
-    old_jti = rd.get(redis_key)
-    if old_jti:
-        db.query(UserSession).filter(UserSession.session_key == old_jti).update({
+    # 기존 세션이 있다면 해당 세션을 DB에서 만료 처리 및 Redis에서 삭제
+    current_jtis = rd.smembers(redis_key)
+    for jti_bytes in current_jtis:
+        jti = jti_bytes.decode('utf-8')
+        db.query(UserSession).filter(UserSession.session_key == jti).update({
             "status": "KICKED_OUT", "logout_at": datetime.now()
         })
-        db.commit()
+        rd.srem(redis_key, jti)
+    db.commit()
 
     jti = str(uuid.uuid4())
-    rd.set(redis_key, jti, ex=60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
+    rd.sadd(redis_key, jti)
+    rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
 
     db_session = UserSession(
         user_id=user.id, session_key=jti, device_category=device_category,
@@ -149,7 +150,7 @@ def logout(response: Response, session_id: Optional[str] = Cookie(None), db: Ses
     if session_id:
         db_session = db.query(UserSession).filter(UserSession.session_key == session_id).first()
         if db_session:
-            rd.delete(f"session:{db_session.user_id}:{db_session.device_category}")
+            rd.srem(f"session:{db_session.user_id}:{db_session.device_category}", session_id)
             db_session.status = "LOGOUT"; db_session.logout_at = datetime.now(); db.commit()
     response.delete_cookie(key="session_id")
     return {"message": "Logout successful"}
