@@ -129,18 +129,24 @@ class ServiceEngine(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
 
-class ServiceBinding(Base):
-    """앱 인스턴스와 레고 엔진의 연결 (접착제)"""
-    __tablename__ = "service_binding"
+class ServiceApp(Base):
+    """원자적 기능 단위 (댓글, 설문 등)"""
+    __tablename__ = "service_app"
     id = Column(Integer, primary_key=True)
-    target_app = Column(String, index=True) # "board", "dashboard"
-    target_id = Column(Integer, index=True) # 인스턴스 ID (board_id 등)
+    name = Column(String, nullable=False)
     engine_id = Column(String, ForeignKey("service_engine.id"), nullable=False)
+    config = Column(JSONB, default=dict)
+    child_app_id = Column(Integer, ForeignKey("service_app.id"), nullable=True) # 재귀적 조립을 위한 하위 앱
     
-    # 개별 바인딩 커스텀 설정
-    custom_config = Column(JSONB, default=dict) # {"grid_span": 2, "color": "blue"}
-    min_write_rank = Column(Integer, nullable=True) # 엔진별 행위 권한 (null이면 앱설정 상속)
-    order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+class ServiceInstance(Base):
+    """조합된 서비스 앱 덩어리"""
+    __tablename__ = "service_instance"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    root_app_id = Column(Integer, ForeignKey("service_app.id"), nullable=False) # 덩어리의 시작점
     
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
@@ -160,7 +166,7 @@ class Menu(Base):
     order = Column(Integer, default=0)
     is_visible = Column(Boolean, default=True)
     min_rank = Column(Integer, default=0)
-    sub_menus = relationship("Menu", backref=backref("parent", remote_side=[id]), cascade="all, delete-orphan")
+    sub_menus = relationship("Menu", backref=backref("parent", remote_side=[id]), cascade="all, delete-orphan", order_by="Menu.order")
 
 # --- CMS Board & Post ---
 
@@ -171,6 +177,7 @@ class BoardConfig(Base):
     name = Column(String, nullable=False)
     description = Column(String, nullable=True)
     layout_type = Column(String, default="list")
+    service_instance_id = Column(Integer, ForeignKey("service_instance.id"), nullable=True) # 덩어리 참조
     
     # 레거시와 호환성 유지를 위해 필드 보존
     items_per_page = Column(Integer, default=10)

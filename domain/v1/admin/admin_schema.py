@@ -18,6 +18,7 @@ class MenuBase(BaseModel):
 
 class MenuCreate(MenuBase):
     parent_id: Optional[int] = None
+    app_instance_id: Optional[Any] = None
 
 class MenuUpdate(BaseModel):
     parent_id: Optional[int] = None
@@ -30,12 +31,17 @@ class MenuUpdate(BaseModel):
     is_visible: Optional[bool] = None
     min_rank: Optional[int] = None
     app_id: Optional[str] = None
-    app_instance_id: Optional[int] = None
+    app_instance_id: Optional[Any] = None
     page_id: Optional[int] = None
+
+from typing import List, Optional, Any, Dict, Union
+
+# ... (기존 코드 상단 생략)
 
 class MenuSchema(MenuBase):
     id: int
     parent_id: Optional[int] = None
+    app_instance_id: Optional[Union[int, str]] = None
     sub_menus: List['MenuSchema'] = []
     class Config:
         from_attributes = True

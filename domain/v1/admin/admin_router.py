@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry, DayOff, ServiceRegistry, ServiceEngine, ServiceBinding
+from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry, DayOff, ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance
 from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker, check_rank
 from domain.v1.admin import admin_schema
 from typing import List, Optional, Any
@@ -147,55 +147,51 @@ def delete_app(app_id: str, db: Session = Depends(get_db), admin: User = Depends
 # --- Menu Management (지능형 메뉴 관리) ---
 
 def resolve_menu_url(menu: Menu, db: Session) -> str:
-    """[v2.0] 플랫폼 통합 주소 체계 규격 준수 URL 해석기 (v1.5 하드코딩 제거 및 v2.0 레이어 반영)"""
-    if menu.link_type != "APP" or not menu.app_id:
-        # [v2.0] 페이지(PAGE) 타입인 경우 정적 콘텐츠 레이어 경로 반환
-        if menu.link_type == "PAGE" and menu.page_id:
-            return f"{API_VERSION_PREFIX}/pages/{menu.page_id}"
+    """[v2.2 최종] APP(표준)과 CUSTOM(커스텀) 분기형 주소 조립기"""
+    # 🔗 [URL 레이어] 오직 URL 타입만 수동 입력 주소 사용
+    if menu.link_type == "URL":
         return menu.external_url or "#"
+
+    if menu.link_type in ["FOLDER", "DIVIDER"]:
+        return "#"
         
-    app = db.query(AppRegistry).filter(AppRegistry.app_id == menu.app_id).first()
-    if not app or not app.frontend_route:
-        return menu.external_url or "#"
-    
-    url = app.frontend_route
-    
-    # [v2.0] 관리자 전용 모드(-1) 처리: /v1/app/ -> /v1/admin/ 으로 레이어 전환
-    if menu.app_instance_id == -1:
-        # URL 내의 /v1/app/ 부분을 /v1/admin/ 으로 치환 (버전 변수 활용)
-        url = url.replace(f"{API_VERSION_PREFIX}/app/", f"{API_VERSION_PREFIX}/admin/")
-        # 동적 파라미터 [slug] 등 제거 후 최종 경로 반환
-        return re.sub(r'/\[.*?\]', '', url)
-    
-    # [핵심] 인스턴스 정보와 앱 설정 내 해석 메타데이터가 있는 경우 동적 치환
-    instance_meta = (app.config_schema or {}).get("instance_info")
-    if menu.app_instance_id and instance_meta:
-        model_name = instance_meta.get("model_name")
-        # models 모듈에서 모델 클래스를 동적으로 가져옴 (getattr 활용)
-        model_cls = getattr(models, model_name, None)
+    # ⚙️ [엔진 기반 레이어] APP 또는 CUSTOM
+    if (menu.link_type in ["APP", "CUSTOM"]) and menu.app_id:
+        instance_id = str(menu.app_instance_id) if menu.app_instance_id is not None else ""
         
-        if model_cls:
-            lookup_field = instance_meta.get("lookup_field", "id")
-            return_field = instance_meta.get("return_field", "slug")
-            placeholder = instance_meta.get("placeholder", "[slug]")
+        # 관리자 여부 판별 (-1)
+        if instance_id == "-1":
+            return f"{API_VERSION_PREFIX}/admin/{menu.app_id}"
             
-            # 동적 필터 쿼리 실행
-            instance = db.query(model_cls).filter(
-                getattr(model_cls, lookup_field) == menu.app_instance_id
-            ).first()
+        # [v2.2 최종] link_type에 따른 프리픽스 분기
+        # APP -> /v1/app, CUSTOM -> /v1/custom
+        prefix = f"{API_VERSION_PREFIX}/custom" if menu.link_type == "CUSTOM" else f"{API_VERSION_PREFIX}/app"
+
+        if instance_id and instance_id != "":
+            return f"{prefix}/{menu.app_id}/{instance_id}"
             
-            if instance:
-                # 템플릿 치환 (예: [slug] -> notice)
-                val = getattr(instance, return_field, "")
-                url = url.replace(placeholder, str(val))
-        
-    # 치환되지 않은 나머지 [parameter] 제거 후 최종 경로 반환
-    return re.sub(r'/\[.*?\]', '', url)
+        return f"{prefix}/{menu.app_id}"
+
+    # 📄 [PAGE 레이어]
+    if menu.link_type == "PAGE" and menu.page_id:
+        return f"{API_VERSION_PREFIX}/pages/{menu.page_id}"
+
+    return menu.external_url or "#"
+
+def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
+    # app_id가 'board'인 경우 BoardConfig에서 slug를 조회
+    if menu.app_id == 'board' and menu.app_instance_id:
+        board = db.query(BoardConfig).filter(BoardConfig.id == menu.app_instance_id).first()
+        return board.slug if board else str(menu.app_instance_id)
+    return str(menu.app_instance_id) if menu.app_instance_id is not None else None
 
 def filter_menu_tree(menus: List[Menu], user_rank: int, db: Session):
-    """재귀적 메뉴 필터링 및 동적 URL 주입"""
+    """재귀적 메뉴 필터링 및 동적 URL 주입 + Slug 변환 적용"""
     filtered = []
-    for m in menus:
+    # 정렬 추가: 하위 메뉴들이 'order' 필드 기준으로 정렬되도록 보장
+    sorted_menus = sorted(menus, key=lambda x: x.order)
+    
+    for m in sorted_menus:
         if m.is_visible and m.min_rank <= user_rank:
             # 동적 URL 계산
             final_url = resolve_menu_url(m, db)
@@ -205,7 +201,7 @@ def filter_menu_tree(menus: List[Menu], user_rank: int, db: Session):
                 "icon_name": m.icon_name, "icon_color": m.icon_color,
                 "link_type": m.link_type, "external_url": final_url,
                 "order": m.order, "is_visible": m.is_visible, "min_rank": m.min_rank,
-                "app_id": m.app_id, "app_instance_id": m.app_instance_id,
+                "app_id": m.app_id, "app_instance_id": get_instance_slug(m, db),
                 "sub_menus": filter_menu_tree(m.sub_menus, user_rank, db)
             }
             filtered.append(menu_data)
@@ -230,26 +226,55 @@ def get_public_menus(
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])
 def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
-    """관리자용 전체 메뉴 트리"""
-    return db.query(Menu).options(joinedload(Menu.sub_menus)).filter(Menu.parent_id == None).order_by(Menu.order).all()
+    """관리자용 전체 메뉴 트리 (Slug 변환 포함)"""
+    root_menus = db.query(Menu).options(joinedload(Menu.sub_menus)).filter(Menu.parent_id == None).order_by(Menu.order).all()
+    return filter_menu_tree(root_menus, 999, db)
 
 @router.post("/menu", response_model=admin_schema.MenuSchema)
 def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
-    db_menu = Menu(**menu_in.dict())
+    data = menu_in.dict()
+    original_instance_id = data.get("app_instance_id")
+    
+    if original_instance_id and isinstance(original_instance_id, str):
+        board = db.query(BoardConfig).filter(BoardConfig.slug == original_instance_id).first()
+        if board:
+            data["app_instance_id"] = board.id
+    
+    db_menu = Menu(**data)
     db.add(db_menu)
     db.commit()
     db.refresh(db_menu)
-    return db_menu
+    
+    # 응답 시 slug가 원래 요청에 있었다면 slug로 복구
+    result = admin_schema.MenuSchema.model_validate(db_menu)
+    if isinstance(original_instance_id, str):
+        result.app_instance_id = original_instance_id
+        
+    return result
 
 @router.put("/menu/{menu_id}", response_model=admin_schema.MenuSchema)
 def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     db_menu = db.query(Menu).filter(Menu.id == menu_id).first()
     if not db_menu: raise HTTPException(status_code=404)
-    for key, value in menu_in.dict(exclude_unset=True).items():
+    
+    data = menu_in.dict(exclude_unset=True)
+    original_instance_id = data.get("app_instance_id")
+    
+    if original_instance_id and isinstance(original_instance_id, str):
+        board = db.query(BoardConfig).filter(BoardConfig.slug == original_instance_id).first()
+        if board:
+            data["app_instance_id"] = board.id
+    
+    for key, value in data.items():
         setattr(db_menu, key, value)
     db.commit()
     db.refresh(db_menu)
-    return db_menu
+    
+    result = admin_schema.MenuSchema.model_validate(db_menu)
+    if isinstance(original_instance_id, str):
+        result.app_instance_id = original_instance_id
+        
+    return result
 
 @router.delete("/menu/{menu_id}")
 def delete_menu(menu_id: int, db: Session = Depends(get_db), admin: User = Depends(check_admin)):

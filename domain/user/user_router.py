@@ -100,8 +100,8 @@ def login_for_access_token(response: Response, request: Request, form_data: OAut
     redis_key = f"session:{user.id}:{device_category}"
     # 기존 세션이 있다면 해당 세션을 DB에서 만료 처리 및 Redis에서 삭제
     current_jtis = rd.smembers(redis_key)
-    for jti_bytes in current_jtis:
-        jti = jti_bytes.decode('utf-8')
+    for jti_item in current_jtis:
+        jti = jti_item.decode('utf-8') if isinstance(jti_item, bytes) else jti_item
         db.query(UserSession).filter(UserSession.session_key == jti).update({
             "status": "KICKED_OUT", "logout_at": datetime.now()
         })
