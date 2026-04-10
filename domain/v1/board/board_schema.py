@@ -61,3 +61,16 @@ class LandingPageResponse(BaseModel):
     config: Optional[BoardConfigSchema] = None
     post: Optional[PostSimpleSchema] = None
     message: str = "success"
+
+# --- Post Detail Response with Bindings ---
+
+class ServiceBindingSchema(BaseModel):
+    service_id: str
+    engine_id: str
+    service_component: str
+    config: Dict[str, Any]
+
+class PostDetailResponse(BaseModel):
+    post: PostSimpleSchema
+    board: BoardConfigSchema
+    bindings: List[ServiceBindingSchema] = []

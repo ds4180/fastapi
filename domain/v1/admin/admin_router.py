@@ -352,6 +352,63 @@ def list_boards_for_selection(db: Session = Depends(get_db), admin: User = Depen
 def list_posts_for_selection(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     return db.query(Post).order_by(Post.create_date.desc()).limit(100).all()
 
+from domain.push.push_service import send_push_to_all
+
+# --- Push Notification Management (푸시 알림 관리) ---
+
+@router.get("/push/subscriptions")
+def list_push_subscriptions(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """모든 푸시 구독 목록 조회 (관리자용)"""
+    # [방어 로직] User 테이블과 명시적으로 JOIN하여 정보를 가져옵니다.
+    subs = db.query(models.PushSubscription).join(models.User, models.PushSubscription.user_id == models.User.id).all()
+    result = []
+    for s in subs:
+        user = db.query(models.User).filter(models.User.id == s.user_id).first()
+        result.append({
+            "id": s.id,
+            "user_id": s.user_id,
+            "username": user.username if user else "Unknown",
+            "real_name": user.real_name if user else "",
+            "endpoint": s.endpoint[:80] + "...", # 프리뷰 길이를 조금 늘림
+        })
+    return result
+
+@router.post("/push/send")
+def admin_send_push(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """관리자가 커스텀 메시지를 전체 푸시 발송"""
+    title = payload.get("title", "공지사항")
+    body = payload.get("body", "")
+    
+    if not body:
+        raise HTTPException(status_code=400, detail="메시지 본문을 입력해주세요.")
+        
+    # 기존에 만들어둔 발송 함수 활용 (전체 발송)
+    from domain.push.push_service import send_push_to_all
+    result = send_push_to_all(title, body, db=db)
+    
+    return {"message": "success", "sent_count": result.get("sent", 0)}
+
+@router.delete("/push/subscriptions/{sub_id}")
+def delete_push_subscription(
+    sub_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """무효한 푸시 구독 정보 강제 삭제"""
+    sub = db.query(models.PushSubscription).filter(models.PushSubscription.id == sub_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="구독 정보를 찾을 수 없습니다.")
+    db.delete(sub)
+    db.commit()
+    return {"message": "success"}
+
 # --- DayOff Management (전체 휴무 관리) ---
 
 @router.get("/dayoffs")
@@ -398,3 +455,101 @@ def admin_update_dayoff_status(
         
     db.commit()
     return {"message": "success", "new_status": new_status}
+
+# --- [v1.6] Service App Architecture 관리 API ---
+
+# 1. Service Registry (대분류)
+@router.get("/service-registries", response_model=List[admin_schema.ServiceRegistrySchema])
+def list_service_registries(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    return db.query(ServiceRegistry).all()
+
+@router.post("/service-registries", response_model=admin_schema.ServiceRegistrySchema)
+def create_service_registry(data: admin_schema.ServiceRegistryCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = ServiceRegistry(**data.dict())
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+@router.delete("/service-registries/{registry_id}")
+def delete_service_registry(registry_id: str, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = db.query(ServiceRegistry).filter(ServiceRegistry.id == registry_id).first()
+    if not db_obj: raise HTTPException(status_code=404)
+    db.delete(db_obj)
+    db.commit()
+    return {"message": "success"}
+
+# 2. Service Engine (컴포넌트 버전)
+@router.get("/service-engines", response_model=List[admin_schema.ServiceEngineSchema])
+def list_service_engines(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    return db.query(ServiceEngine).all()
+
+@router.post("/service-engines", response_model=admin_schema.ServiceEngineSchema)
+def create_service_engine(data: admin_schema.ServiceEngineCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = ServiceEngine(**data.dict())
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+@router.delete("/service-engines/{engine_id}")
+def delete_service_engine(engine_id: str, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = db.query(ServiceEngine).filter(ServiceEngine.id == engine_id).first()
+    if not db_obj: raise HTTPException(status_code=404)
+    db.delete(db_obj)
+    db.commit()
+    return {"message": "success"}
+
+# 3. Service App (원자적 인스턴스)
+@router.get("/service-apps", response_model=List[admin_schema.ServiceAppSchema])
+def list_service_apps(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    return db.query(ServiceApp).all()
+
+@router.post("/service-apps", response_model=admin_schema.ServiceAppSchema)
+def create_service_app(data: admin_schema.ServiceAppCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = ServiceApp(**data.dict())
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+@router.put("/service-apps/{app_id}", response_model=admin_schema.ServiceAppSchema)
+def update_service_app(app_id: int, data: admin_schema.ServiceAppUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = db.query(ServiceApp).filter(ServiceApp.id == app_id).first()
+    if not db_obj: raise HTTPException(status_code=404)
+    for k, v in data.dict(exclude_unset=True).items():
+        setattr(db_obj, k, v)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+# 4. Service Instance (번들)
+@router.get("/service-instances", response_model=List[admin_schema.ServiceInstanceSchema])
+def list_service_instances(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    return db.query(ServiceInstance).all()
+
+@router.post("/service-instances", response_model=admin_schema.ServiceInstanceSchema)
+def create_service_instance(data: admin_schema.ServiceInstanceCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = ServiceInstance(**data.dict())
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+@router.put("/service-instances/{instance_id}", response_model=admin_schema.ServiceInstanceSchema)
+def update_service_instance(instance_id: int, data: admin_schema.ServiceInstanceUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = db.query(ServiceInstance).filter(ServiceInstance.id == instance_id).first()
+    if not db_obj: raise HTTPException(status_code=404)
+    for k, v in data.dict(exclude_unset=True).items():
+        setattr(db_obj, k, v)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+@router.delete("/service-instances/{instance_id}")
+def delete_service_instance(instance_id: int, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    db_obj = db.query(ServiceInstance).filter(ServiceInstance.id == instance_id).first()
+    if not db_obj: raise HTTPException(status_code=404)
+    db.delete(db_obj)
+    db.commit()
+    return {"message": "success"}

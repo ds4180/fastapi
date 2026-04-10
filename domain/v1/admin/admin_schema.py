@@ -155,31 +155,56 @@ class ServiceEngineSchema(ServiceEngineBase):
         from_attributes = True
 
 
-# --- Service Binding 스키마 (앱 인스턴스 ↔ 엔진 연결) ---
-
-class ServiceBindingBase(BaseModel):
-    target_app: str                         # "board", "dashboard" 등 app_id
-    target_id: int                          # 앱 인스턴스 ID (board_id 등)
-    engine_id: str                          # 연결할 ServiceEngine.id
-    custom_config: Dict[str, Any] = {}      # 바인딩별 커스텀 설정
-    min_write_rank: Optional[int] = None    # null이면 AppRegistry 설정 상속
-    order: int = 0
+# --- Service App 스키마 (원자적 기능 단위) ---
+class ServiceAppBase(BaseModel):
+    name: str                           # 서비스 인스턴스 명칭
+    engine_id: str                      # 기초가 되는 ServiceEngine.id
+    config: Dict[str, Any] = {}         # 엔진 적용 설정
     is_active: bool = True
 
-class ServiceBindingCreate(ServiceBindingBase):
+class ServiceAppCreate(ServiceAppBase):
     pass
 
-class ServiceBindingUpdate(BaseModel):
-    custom_config: Optional[Dict[str, Any]] = None
-    min_write_rank: Optional[int] = None
-    order: Optional[int] = None
+class ServiceAppUpdate(BaseModel):
+    name: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
 
-class ServiceBindingSchema(ServiceBindingBase):
+class ServiceAppSchema(ServiceAppBase):
     id: int
     created_at: datetime
     class Config:
         from_attributes = True
+
+
+# --- Service Instance 스키마 (완성된 서비스 덩어리) ---
+class ServiceInstanceBase(BaseModel):
+    name: str                           # "자유게시판용 패키지" 등
+    service_app_ids: Optional[List[int]] = [] # 조립될 서비스 앱 ID 리스트 (순서 중요)
+    is_active: bool = True
+
+class ServiceInstanceCreate(ServiceInstanceBase):
+    pass
+
+class ServiceInstanceUpdate(BaseModel):
+    name: Optional[str] = None
+    service_app_ids: Optional[List[int]] = None
+    is_active: Optional[bool] = None
+
+class ServiceInstanceSchema(ServiceInstanceBase):
+    id: int
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+
+# --- Frontend 전달용 Resolved Service Binding ---
+class ResolvedServiceBinding(BaseModel):
+    """프론트엔드 엔진에 전달할 최종 조립된 서비스 명세"""
+    service_id: str                     # service_registry.id (e.g., "comment")
+    engine_id: str                      # service_engine.id (e.g., "basic_comment_v1")
+    service_component: str              # service_engine.frontend_plugin
+    config: Dict[str, Any]              # ServiceApp.config
 
 # --- 게시판/포스트 공통 스키마 ---
 class BoardSimpleSchema(BaseModel):
@@ -203,6 +228,7 @@ class BoardConfigBase(BaseModel):
     items_per_page: int = 10
     fields_def: List[Any] = []
     options: Dict[str, Any] = {}
+    service_instance_id: Optional[int] = None # 서비스 번들 바인딩
     is_active: bool = True
 
 class BoardConfigCreate(BoardConfigBase):
@@ -216,6 +242,7 @@ class BoardConfigUpdate(BaseModel):
     items_per_page: Optional[int] = None
     fields_def: Optional[List[Any]] = None
     options: Optional[Dict[str, Any]] = None
+    service_instance_id: Optional[int] = None
     is_active: Optional[bool] = None
 
 class BoardConfigAdminSchema(BoardConfigBase):

@@ -1,3 +1,4 @@
+from fastapi import BackgroundTasks
 from datetime import datetime
 from sqlalchemy.orm import Session
 from models import Alert, User
@@ -23,7 +24,7 @@ def get_active_alerts(db: Session):
 from domain.ws.ws_service import manager
 
 
-async def create_alert(db: Session, alert_create: AlertCreate, user: User):
+async def create_alert(db: Session, alert_create: AlertCreate, user: User, background_tasks: BackgroundTasks):
     db_alert = Alert(
         message=alert_create.message,
         level=alert_create.level,
@@ -43,10 +44,8 @@ async def create_alert(db: Session, alert_create: AlertCreate, user: User):
     db.commit()
     
     # 🔔 실시간 웹소켓 알림 전송 (새 알림이 있음을 모든 클라이언트에 알림)
-    try:
-        await manager.broadcast({"type": "new_alert"})
-    except Exception as e:
-        print(f"WebSocket broadcast error: {e}")
+    # 기존 코드의 방식대로 백그라운드 태스크를 활용할 수 있게 연결
+    background_tasks.add_task(manager.broadcast, {"type": "new_alert"})
         
     return db_alert
 

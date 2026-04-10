@@ -136,17 +136,17 @@ class ServiceApp(Base):
     name = Column(String, nullable=False)
     engine_id = Column(String, ForeignKey("service_engine.id"), nullable=False)
     config = Column(JSONB, default=dict)
-    child_app_id = Column(Integer, ForeignKey("service_app.id"), nullable=True) # 재귀적 조립을 위한 하위 앱
     
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
 
 class ServiceInstance(Base):
-    """조합된 서비스 앱 덩어리"""
+    """조합된 서비스 앱 덩어리 (조립 설명서)"""
     __tablename__ = "service_instance"
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
-    root_app_id = Column(Integer, ForeignKey("service_app.id"), nullable=False) # 덩어리의 시작점
+    # 조립될 서비스 앱 ID들이 순서대로 담긴 리스트 (예: [101, 102, 105])
+    service_app_ids = Column(JSONB, default=list) 
     
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)

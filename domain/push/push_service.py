@@ -36,6 +36,9 @@ async def save_subscription(db: Session, subscription_data: schemas.PushSubscrip
     print("Service: New subscription saved successfully.")
     return new_sub
 
+import json
+from database import SessionLocal # 백그라운드 태스크 및 관리자용 세션 생성을 위해 추가
+
 async def send_to_all_subscribers(db: Session):
     print("Service: Attempting to send notifications to all subscribers.")
     all_subscriptions = get_all_subscriptions(db)
@@ -65,3 +68,44 @@ async def send_to_all_subscribers(db: Session):
             
     print(f"Service: Finished sending. Sent: {sent_count}, Failed: {failed_count}.")
     return {"sent": sent_count, "failed": failed_count}
+
+def send_push_to_all(title: str, body: str, url: str = "/", db: Session = None):
+    """
+    [v2.1 리팩토링] 모든 구독자에게 정규화된 JSON 푸시 발송
+    - title, body 뿐만 아니라 클릭 시 이동할 url 정보를 포함합니다.
+    """
+    own_session = False
+    if db is None:
+        db = SessionLocal()
+        own_session = True
+        
+    try:
+        subscriptions = db.query(PushSubscription).all()
+        # 🔗 서비스 워커(sw.js) 파서 규격에 맞춘 JSON 페이로드 생성
+        payload = json.dumps({
+            "title": title,
+            "body": body,
+            "url": url,
+            "icon": "/favicon.png",
+            "badge": "/favicon.png"
+        })
+
+        sent = 0
+        for sub in subscriptions:
+            try:
+                webpush(
+                    subscription_info={
+                        "endpoint": sub.endpoint, 
+                        "keys": {"p256dh": sub.p256dh, "auth": sub.auth}
+                    },
+                    data=payload,
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims=VAPID_CLAIMS
+                )
+                sent += 1
+            except Exception as e:
+                print(f"Push failed for {sub.endpoint}: {e}")
+        return {"sent": sent}
+    finally:
+        if own_session:
+            db.close()
