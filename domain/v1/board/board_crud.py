@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
-from models import Post, BoardConfig, User, PostRead, Comment, PostReaction
+from models import Post, BoardConfig, User, PostRead, Comment, PostReaction, MediaAsset
 from domain.v1.board.board_schema import PostCreate, PostUpdate
 from typing import List, Optional
 
@@ -54,7 +54,7 @@ def get_post_list(db: Session, board_id: int, skip: int = 0, limit: int = 10, us
     return total, result_posts
 
 def create_post(db: Session, board_id: int, user_id: int, post_in: PostCreate):
-    """새 게시물 생성 (TipTap JSON 및 Extra Data 지원)"""
+    """새 게시물 생성 (MediaAsset 연동 포함)"""
     db_post = Post(
         board_id=board_id,
         user_id=user_id,
@@ -68,6 +68,18 @@ def create_post(db: Session, board_id: int, user_id: int, post_in: PostCreate):
     db.add(db_post)
     db.commit()
     db.refresh(db_post)
+
+    # ⚠️ 업로드된 미디어 자산 연동 (MediaAsset.target_id 업데이트)
+    if post_in.media_ids:
+        db.query(MediaAsset).filter(
+            MediaAsset.id.in_(post_in.media_ids),
+            MediaAsset.user_id == user_id
+        ).update({
+            "app_id": "board",
+            "target_id": str(db_post.id)
+        }, synchronize_session=False)
+        db.commit()
+
     return db_post
 
 def get_post_detail(db: Session, post_id: int):
@@ -75,12 +87,25 @@ def get_post_detail(db: Session, post_id: int):
     return db.query(Post).filter(Post.id == post_id, Post.is_deleted == False).first()
 
 def update_post(db: Session, db_post: Post, post_in: PostUpdate):
-    """게시물 수정"""
+    """게시물 수정 (MediaAsset 연동 포함)"""
     update_data = post_in.dict(exclude_unset=True)
+    media_ids = update_data.pop("media_ids", None)
+
     for key, value in update_data.items():
         setattr(db_post, key, value)
     
     db_post.modify_date = datetime.now()
+
+    # ⚠️ 수정 시 추가된 미디어 자산 연동
+    if media_ids:
+        db.query(MediaAsset).filter(
+            MediaAsset.id.in_(media_ids),
+            MediaAsset.user_id == db_post.user_id
+        ).update({
+            "app_id": "board",
+            "target_id": str(db_post.id)
+        }, synchronize_session=False)
+
     db.commit()
     db.refresh(db_post)
     return db_post

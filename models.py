@@ -376,6 +376,38 @@ class Page(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class MediaAsset(Base):
+    """시스템 전역 미디어 자산 관리 모델 (Production-ready)"""
+    __tablename__ = "media_assets"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    
+    # 계층 및 권한 설정
+    access_level = Column(String(20), default="PUBLIC") # PUBLIC, PROTECTED, PRIVATE, SYSTEM
+    app_id = Column(String(50), index=True)             # 'board', 'profile', 'admin' 등
+    target_id = Column(String(100), index=True)         # 연결된 대상의 식별자
+    
+    # 파일 물리 정보
+    original_name = Column(String(255), nullable=False)
+    file_path = Column(String(500), nullable=False)     # 실제 저장 상대 경로
+    thumbnail_path = Column(String(500), nullable=True)  # 기본 썸네일 경로 (레거시 대응용)
+    
+    # 상세 메타데이터 (이미지 규격, 다중 썸네일 등)
+    # { "width": 1024, "height": 768, "thumbs": {"sm": "...", "md": "...", "lg": "..."} }
+    meta_info = Column(JSONB, default=dict)
+    
+    file_size = Column(Integer, nullable=True)
+    mime_type = Column(String(100), nullable=True)
+    category = Column(String(20))                       # 'image', 'document', 'archive'
+    
+    # 상태 관리
+    is_deleted = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=datetime.now)
+    deleted_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", backref="media_assets")
+
 class PushSubscription(Base):
     __tablename__ = "push_subscription"
     id = Column(Integer, primary_key=True)

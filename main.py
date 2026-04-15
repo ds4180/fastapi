@@ -8,6 +8,7 @@ from domain.question import question_router
 from domain.answer import answer_router
 from domain.user import user_router
 from domain.fileupload import fileupload_router
+from domain.media import media_router
 from domain.dayoff import dayoff_router
 from domain.push import push_router
 from domain.alert import alert_router
@@ -68,6 +69,7 @@ app.include_router(question_router.router)
 app.include_router(answer_router.router)
 app.include_router(user_router.router)
 app.include_router(fileupload_router.router)
+app.include_router(media_router.router)
 app.include_router(dayoff_router.router)
 app.include_router(push_router.router)
 app.include_router(alert_router.router)

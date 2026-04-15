@@ -44,6 +44,7 @@ class PostCreate(BaseModel):
     content_json: Optional[Any] = None
     extra_data: Dict[str, Any] = {}
     status: str = "published"
+    media_ids: List[int] = [] # ⚠️ 업로드된 미디어 자산 ID 목록
 
 class PostUpdate(BaseModel):
     title: Optional[str] = None
@@ -51,6 +52,7 @@ class PostUpdate(BaseModel):
     content_json: Optional[Any] = None
     extra_data: Optional[Dict[str, Any]] = None
     status: Optional[str] = None
+    media_ids: Optional[List[int]] = None # ⚠️ 수정 시 추가/변경된 미디어 ID 목록
 
 class PostListSchema(BaseModel):
     total: int = 0
