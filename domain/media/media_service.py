@@ -56,18 +56,21 @@ async def media_process_upload(
     user: User,
     files: List[UploadFile],
     app_id: str = "general",
-    target_id: str = None
+    target_id: str = None,
+    access_level: Optional[str] = None,
+    sub_path: Optional[str] = None
 ) -> List[MediaAsset]:
     """
     [미디어 통합 업로드 파이프라인]
-    1. 유저 권한에 따른 보안 레벨(PUBLIC/PRIVATE) 결정
-    2. 운영체제 독립적인 물리 경로 생성 및 폴더 확보
+    1. 유저 권한에 따른 보안 레벨(PUBLIC/PRIVATE) 결정 (매개변수 우선)
+    2. 운영체제 독립적인 물리 경로 생성 및 폴더 확보 (sub_path 우선)
     3. 원본 파일 저장 (중복 방지를 위해 UUID 파일명 사용)
     4. 이미지의 경우 Pillow를 사용하여 다중 WebP 썸네일(SM, MD, LG) 자동 생성
     5. MediaAsset 모델을 통한 DB 영속화 (정적 서빙을 위한 상대 경로 저장)
     """
     results = []
-    access_level = media_get_access_level(user, app_id)
+    # 매개변수로 전달된 access_level이 있으면 그것을 사용, 없으면 자동 결정
+    final_access_level = access_level.upper() if access_level else media_get_access_level(user, app_id)
 
     for file in files:
         # --- 1. 파일 기본 정보 추출 ---
@@ -82,9 +85,16 @@ async def media_process_upload(
             category = config.MEDIA_CATEGORIES["DOCUMENT"]
             
         # --- 3. 물리 저장 경로 확정 ---
-        relative_dir = media_generate_path(access_level, category, user.id)
+        if sub_path:
+            # 전달된 sub_path가 있으면 티어 폴더와 결합하여 사용
+            tier_folder = config.MEDIA_TIERS.get(final_access_level, "public")
+            relative_dir = os.path.join(tier_folder, sub_path.strip("/")).replace("\\", "/")
+        else:
+            # 기본 날짜 기반 경로 생성
+            relative_dir = media_generate_path(final_access_level, category, user.id)
+            
         abs_dir = os.path.join(config.MEDIA_ROOT, relative_dir)
-        os.makedirs(abs_dir, exist_ok=True) # 폴더가 없으면 자동 생성 (parents=True 포함)
+        os.makedirs(abs_dir, exist_ok=True) 
         
         # --- 4. 고유 파일명 생성 및 저장 ---
         unique_id = str(uuid.uuid4())
@@ -98,7 +108,7 @@ async def media_process_upload(
         
         file_size = len(content)
         meta_info = {"original_name": original_name}
-        thumb_main_path = None # 레거시 대응용 기본 썸네일 경로
+        thumb_main_path = None
 
         # --- 5. 이미지 특화 처리: 다중 WebP 썸네일 프로세싱 ---
         if category == config.MEDIA_CATEGORIES["IMAGE"]:
@@ -110,17 +120,14 @@ async def media_process_upload(
                     thumb_dir = os.path.join(abs_dir, "thumbnails")
                     os.makedirs(thumb_dir, exist_ok=True)
                     
-                    # 투명도(P, CMYK) 대응을 위한 RGB 변환
                     if img.mode in ("P", "CMYK"):
                         img = img.convert("RGB")
                     
                     thumbs_data = {}
-                    # config에 정의된 모든 사이즈(SM, MD, LG)에 대해 루프 실행
                     for key, cfg in config.MEDIA_THUMB_CONFIG.items():
                         t_img = img.copy()
                         t_img.thumbnail(cfg["size"], Image.Resampling.LANCZOS)
                         
-                        # WebP 형식으로 강제 변환하여 용량 최적화
                         t_filename = f"{unique_id}_{cfg['suffix']}.webp"
                         t_abs_path = os.path.join(thumb_dir, t_filename)
                         t_rel_path = os.path.join(relative_dir, "thumbnails", t_filename).replace("\\", "/")
@@ -128,20 +135,17 @@ async def media_process_upload(
                         t_img.save(t_abs_path, "WEBP", quality=config.WEBP_QUALITY)
                         thumbs_data[key.lower()] = t_rel_path
                         
-                        # 기본 썸네일 필드(레거시)에는 MD(Medium) 사이즈를 할당
                         if key == "MD":
                             thumb_main_path = t_rel_path
                     
-                    # 상세 썸네일 경로 정보를 meta_info JSONB 필드에 저장
                     meta_info["thumbs"] = thumbs_data
             except Exception as e:
-                # ⚠️ 이미지 처리 실패 시에도 원본 파일은 유지하며 로그만 남김
                 print(f"[Media Error] Thumbnail processing failed: {e}")
 
         # --- 6. MediaAsset 모델 생성 및 DB 저장 ---
         asset = MediaAsset(
             user_id=user.id,
-            access_level=access_level,
+            access_level=final_access_level,
             app_id=app_id,
             target_id=target_id,
             original_name=original_name,
@@ -155,9 +159,9 @@ async def media_process_upload(
         db.add(asset)
         results.append(asset)
 
-    db.commit() # 트랜잭션 확정
+    db.commit() 
     for asset in results:
-        db.refresh(asset) # 생성된 PK(id) 등을 반영
+        db.refresh(asset) 
         
     return results
 
