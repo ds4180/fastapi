@@ -8,13 +8,12 @@ from typing import List, Optional, Any
 import re
 import models
 
-# API 및 주소 체계 버전 관리 변수 (v2.0 규격 반영)
-API_VERSION_PREFIX = "/v1"
-
 router = APIRouter(
-    prefix=f"{API_VERSION_PREFIX}/admin",
+    prefix="/admin",
     tags=["admin_v1"]
 )
+
+API_VERSION_PREFIX = "/v1"
 
 # 편리한 최고 관리자 체크 의존성 (Rank 4 기준)
 check_admin = check_rank(required_rank=4)
@@ -286,20 +285,23 @@ def delete_menu(menu_id: int, db: Session = Depends(get_db), admin: User = Depen
 
 # --- System Configuration ---
 
-@router.get("/config")
+@router.get("/config", response_model=List[admin_schema.SystemConfigSchema])
 def get_all_configs(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     return db.query(SystemConfig).all()
 
-@router.put("/config/{key}")
-def update_config(key: str, value: Any = Body(...), db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+@router.put("/config/{key}", response_model=admin_schema.SystemConfigSchema)
+def update_config(key: str, payload: admin_schema.SystemConfigUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     config = db.query(SystemConfig).filter(SystemConfig.key == key).first()
     if not config:
-        config = SystemConfig(key=key, value=value)
+        config = SystemConfig(key=key, value=payload.value, description=payload.description)
         db.add(config)
     else:
-        config.value = value
+        config.value = payload.value
+        if payload.description is not None:
+            config.description = payload.description
     db.commit()
-    return {"message": "success", "key": key, "value": value}
+    db.refresh(config)
+    return config
 
 @router.get("/config/public")
 def get_public_configs(db: Session = Depends(get_db)):

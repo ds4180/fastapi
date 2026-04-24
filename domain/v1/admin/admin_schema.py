@@ -69,6 +69,20 @@ class UserAdminSchema(BaseModel):
 class UserRankUpdate(BaseModel):
     rank_level: int
 
+# --- System Config 스키마 ---
+class SystemConfigSchema(BaseModel):
+    key: str
+    value: Any
+    description: Optional[str] = None
+    updated_date: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class SystemConfigUpdate(BaseModel):
+    value: Any
+    description: Optional[str] = None
+
 # --- 시스템 App 관리 스키마 ---
 
 class AppRegistryBase(BaseModel):
