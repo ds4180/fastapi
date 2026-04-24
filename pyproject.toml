@@ -1,0 +1,24 @@
+[project]
+name = "test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiofiles>=24.1.0",
+    "alembic>=1.16.5",
+    "bcrypt<4.1",
+    "fastapi>=0.115.12",
+    "gunicorn>=23.0.0",
+    "passlib[bcrypt]>=1.7.4",
+    "pillow>=12.1.1",
+    "psycopg[binary]>=3.2.10",
+    "pydantic[email]>=2.11.4",
+    "python-jose[cryptography]>=3.5.0",
+    "python-multipart>=0.0.20",
+    "pywebpush>=2.3.0",
+    "redis>=7.2.1",
+    "sqlalchemy>=2.0.43",
+    "uvicorn[standard]>=0.34.2",
+    "wheel>=0.45.1",
+]
