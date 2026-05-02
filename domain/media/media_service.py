@@ -14,8 +14,23 @@ from domain.system.task_service import enqueue_task
 logger = logging.getLogger("media_service")
 
 # ==============================================================================
-# [Media System Domain Service v3.1]
+# [Media System Domain Service v3.2]
 # ==============================================================================
+
+def safe_makedirs(path, mode=0o775):
+    """[v3.2 Root Cause Fix] 모든 계층의 폴더 권한을 확실히 보장하며 폴더 생성"""
+    if not os.path.exists(path):
+        os.makedirs(path, mode=mode, exist_ok=True)
+        # 상위로 올라가며 UPLOAD_DIR(MEDIA_ROOT)를 만날 때까지 권한 수정
+        curr = path
+        root_path = os.path.abspath(config.MEDIA_ROOT)
+        while curr:
+            abs_curr = os.path.abspath(curr)
+            if len(abs_curr) <= len(root_path): break
+            try:
+                os.chmod(abs_curr, mode)
+            except: break
+            curr = os.path.dirname(curr)
 
 def media_get_access_level(user: User, app_id: str) -> str:
     if user.rank() >= 4:
@@ -75,7 +90,7 @@ async def media_process_upload(
             relative_dir = media_generate_path(final_access_level, category, user.id)
             
         abs_dir = os.path.join(config.MEDIA_ROOT, relative_dir)
-        os.makedirs(abs_dir, exist_ok=True) 
+        safe_makedirs(abs_dir) 
         
         # 4. 네이밍 규칙 적용
         unique_uuid = str(uuid.uuid4())
@@ -92,6 +107,7 @@ async def media_process_upload(
         content = await file.read()
         async with aiofiles.open(abs_file_path, "wb") as f:
             await f.write(content)
+        os.chmod(abs_file_path, 0o644) # [v3.2] 원본 파일 읽기 권한 보장
         
         file_size = len(content)
         meta_info = {"original_name": original_name}
@@ -103,7 +119,7 @@ async def media_process_upload(
                 with Image.open(abs_file_path) as img:
                     meta_info["width"], meta_info["height"] = img.size
                     thumb_dir = os.path.join(abs_dir, config.THUMB_FOLDER_NAME)
-                    os.makedirs(thumb_dir, exist_ok=True)
+                    safe_makedirs(thumb_dir)
                     
                     if img.mode in ("P", "CMYK"):
                         img = img.convert("RGB")
@@ -118,6 +134,7 @@ async def media_process_upload(
                     
                     # ⚠️ 오타 수정: WEBP_QUALITY 사용
                     sm_img.save(sm_abs_path, "WEBP", quality=config.WEBP_QUALITY)
+                    os.chmod(sm_abs_path, 0o644) # [v3.2] SM 썸네일 읽기 권한 보장
                     
                     meta_info["thumbs"] = {"sm": sm_rel_path}
                     thumb_main_path = sm_rel_path

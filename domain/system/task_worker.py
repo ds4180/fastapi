@@ -10,6 +10,7 @@ from models import SystemTask, MediaAsset
 from database import SessionLocal
 from domain.media import media_config as config
 from PIL import Image
+from domain.media import media_service # [v3.2] safe_makedirs 사용을 위해 임포트
 
 # 로깅 설정
 logger = logging.getLogger("task_worker")
@@ -88,7 +89,7 @@ async def handle_thumb_gen(task: SystemTask, db: Session):
         
         dir_name = os.path.dirname(abs_file_path)
         thumb_dir = os.path.join(dir_name, config.THUMB_FOLDER_NAME)
-        os.makedirs(thumb_dir, exist_ok=True)
+        media_service.safe_makedirs(thumb_dir)
         
         # 파일명에서 UUID 추출 (IMG_uuid.JPG -> uuid)
         base_name = os.path.basename(asset.file_path)
@@ -97,8 +98,8 @@ async def handle_thumb_gen(task: SystemTask, db: Session):
         if img.mode in ("P", "CMYK"):
             img = img.convert("RGB")
             
-        # MD, LG 사이즈 비동기 생성
-        for key in ["MD", "LG"]:
+        # SM, MD, LG 사이즈 비동기 생성 (전체 복구 지원)
+        for key in ["SM", "MD", "LG"]:
             cfg = config.MEDIA_THUMB_CONFIG[key]
             t_img = img.copy()
             t_img.thumbnail(cfg["size"], Image.Resampling.LANCZOS)
@@ -109,14 +110,114 @@ async def handle_thumb_gen(task: SystemTask, db: Session):
             t_rel_path = os.path.join(os.path.dirname(asset.file_path), config.THUMB_FOLDER_NAME, t_filename).replace("\\", "/")
             
             t_img.save(t_abs_path, "WEBP", quality=config.WEBP_QUALITY)
+            os.chmod(t_abs_path, 0o644) # [v3.2] 비동기 썸네일 읽기 권한 보장
             meta_info["thumbs"][key.lower()] = t_rel_path
+            
+            # SM 사이즈인 경우 레거시 필드인 thumbnail_path도 함께 업데이트
+            if key == "SM":
+                asset.thumbnail_path = t_rel_path
 
         asset.meta_info = meta_info
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(asset, "meta_info")
         db.commit()
     
     task.progress_pct = 100
     logger.info(f"🎨 고해상도 썸네일 생성 완료: {asset.id}")
     return {"status": "success", "asset_id": asset_id}
+
+import shutil
+from domain.system.task_service import enqueue_task
+
+@register_handler("MEDIA_BACKUP")
+async def handle_media_backup(task: SystemTask, db: Session):
+    """
+    [v3.2] 미디어 비동기 백업 핸들러
+    원본 파일을 PRIVATE 계층으로 복사하고 새 DB 레코드를 생성합니다.
+    """
+    asset_ids = task.payload.get("asset_ids", [])
+    user_id = task.payload.get("target_user_id")
+    
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    backup_sub_path = f"USERS/{user_id}/ADMIN_BACKUPS/{today_str}"
+    backup_root = os.path.join(config.MEDIA_ROOT, "PRIVATE", backup_sub_path)
+    
+    success_count = 0
+    errors = []
+    
+    assets = db.query(MediaAsset).filter(MediaAsset.id.in_(asset_ids)).all()
+    for asset in assets:
+        try:
+            src_path = os.path.join(config.MEDIA_ROOT, asset.file_path)
+            if not os.path.exists(src_path):
+                errors.append(f"Source not found: {asset.original_name}")
+                continue
+                
+            category_dir = "IMAGE" if asset.category == "image" else "DOCUMENT"
+            target_dir = os.path.join(backup_root, category_dir)
+            media_service.safe_makedirs(target_dir)
+            
+            dst_path = os.path.join(target_dir, asset.original_name)
+            # 중복 회피
+            counter = 1
+            name, ext = os.path.splitext(asset.original_name)
+            while os.path.exists(dst_path):
+                dst_path = os.path.join(target_dir, f"{name}({counter}){ext}")
+                counter += 1
+                
+            shutil.copy2(src_path, dst_path)
+            os.chmod(dst_path, 0o644) # [v3.2] 백업 파일 읽기 권한 보장
+            
+            # DB 레코드 생성
+            new_asset = MediaAsset(
+                user_id=user_id,
+                access_level="PRIVATE",
+                app_id="admin_backup",
+                target_id=today_str,
+                original_name=os.path.basename(dst_path),
+                file_path=os.path.join("PRIVATE", backup_sub_path, category_dir, os.path.basename(dst_path)),
+                file_size=asset.file_size,
+                mime_type=asset.mime_type,
+                category=asset.category,
+                meta_info={} 
+            )
+            db.add(new_asset)
+            db.flush() # ID 확보
+            
+            # 이미지인 경우 썸네일 생성 예약
+            if asset.category == "image":
+                enqueue_task(
+                    db=db,
+                    task_type="THUMB_GEN",
+                    payload={"asset_id": new_asset.id},
+                    unique_key=f"thumb-gen-{new_asset.id}",
+                    priority=7
+                )
+            
+            success_count += 1
+        except Exception as e:
+            errors.append(f"Backup failed for {asset.id}: {str(e)}")
+
+    db.commit()
+    logger.info(f"💾 백업 완료 (ID: {task.id}): {success_count}개 성공, {len(errors)}개 실패")
+    return {"status": "finished", "success_count": success_count, "errors": errors}
+
+@register_handler("MEDIA_GC")
+async def handle_media_gc(task: SystemTask, db: Session):
+    """
+    [v3.2] 시스템 가비지 컬렉션(GC) 핸들러
+    """
+    from domain.media.media_gc_service import MediaGCService
+    
+    # payload에서 실행할 작업 인덱스 목록을 가져옴 (기본값: [1,2,3,4,5] 전체)
+    task_indices = task.payload.get("indices", [1, 2, 3, 4, 5])
+    
+    service = MediaGCService(db)
+    logger.info(f"🧹 시스템 정리를 시작합니다 (작업: {task_indices})")
+    
+    results = service.run_tasks(task_indices)
+    
+    return {"status": "finished", "results": results}
 
 # --- [핵심 엔진] 워커 루프 ---
 
