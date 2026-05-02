@@ -408,6 +408,54 @@ class MediaAsset(Base):
 
     user = relationship("User", backref="media_assets")
 
+class SystemTask(Base):
+    """
+    [시스템 자율 신경계] 지능형 범용 비동기 태스크 및 스케줄러 엔진 모델
+    이 테이블은 시스템의 모든 비동기 작업(파일 처리, 메일 발송, 예약 게시 등)을 관리하는 '작업 일지'입니다.
+    """
+    __tablename__ = "system_tasks"
+
+    # --- 1. 기본 식별 정보 ---
+    id = Column(Integer, primary_key=True)
+    task_type = Column(String(50), nullable=False, index=True) # 어떤 종류의 일인가? (예: 'MEDIA_GC', 'MAIL_SEND')
+    payload = Column(JSONB, default=dict)                      # 일에 필요한 재료들 (JSON 형식)
+    result = Column(JSONB, default=dict)                       # 일이 끝난 후 남기는 결과물
+
+    # --- 2. 실행 제어 및 연쇄 작업 (Chaining) ---
+    priority = Column(Integer, default=5, index=True)          # 급한 일인가? (1: 매우급함, 10: 여유있음)
+    unique_key = Column(String(100), unique=True)              # 똑같은 일이 중복해서 생기는 것 방지
+    parent_id = Column(Integer, ForeignKey("system_tasks.id")) # 이 일의 '엄마'가 있는가? (부모-자식 연쇄 작업)
+    on_parent_failure = Column(String(20), default="CANCEL")   # 엄마가 실패하면 이 일은 어떻게 할까? (취소 또는 계속)
+    
+    # --- 3. 스케줄링 및 자생적 반복 (Scheduler) ---
+    scheduled_at = Column(DateTime, default=datetime.now, index=True) # 언제 실행할 예정인가? (미래 시점 예약 가능)
+    cron_expression = Column(String(50), nullable=True)        # "매일 새벽 3시"처럼 반복해서 할 일인가? (Cron 표현식)
+    repeat_interval = Column(Integer, nullable=True)          # "60초마다"처럼 주기적으로 반복할 일인가? (초 단위)
+    
+    # --- 4. 현재 진행 상태 (Status) ---
+    status = Column(String(20), default="PENDING", index=True) # 현재 상태 (대기중, 실행중, 성공, 실패, 취소 등)
+    worker_id = Column(String(50), nullable=True)              # 지금 어떤 서버(작업자)가 이 일을 하고 있는가?
+    progress_pct = Column(Integer, default=0)                  # 일이 얼마나 진행되었나? (0% ~ 100%)
+    
+    # --- 5. 안정성 및 에러 추적 ---
+    retry_count = Column(Integer, default=0)                   # 실패해서 다시 시도한 횟수
+    max_retries = Column(Integer, default=3)                   # 최대 몇 번까지 다시 해볼까?
+    expires_at = Column(DateTime, nullable=True)               # 이 시간이 지나면 너무 늦었으니 일을 취소함
+    timeout_sec = Column(Integer, default=300)                 # 일을 시작하고 몇 초 안에 안 끝나면 강제 중단할까?
+    error_log = Column(Text, nullable=True)                    # 실패했다면 그 이유(에러 메시지)는 무엇인가?
+    tags = Column(JSONB, default=list)                         # 나중에 관리자가 검색하기 편하게 붙이는 꼬리표
+    
+    # --- 6. 생성 맥락 및 로그 ---
+    created_by = Column(Integer, ForeignKey("users.id"))       # 누가 이 일을 시켰는가?
+    correlation_id = Column(String(100), index=True)           # 이 일을 만든 웹 요청이 무엇인지 추적하는 ID
+    
+    created_at = Column(DateTime, default=datetime.now)        # 일지가 처음 작성된 시각
+    started_at = Column(DateTime, nullable=True)               # 실제로 일을 시작한 시각
+    completed_at = Column(DateTime, nullable=True)             # 일이 완전히 끝난 시각
+
+    # 자기 자신과의 관계 설정 (연쇄 작업 추적용)
+    parent = relationship("SystemTask", remote_side=[id], backref="children")
+
 class PushSubscription(Base):
     __tablename__ = "push_subscription"
     id = Column(Integer, primary_key=True)

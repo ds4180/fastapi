@@ -1,8 +1,6 @@
 .python-version
 __pycache__/
 *.log
-pyproject.toml
-uv.lock
 node_modules/
 svelte/node_modules/
 
@@ -10,4 +8,3 @@ svelte/node_modules/
 scripts/
 .env
 AGENT.md
-.venv/
