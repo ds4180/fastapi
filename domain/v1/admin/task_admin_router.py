@@ -6,6 +6,7 @@ from models import SystemTask, User
 from domain.user.user_router import check_rank
 from datetime import datetime
 from typing import List, Optional
+from .admin_schema import SystemTaskCreate
 
 router = APIRouter(
     prefix="/admin/tasks",
@@ -15,10 +16,29 @@ router = APIRouter(
 # 최고 관리자(Rank 4)만 접근 가능하도록 설정
 check_admin = check_rank(required_rank=4)
 
+@router.get("/types")
+def list_task_types(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """[관리자용] 현재 시스템에 등록된 모든 태스크 유형과 가이드를 조회합니다."""
+    from domain.system.task_worker import TASK_HANDLERS
+    
+    # 작업 유형별 예시 페이로드 (간단한 정의)
+    guidelines = {
+        "MEDIA_ISOLATE": {"file_path": "/path/to/file", "asset_id": 1},
+        "THUMB_GEN": {"asset_id": 1},
+        "MEDIA_BACKUP": {"asset_ids": [1, 2], "target_user_id": 1},
+        "MEDIA_GC": {"indices": [1, 2, 3, 4, 5]}
+    }
+    
+    return [{"type": t, "example": guidelines.get(t, {})} for t in TASK_HANDLERS.keys()]
+
 @router.get("")
 def list_tasks(
     status: Optional[str] = None,
     task_type: Optional[str] = None,
+    is_scheduler: Optional[bool] = None,
     limit: int = 20,
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -27,6 +47,7 @@ def list_tasks(
     """
     [관리자용] 모든 비동기 태스크 목록을 조회합니다.
     최신순으로 정렬하며 상태나 타입으로 필터링이 가능합니다.
+    is_scheduler=True 이면 반복 작업(Cron/Interval)만 조회합니다.
     """
     query = db.query(SystemTask)
     
@@ -34,6 +55,13 @@ def list_tasks(
         query = query.filter(SystemTask.status == status)
     if task_type:
         query = query.filter(SystemTask.task_type == task_type)
+    
+    if is_scheduler is True:
+        # 반복 작업 (Cron 또는 Interval이 있는 경우)
+        query = query.filter((SystemTask.cron_expression.is_not(None)) | (SystemTask.repeat_interval.is_not(None)))
+    elif is_scheduler is False:
+        # 단발성 작업
+        query = query.filter(SystemTask.cron_expression.is_(None), SystemTask.repeat_interval.is_(None))
         
     total = query.count()
     tasks = query.order_by(desc(SystemTask.created_at)).offset(offset).limit(limit).all()
@@ -42,6 +70,22 @@ def list_tasks(
         "total": total,
         "tasks": tasks
     }
+
+@router.post("")
+def create_task(
+    task_in: SystemTaskCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """[관리자용] 새로운 비동기 태스크를 수동으로 등록합니다."""
+    new_task = SystemTask(
+        **task_in.model_dump(),
+        created_by=admin.id
+    )
+    db.add(new_task)
+    db.commit()
+    db.refresh(new_task)
+    return new_task
 
 @router.get("/{task_id}")
 def get_task_detail(

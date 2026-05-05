@@ -264,3 +264,32 @@ class BoardConfigAdminSchema(BoardConfigBase):
     create_date: datetime
     class Config:
         from_attributes = True
+
+# --- System Task 스키마 ---
+class SystemTaskBase(BaseModel):
+    task_type: str
+    payload: Dict[str, Any] = {}
+    priority: int = 5
+    unique_key: Optional[str] = None
+    scheduled_at: Optional[datetime] = None
+    cron_expression: Optional[str] = None
+    repeat_interval: Optional[int] = None
+    max_retries: int = 3
+    timeout_sec: int = 300
+    tags: List[str] = []
+
+class SystemTaskCreate(SystemTaskBase):
+    pass
+
+class SystemTaskSchema(SystemTaskBase):
+    id: int
+    status: str
+    retry_count: int
+    progress_pct: int
+    error_log: Optional[str] = None
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True

@@ -276,43 +276,31 @@ async def media_admin_bulk_delete(
     if current_user.rank() < 4:
         raise HTTPException(status_code=403, detail="Permission denied")
     
-    deleted_count = 0
-    today = datetime.now().strftime("%Y%m%d")
-    del_root = os.path.join(media_config.MEDIA_ROOT, f"DEL_{today}")
-    os.makedirs(del_root, exist_ok=True)
+    submitted_count = 0
 
-    # 파일 삭제
+    # 1. 파일별 비동기 삭제 예약
     if req.asset_ids:
-        assets = db.query(MediaAsset).filter(MediaAsset.id.in_(req.asset_ids)).all()
-        for asset in assets:
-            src = os.path.join(media_config.MEDIA_ROOT, asset.file_path)
-            if os.path.exists(src):
-                dst = os.path.join(del_root, asset.file_path)
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.move(src, dst)
-            asset.is_deleted = True
-            asset.deleted_at = datetime.now()
-            deleted_count += 1
+        for asset_id in req.asset_ids:
+            if media_service.delete_asset(db, asset_id):
+                submitted_count += 1
 
-    # 폴더 삭제
+    # 2. 폴더 내 모든 자산 식별 후 삭제 예약
     if req.folder_paths:
         base_tier_folder = media_config.MEDIA_TIERS.get(req.tier.upper(), "PUBLIC")
         for fpath in req.folder_paths:
-            src_dir = os.path.join(media_config.MEDIA_ROOT, base_tier_folder, fpath.upper())
-            if os.path.exists(src_dir):
-                dst_dir = os.path.join(del_root, base_tier_folder, fpath.upper())
-                os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
-                shutil.move(src_dir, dst_dir)
-                
-                # DB 하위 파일들도 삭제 처리
-                db_prefix = f"{base_tier_folder}/{fpath.upper()}/"
-                db.query(MediaAsset).filter(
-                    MediaAsset.access_level == req.tier.upper(),
-                    MediaAsset.file_path.like(f"{db_prefix}%")
-                ).update({"is_deleted": True, "deleted_at": datetime.now()}, synchronize_session=False)
+            db_prefix = f"{base_tier_folder}/{fpath.upper()}/"
+            # 해당 폴더 하위의 모든 살아있는 자산 조회
+            assets = db.query(MediaAsset).filter(
+                MediaAsset.access_level == req.tier.upper(),
+                MediaAsset.file_path.like(f"{db_prefix}%"),
+                MediaAsset.is_deleted == False
+            ).all()
+            
+            for asset in assets:
+                if media_service.delete_asset(db, asset.id):
+                    submitted_count += 1
 
-    db.commit()
-    return {"message": f"{deleted_count} items deleted"}
+    return {"message": f"{submitted_count}건의 삭제 작업이 비동기 예약되었습니다."}
 
 @router.post("/admin/gc")
 async def media_admin_run_gc(
