@@ -11,7 +11,7 @@ import shutil
 import io
 import zipfile
 from datetime import datetime
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel
 
 router = APIRouter(
@@ -62,26 +62,41 @@ async def media_secure_serve(
 
     # 썸네일 요청 처리
     target_rel_path = asset.file_path
-    if size in ["SM", "MD", "LG"]:
-        thumb_name = f"TMB_{asset.id}_{size}.WEBP"
-        thumb_path = os.path.join(media_config.MEDIA_ROOT, media_config.THUMB_FOLDER_NAME, thumb_name)
+    if size and size.upper() in ["SM", "MD", "LG"]:
+        size_upper = size.upper()
         
-        if os.path.exists(thumb_path):
-            target_rel_path = f"{media_config.THUMB_FOLDER_NAME}/{thumb_name}"
+        # [v3.2] Task Worker 네이밍 규칙(UUID 기반)으로 수정
+        base_name = os.path.basename(asset.file_path)
+        unique_id = base_name.replace(media_config.PREFIX['IMAGE'], "").split('.')[0]
+        thumb_name = f"{media_config.PREFIX['THUMB']}{unique_id}_{size_upper}.WEBP"
+        
+        # 썸네일 경로 계산 (원본 파일 위치 기준)
+        dir_name = os.path.dirname(asset.file_path)
+        thumb_rel_path = os.path.join(dir_name, media_config.THUMB_FOLDER_NAME, thumb_name).replace("\\", "/")
+        thumb_abs_path = os.path.join(media_config.MEDIA_ROOT, thumb_rel_path)
+        
+        if os.path.exists(thumb_abs_path):
+            target_rel_path = thumb_rel_path
         else:
-            # [v3.2 Self-healing] 썸네일이 없으면 즉시 재생성 태스크 예약
+            # 썸네일이 없으면 생성 예약 (Unique Key로 중복 방지)
             from domain.system.task_service import enqueue_task
-            enqueue_task(db, "THUMB_GEN", {"asset_id": asset.id}, priority=2)
+            enqueue_task(db, "THUMB_GEN", {"asset_id": asset.id}, priority=2, unique_key=f"thumb-gen-{asset.id}")
             db.commit()
+            
+            # [v3.2] 기본 이미지 반환
+            return RedirectResponse(url="/default-thumbnail.png")
 
     internal_prefix = TIER_INTERNAL_MAP.get(asset.access_level, "/PUBLIC/")
-    if size and target_rel_path.startswith(media_config.THUMB_FOLDER_NAME):
-        internal_prefix = "/THUMB/"
-        redirect_path = f"{internal_prefix}{os.path.basename(target_rel_path)}"
+    
+    # [v3.2] 실제 파일 경로에서 티어명(첫 번째 경로) 제외하고 전달
+    # 예: PRIVATE/IMAGE/2026/... -> IMAGE/2026/...
+    parts = target_rel_path.split("/")
+    if parts[0].upper() in media_config.MEDIA_TIERS:
+        path_without_tier = "/".join(parts[1:])
     else:
-        # 실제 파일 경로에서 티어명 제외하고 전달
-        path_without_tier = "/".join(target_rel_path.split("/")[1:])
-        redirect_path = f"{internal_prefix}{path_without_tier}"
+        path_without_tier = target_rel_path
+
+    redirect_path = f"{internal_prefix}{path_without_tier}"
 
     return Response(
         headers={
@@ -109,24 +124,14 @@ async def media_admin_stats(
     
     tier_summary = { row[0]: {"count": row[1], "size": row[2] or 0} for row in tier_stats }
     
-    folder_summary = {}
-    for tier_key, tier_folder in media_config.MEDIA_TIERS.items():
-        tier_path = os.path.join(media_config.MEDIA_ROOT, tier_folder)
-        size = 0
-        count = 0
-        if os.path.exists(tier_path):
-            for dirpath, dirnames, filenames in os.walk(tier_path):
-                for f in filenames:
-                    fp = os.path.join(dirpath, f)
-                    size += os.path.getsize(fp)
-                    count += 1
-        folder_summary[tier_key] = {"size": size, "count": count}
-
+    # [v3.2] 물리적 파일 워킹 제거 (성능 병목 지점) - DB 통계로 대체
+    # folder_summary = {} ... 제거
+    
     return {
         "total_count": total_count,
         "total_size_bytes": total_size,
         "tier_summary": tier_summary,
-        "folder_physical_summary": folder_summary
+        "folder_physical_summary": {} 
     }
 
 @router.get("/admin/recent")
