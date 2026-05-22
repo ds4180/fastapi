@@ -293,3 +293,113 @@ class SystemTaskSchema(SystemTaskBase):
     
     class Config:
         from_attributes = True
+
+# =====================================================================
+# 🚐 [v3.0.0] 노선 마스터 및 시간표 관리용 Pydantic 스키마
+# =====================================================================
+
+class RouteTimetableBase(BaseModel):
+    """
+    상세 회차 시간표 기본 스키마
+    - seq: 운행 순번 (1회차, 2회차...)
+    - start_time / end_time: 출발/도착 HH:MM 시간 포맷
+    - start_location / end_location: 시종점 상세 정보
+    """
+    seq: int
+    start_time: str
+    end_time: str
+    start_location: str
+    end_location: str
+    start_garage: Optional[str] = None
+    end_garage: Optional[str] = None
+    is_regular_duty: bool = False
+
+class RouteTimetableCreate(RouteTimetableBase):
+    """상세 시간표 생성 요청 스키마"""
+    pass
+
+class RouteMasterCreate(BaseModel):
+    """
+    노선 마스터 정보 및 상세 시간표 일괄 생성 요청 스키마
+    - route_name: 노선 대표명 (예: "100번")
+    - route_type: "REGULAR" (정규) 또는 "TEMPORARY" (임시)
+    - start_date / end_date: 해당 버전의 일자 기준 유효 시작/종료일
+    - vehicle_count: 해당 버전에 할당된 총 배차 차량 대수
+    - version: 버전 태그 (예: "v1", "v2", "2026-Summer")
+    - timetables: 일괄 등록할 시간표 리스트
+    """
+    route_name: str
+    route_type: str = "REGULAR"
+    start_date: date
+    end_date: Optional[date] = None
+    vehicle_count: int = 0
+    version: str
+    is_regular_duty: bool = False
+    timetables: List[RouteTimetableCreate] = []
+
+class RouteMasterUpdate(BaseModel):
+    """
+    노선 마스터 정보 및 상세 시간표 일괄 수정 요청 스키마
+    - 제공된 필드만 선택적으로 변경하며, timetables가 제공될 경우 기존 시간표를 모두 지우고 재생성(Cascade)합니다.
+    """
+    route_name: Optional[str] = None
+    route_type: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    vehicle_count: Optional[int] = None
+    version: Optional[str] = None
+    is_regular_duty: Optional[bool] = None
+    timetables: Optional[List[RouteTimetableCreate]] = None
+
+
+# =====================================================================
+# 🚐 [v3.0.0] 일일 배차 관리용 Pydantic 스키마
+# =====================================================================
+
+class DispatchRowResponse(BaseModel):
+    """
+    배차 조회 시 응답 데이터 스키마 (시간표 상세와 기배정 데이터를 결합)
+    """
+    id: Optional[int] = None
+    timetable_id: int
+    seq: int
+    start_time: str
+    end_time: str
+    start_location: str
+    end_location: str
+    driver_name: Optional[str] = None
+    tomorrow_driver_name: Optional[str] = None
+    yesterday_driver_name: Optional[str] = None
+    vehicle_no: Optional[str] = None
+    status: str = "DRAFT"
+    memo: Optional[str] = None
+    is_regular_duty: bool = False
+    is_tomorrow_regular_duty: bool = False
+    is_yesterday_regular_duty: bool = False
+    is_inherited: bool = False
+    is_tomorrow_inherited: bool = False
+
+    class Config:
+        from_attributes = True
+
+class DispatchRowInput(BaseModel):
+    """
+    배차 임시저장/확정 시 각 행별 운행 데이터 입력 스키마
+    """
+    timetable_id: int
+    driver_name: Optional[str] = None
+    tomorrow_driver_name: Optional[str] = None
+    vehicle_no: Optional[str] = None
+    start_time: Optional[str] = None
+    memo: Optional[str] = None
+
+class DispatchSavePayload(BaseModel):
+    """
+    일자별 특정 노선의 전체 배차 내역 저장/수정 요청 스키마
+    """
+    target_date: date
+    route_master_id: int
+    status: str = "DRAFT"  # DRAFT | CONFIRMED
+    rows: List[DispatchRowInput] = []
+
+

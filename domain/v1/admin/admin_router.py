@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry, DayOff, ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance
+from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry, DayOff, ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance, RouteMaster, RouteTimetable
 from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker, check_rank
 from domain.v1.admin import admin_schema
 from typing import List, Optional, Any
+from datetime import date
 import re
 import models
 
@@ -555,3 +556,555 @@ def delete_service_instance(instance_id: int, db: Session = Depends(get_db), adm
     db.delete(db_obj)
     db.commit()
     return {"message": "success"}
+
+
+# =====================================================================
+# 🚐 [v3.0.0] 노선 마스터 및 시간표 연동 API (Route Master & Timetables)
+# =====================================================================
+
+@router.get("/route-masters")
+def list_route_masters(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """
+    모든 노선 마스터 및 이에 소속된 버전별 시간표 상세 정보를 조회합니다.
+    - 정규노선(REGULAR) / 임시노선(TEMPORARY)을 완벽히 수용하여 반환합니다.
+    """
+    try:
+        # RouteMaster 및 연동된 timetables 테이블을 효율적으로 조인 로딩(joinedload)하여 쿼리
+        masters = db.query(RouteMaster).options(
+            joinedload(RouteMaster.timetables)
+        ).order_by(
+            RouteMaster.route_name.asc(), 
+            RouteMaster.version.asc()
+        ).all()
+        
+        result = []
+        for m in masters:
+            # 시간표는 seq(순번) 오름차순으로 정렬하여 반환
+            sorted_timetables = sorted(m.timetables, key=lambda x: x.seq)
+            
+            result.append({
+                "id": m.id,
+                "route_name": m.route_name,
+                "route_type": m.route_type,
+                "start_date": str(m.start_date),
+                "end_date": str(m.end_date) if m.end_date else None,
+                "vehicle_count": m.vehicle_count,
+                "version": m.version,
+                "is_regular_duty": m.is_regular_duty,
+                "timetables": [
+                    {
+                        "id": t.id,
+                        "route_master_id": t.route_master_id,
+                        "route_name": t.route_name,
+                        "seq": t.seq,
+                        "start_time": t.start_time,
+                        "end_time": t.end_time,
+                        "start_location": t.start_location,
+                        "end_location": t.end_location,
+                        "version": t.version,
+                        "start_garage": t.start_garage,
+                        "end_garage": t.end_garage,
+                        "is_regular_duty": t.is_regular_duty
+                    } for t in sorted_timetables
+                ]
+            })
+        return result
+    except Exception as e:
+        print(f"❌ [AdminRouteMaster] Error listing route masters: {e}")
+        raise HTTPException(status_code=500, detail="노선 정보를 조회하는 중 서버 오류가 발생하였습니다.")
+
+
+@router.post("/route-masters")
+def create_route_master(
+    payload: admin_schema.RouteMasterCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """
+    새로운 노선 마스터 및 관련 상세 시간표를 일괄적으로 등록합니다.
+    - 트랜잭션을 적용하여 시간표 등록 중 하나라도 실패할 시 전체 롤백 처리합니다.
+    """
+    try:
+        # 1. RouteMaster DB 레코드 생성
+        db_master = RouteMaster(
+            route_name=payload.route_name,
+            route_type=payload.route_type,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            vehicle_count=payload.vehicle_count,
+            version=payload.version,
+            is_regular_duty=payload.is_regular_duty
+        )
+        db.add(db_master)
+        db.flush()  # timetable_id 바인딩을 위한 고유 ID 선점 획득
+        
+        # 2. 입력받은 시간표 상세 명세 등록
+        for t in payload.timetables:
+            db_timetable = RouteTimetable(
+                route_master_id=db_master.id,
+                route_name=payload.route_name,
+                seq=t.seq,
+                start_time=t.start_time,
+                end_time=t.end_time,
+                start_location=t.start_location,
+                end_location=t.end_location,
+                version=payload.version,
+                start_garage=t.start_garage,
+                end_garage=t.end_garage,
+                is_regular_duty=t.is_regular_duty
+            )
+            db.add(db_timetable)
+            
+        db.commit()
+        db.refresh(db_master)
+        return {"message": "success", "id": db_master.id}
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [AdminRouteMaster] Error creating route master: {e}")
+        raise HTTPException(status_code=500, detail="노선 정보를 생성하는 중 오류가 발생하였습니다.")
+
+
+@router.put("/route-masters/{master_id}")
+def update_route_master(
+    master_id: int,
+    payload: admin_schema.RouteMasterUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """
+    노선 마스터 및 관련 상세 시간표를 일괄적으로 수정(오버라이트)합니다.
+    - 특정 텍스트 필드 혹은 날짜만 선택적으로 변경 가능합니다.
+    - timetables 필드가 전달되면 기존 시간표를 모두 지우고 일괄 재생성합니다.
+    """
+    try:
+        db_master = db.query(RouteMaster).filter(RouteMaster.id == master_id).first()
+        if not db_master:
+            raise HTTPException(status_code=404, detail="해당 노선 마스터를 찾을 수 없습니다.")
+            
+        # 1. 노선 마스터 기본 필드 업데이트
+        if payload.route_name is not None:
+            db_master.route_name = payload.route_name
+        if payload.route_type is not None:
+            db_master.route_type = payload.route_type
+        if payload.start_date is not None:
+            db_master.start_date = payload.start_date
+        if payload.end_date is not None:
+            db_master.end_date = payload.end_date
+        if payload.vehicle_count is not None:
+            db_master.vehicle_count = payload.vehicle_count
+        if payload.version is not None:
+            db_master.version = payload.version
+        if payload.is_regular_duty is not None:
+            db_master.is_regular_duty = payload.is_regular_duty
+            
+        # 2. 시간표 리스트가 명시적으로 들어왔을 때 기존 상세 회차 시간표 덮어쓰기 수행
+        if payload.timetables is not None:
+            # 해당 노선 마스터 ID를 가리키는 기존 시간표 레코드 전체 삭제
+            db.query(RouteTimetable).filter(RouteTimetable.route_master_id == master_id).delete()
+            
+            # 신규 시간표 일괄 생성
+            for t in payload.timetables:
+                db_timetable = RouteTimetable(
+                    route_master_id=db_master.id,
+                    route_name=db_master.route_name,
+                    seq=t.seq,
+                    start_time=t.start_time,
+                    end_time=t.end_time,
+                    start_location=t.start_location,
+                    end_location=t.end_location,
+                    version=db_master.version,
+                    start_garage=t.start_garage,
+                    end_garage=t.end_garage,
+                    is_regular_duty=t.is_regular_duty
+                )
+                db.add(db_timetable)
+                
+        db.commit()
+        return {"message": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [AdminRouteMaster] Error updating route master: {e}")
+        raise HTTPException(status_code=500, detail="노선 정보를 수정하는 중 오류가 발생하였습니다.")
+
+
+@router.delete("/route-masters/{master_id}")
+def delete_route_master(
+    master_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """
+    특정 노선 마스터와 종속된 모든 상세 시간표를 물리적으로 영구 삭제합니다.
+    """
+    try:
+        db_master = db.query(RouteMaster).filter(RouteMaster.id == master_id).first()
+        if not db_master:
+            raise HTTPException(status_code=404, detail="해당 노선 마스터를 찾을 수 없습니다.")
+            
+        db.delete(db_master)
+        db.commit()
+        return {"message": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [AdminRouteMaster] Error deleting route master: {e}")
+        raise HTTPException(status_code=500, detail="노선 정보를 삭제하는 중 오류가 발생하였습니다.")
+
+
+# =====================================================================
+# 🚐 [v3.0.0] 일일 배차 관리 API (Dispatch Management)
+# =====================================================================
+
+import json
+import os
+from datetime import timedelta
+
+def load_drivers_metadata():
+    """
+    Svelte 프론트엔드의 drivers.json 파일을 읽어서 기사 메타데이터를 구조화합니다.
+    """
+    try:
+        path = "/home/lee/uv-code/svelte5/src/lib/data/drivers.json"
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                drivers = json.load(f)
+                role_map = {}
+                vehicle_map = {}
+                vehicle_drivers = {}
+                for d in drivers:
+                    name = d.get("name")
+                    role = d.get("role")
+                    v_no = d.get("vehicle_no")
+                    if name:
+                        name_stripped = name.strip()
+                        role_map[name_stripped] = role
+                        if v_no:
+                            vehicle_map[name_stripped] = v_no
+                            if v_no not in vehicle_drivers:
+                                vehicle_drivers[v_no] = {}
+                            vehicle_drivers[v_no][role] = name_stripped
+                return role_map, vehicle_map, vehicle_drivers
+        return {}, {}, {}
+    except Exception as e:
+        print(f"⚠️ [load_drivers_metadata] Error: {e}")
+        return {}, {}, {}
+
+def load_vehicles_metadata():
+    """
+    Svelte 프론트엔드의 vehicles.json 파일을 읽어서 노선별 차량 풀을 가져옵니다.
+    """
+    try:
+        path = "/home/lee/uv-code/svelte5/src/lib/data/vehicles.json"
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("vehicles", {})
+        return {}
+    except Exception as e:
+        print(f"⚠️ [load_vehicles_metadata] Error: {e}")
+        return {}
+
+
+@router.get("/dispatch/active-routes", response_model=List[dict])
+def list_active_routes_for_date(
+    target_date: date,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """
+    지정된 날짜(target_date) 기준으로 운행(활성) 중인 노선 마스터 목록을 조회합니다.
+    """
+    try:
+        # start_date <= target_date <= end_date (or end_date is null)
+        masters = db.query(RouteMaster).filter(
+            RouteMaster.start_date <= target_date,
+            (RouteMaster.end_date == None) | (RouteMaster.end_date >= target_date)
+        ).order_by(RouteMaster.route_name.asc()).all()
+
+        return [
+            {
+                "id": m.id,
+                "route_name": m.route_name,
+                "route_type": m.route_type,
+                "start_date": str(m.start_date),
+                "end_date": str(m.end_date) if m.end_date else None,
+                "vehicle_count": m.vehicle_count,
+                "version": m.version,
+                "is_regular_duty": m.is_regular_duty
+            }
+            for m in masters
+        ]
+    except Exception as e:
+        print(f"❌ [AdminDispatch] Error listing active routes: {e}")
+        raise HTTPException(status_code=500, detail="활성 노선 정보를 조회하는 중 오류가 발생하였습니다.")
+
+
+@router.get("/dispatch", response_model=List[admin_schema.DispatchRowResponse])
+def get_daily_dispatch(
+    target_date: date,
+    route_master_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """
+    지정된 날짜와 노선 마스터 ID에 해당하는 배차 목록을 조회합니다.
+    - 당연근무일 경우 전날 실제 기사 승계 추천
+    - 그 외의 미저장 칸은 빈 칸("") 처리
+    - "어제 실제 운행했던 기사 이름(yesterday_driver_name)"을 반환하여 프론트엔드 자동 채우기 연산 지원
+    """
+    try:
+        master = db.query(RouteMaster).filter(RouteMaster.id == route_master_id).first()
+        if not master:
+            raise HTTPException(status_code=404, detail="해당 노선 마스터를 찾을 수 없습니다.")
+
+        timetables = db.query(RouteTimetable).filter(
+            RouteTimetable.route_master_id == route_master_id
+        ).order_by(RouteTimetable.seq.asc()).all()
+
+        if not timetables:
+            return []
+
+        N = len(timetables)
+
+        delta_days = (target_date - master.start_date).days
+        if delta_days < 0:
+            delta_days = 0
+
+        # 드라이버 & 차량 메타데이터 로드
+        role_map, vehicle_map, vehicle_drivers = load_drivers_metadata()
+        vehicles_dict = load_vehicles_metadata()
+
+        # 노선별 기본 전담차량 풀 구성
+        route_name = master.route_name or ""
+        target_fleet = []
+        if "121" in route_name or "122" in route_name:
+            target_fleet = vehicles_dict.get("121/122", [])
+        elif "291" in route_name or "292" in route_name or "293" in route_name:
+            target_fleet = vehicles_dict.get("291/292/293", [])
+        else:
+            target_fleet = vehicles_dict.get("121/122", []) + vehicles_dict.get("291/292/293", [])
+
+        # 대상 시간표 ID 필터로 금일 배차 맵 구하기
+        timetable_ids = [t.id for t in timetables]
+        existing_dispatches = db.query(models.Dispatch).filter(
+            models.Dispatch.target_date == target_date,
+            models.Dispatch.timetable_id.in_(timetable_ids)
+        ).all()
+        dispatch_map = {d.timetable_id: d for d in existing_dispatches}
+
+        # 내일 날짜 산출 및 배차 맵 구하기
+        tomorrow_date = target_date + timedelta(days=1)
+        tomorrow_dispatches = db.query(models.Dispatch).filter(
+            models.Dispatch.target_date == tomorrow_date,
+            models.Dispatch.timetable_id.in_(timetable_ids)
+        ).all()
+        tomorrow_map = {td.timetable_id: td for td in tomorrow_dispatches}
+
+        # 어제 날짜 산출 및 배차 맵 구하기 (어제 실제 운행 기사 조회용)
+        yesterday_date = target_date - timedelta(days=1)
+        yesterday_dispatches = db.query(models.Dispatch).filter(
+            models.Dispatch.target_date == yesterday_date,
+            models.Dispatch.timetable_id.in_(timetable_ids)
+        ).all()
+        yesterday_map = {yd.timetable_id: yd for yd in yesterday_dispatches}
+
+        # 1단계: 오늘 각 물리적 행에 대응하는 기사 정보 pre-calculation (동일 물리적 행에서의 승계 처리)
+        today_drivers = []
+        for i, t in enumerate(timetables):
+            shifted_index = (i + delta_days) % N
+            ref_t = timetables[shifted_index]
+
+            # 어제(전일) 이 물리적 행에 대응되었던 시간표의 당연근무 여부 산출
+            yesterday_shifted_index = (i + delta_days - 1) % N
+            ref_t_yesterday = timetables[yesterday_shifted_index]
+            is_yesterday_regular_duty = ref_t_yesterday.is_regular_duty
+
+            # 당연근무 여부와 관계없이, 주기사/보조기사의 물리적 행(t.id)은 고정이므로 어제 동일 행의 배차 조회
+            yesterday_disp = yesterday_map.get(t.id)
+            yesterday_driver_name = yesterday_disp.driver_name if (yesterday_disp and yesterday_disp.driver_name) else None
+
+            d = dispatch_map.get(t.id)
+            driver_name = ""
+            is_inherited = False
+
+            if d is not None:
+                driver_name = d.driver_name or ""
+                is_inherited = False
+            else:
+                # 오늘 배차 레코드가 없는 경우, 어제 당연근무(1로번)에 해당했다면 어제 동일 행의 기사명을 상속 (연속 근무)
+                if is_yesterday_regular_duty:
+                    if yesterday_driver_name:
+                        driver_name = yesterday_driver_name
+                        is_inherited = True
+
+            today_drivers.append({
+                "driver_name": driver_name,
+                "is_inherited": is_inherited,
+                "yesterday_driver_name": yesterday_driver_name,
+                "is_yesterday_regular_duty": is_yesterday_regular_duty
+            })
+
+        # 2단계: 내일 당연근무를 수행할 기사 예측을 포함한 최종 결과 목록 구성
+        result = []
+        for i, t in enumerate(timetables):
+            shifted_index = (i + delta_days) % N
+            ref_t = timetables[shifted_index]
+
+            # 내일 날짜의 shifted_index 및 당연근무 여부 산출
+            tomorrow_shifted_index = (i + delta_days + 1) % N
+            ref_t_tomorrow = timetables[tomorrow_shifted_index]
+            is_tomorrow_regular_duty = ref_t_tomorrow.is_regular_duty
+
+            default_vehicle = target_fleet[i] if i < len(target_fleet) else ""
+
+            today_info = today_drivers[i]
+            driver_name = today_info["driver_name"]
+            is_inherited = today_info["is_inherited"]
+            yesterday_driver_name = today_info["yesterday_driver_name"]
+
+            d = dispatch_map.get(t.id)
+            vehicle_no = default_vehicle
+            if d and d.vehicle_no:
+                vehicle_no = d.vehicle_no
+
+            # 3. 내일 날짜 기사 및 상속 여부 결정
+            td_d = tomorrow_map.get(t.id)
+            tomorrow_driver_name = ""
+            is_tomorrow_inherited = False
+
+            if td_d and td_d.driver_name and td_d.driver_name.strip():
+                tomorrow_driver_name = td_d.driver_name
+                is_tomorrow_inherited = False
+            else:
+                # 오늘 당연근무(1로번)인 경우: 오늘과 내일 연속 근무이므로 교대 로테이션 없이 오늘 기사를 내일 기사로 그대로 유지
+                if ref_t.is_regular_duty:
+                    if driver_name and driver_name.strip():
+                        tomorrow_driver_name = driver_name
+                        is_tomorrow_inherited = True
+                else:
+                    # 일반 로테이션 추천은 프론트엔드에서 수동/자동으로만 관리하므로 백엔드는 예측 공란 처리
+                    tomorrow_driver_name = ""
+                    is_tomorrow_inherited = False
+
+            result.append({
+                "id": d.id if d else None,
+                "timetable_id": t.id,
+                "seq": ref_t.seq,
+                "start_time": (d.start_time if d else None) or ref_t.start_time,
+                "end_time": ref_t.end_time,
+                "start_location": ref_t.start_location,
+                "end_location": ref_t.end_location,
+                "driver_name": driver_name,
+                "tomorrow_driver_name": tomorrow_driver_name,
+                "yesterday_driver_name": yesterday_driver_name,
+                "vehicle_no": vehicle_no,
+                "status": d.status if d else "DRAFT",
+                "memo": (d.memo if d else "") or "",
+                "is_regular_duty": ref_t.is_regular_duty,
+                "is_tomorrow_regular_duty": is_tomorrow_regular_duty,
+                "is_yesterday_regular_duty": today_info["is_yesterday_regular_duty"],
+                "is_inherited": is_inherited,
+                "is_tomorrow_inherited": is_tomorrow_inherited
+            })
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [AdminDispatch] Error fetching dispatch data with rotation: {e}")
+        raise HTTPException(status_code=500, detail="배차 정보를 조회하는 중 오류가 발생하였습니다.")
+
+
+@router.post("/dispatch")
+def save_daily_dispatch(
+    payload: admin_schema.DispatchSavePayload,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """
+    일괄 배차 정보(금일 및 익일)를 생성하거나 업데이트(Upsert) 합니다.
+    - 단일 트랜잭션으로 오늘과 내일의 배차 현황을 안전하게 교차 일괄 영구 저장합니다.
+    """
+    try:
+        role_map, vehicle_map, _ = load_drivers_metadata()
+        
+        for r in payload.rows:
+            # 1. 오늘 날짜 배차 데이터 Upsert
+            db_dispatch = db.query(models.Dispatch).filter(
+                models.Dispatch.target_date == payload.target_date,
+                models.Dispatch.timetable_id == r.timetable_id
+            ).first()
+
+            if db_dispatch:
+                db_dispatch.driver_name = r.driver_name
+                db_dispatch.vehicle_no = r.vehicle_no
+                db_dispatch.start_time = r.start_time
+                db_dispatch.status = payload.status
+                db_dispatch.memo = r.memo
+            else:
+                db_dispatch = models.Dispatch(
+                    target_date=payload.target_date,
+                    timetable_id=r.timetable_id,
+                    driver_name=r.driver_name,
+                    vehicle_no=r.vehicle_no,
+                    start_time=r.start_time,
+                    status=payload.status,
+                    memo=r.memo
+                )
+                db.add(db_dispatch)
+
+            # 2. 내일 날짜 배차 데이터 Upsert (임시 저장 및 확정 공지 모두 내일 배차 정보를 동기화)
+            tomorrow_date = payload.target_date + timedelta(days=1)
+            db_dispatch_tomorrow = db.query(models.Dispatch).filter(
+                models.Dispatch.target_date == tomorrow_date,
+                models.Dispatch.timetable_id == r.timetable_id
+            ).first()
+
+            if r.tomorrow_driver_name and r.tomorrow_driver_name.strip():
+                tomorrow_driver = r.tomorrow_driver_name.strip()
+                
+                # 내일에 배정될 차량 번호 연동 로직
+                tomorrow_vehicle = None
+                if tomorrow_driver == r.driver_name:
+                    tomorrow_vehicle = r.vehicle_no
+                else:
+                    tomorrow_vehicle = vehicle_map.get(tomorrow_driver)
+
+                if db_dispatch_tomorrow:
+                    db_dispatch_tomorrow.driver_name = tomorrow_driver
+                    if not db_dispatch_tomorrow.vehicle_no or db_dispatch_tomorrow.vehicle_no.strip() == "" or tomorrow_driver != r.driver_name:
+                        if tomorrow_vehicle:
+                            db_dispatch_tomorrow.vehicle_no = tomorrow_vehicle
+                    db_dispatch_tomorrow.status = payload.status
+                else:
+                    db_dispatch_tomorrow = models.Dispatch(
+                        target_date=tomorrow_date,
+                        timetable_id=r.timetable_id,
+                        driver_name=tomorrow_driver,
+                        vehicle_no=tomorrow_vehicle or r.vehicle_no,
+                        status=payload.status,
+                        memo=""
+                    )
+                    db.add(db_dispatch_tomorrow)
+            else:
+                # 사용자가 내일 기사를 빈 칸(null 또는 공백)으로 지정하여 저장한 경우
+                # 데이터베이스에 이미 내일 데이터가 존재한다면 기사명을 빈 값(None)으로 덮어써서 비웁니다.
+                if db_dispatch_tomorrow:
+                    db_dispatch_tomorrow.driver_name = None
+                    db_dispatch_tomorrow.status = payload.status
+
+        db.commit()
+        return {"message": "success"}
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [AdminDispatch] Error saving dispatch data: {e}")
+        raise HTTPException(status_code=500, detail="배차 정보를 저장하는 중 오류가 발생하였습니다.")
+
+
+

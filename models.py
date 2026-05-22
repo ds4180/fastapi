@@ -463,3 +463,85 @@ class PushSubscription(Base):
     endpoint = Column(Text, nullable=False, unique=True)
     p256dh = Column(String, nullable=False)
     auth = Column(String, nullable=False)
+
+# ==========================================
+# 🚐 배차 시스템 (Dispatch System) 모델 [v3.0.0]
+# ==========================================
+
+class RouteMaster(Base):
+    """
+    노선 마스터 모델 (버전 정보 및 정규/임시 형태 구분 수용)
+    - 동일 노선명이라도 적용 기간(start_date ~ end_date)에 따라 독립된 버전(v1, v2...)이 생성됩니다.
+    - route_type 컬럼을 통해 정규노선(REGULAR)과 임시노선(TEMPORARY)을 구분합니다.
+    """
+    __tablename__ = "route_master"
+
+    id = Column(Integer, primary_key=True)
+    route_name = Column(String(100), nullable=False)
+    route_type = Column(String(50), default="REGULAR", nullable=False)  # REGULAR: 정규노선, TEMPORARY: 임시노선
+    start_date = Column(Date, nullable=False, index=True)
+    end_date = Column(Date, nullable=True, index=True)  # 종료일이 없으면(현재 진행형) NULL
+    vehicle_count = Column(Integer, default=0, nullable=False)
+    version = Column(String(50), nullable=False)
+    is_regular_duty = Column(Boolean, default=False, nullable=False)  # 당연 근무 여부 (배차 편의용)
+
+    # 마스터에 등록된 하위 상세 시간표와의 관계
+    timetables = relationship("RouteTimetable", back_populates="master", cascade="all, delete-orphan")
+
+
+class RouteTimetable(Base):
+    """
+    노선 상세 시간표 모델
+    - 특정 RouteMaster 버전에 100% 종속됩니다.
+    - 회차별 운행 순번(seq), 출발/도착 시각 및 기종점 위치를 포함합니다.
+    """
+    __tablename__ = "route_timetable"
+
+    id = Column(Integer, primary_key=True)
+    route_master_id = Column(Integer, ForeignKey("route_master.id", ondelete="CASCADE"), nullable=False)
+    route_name = Column(String(100), nullable=False)
+    seq = Column(Integer, nullable=False)  # 운행 순번 (1회차, 2회차...)
+    start_time = Column(String(10), nullable=False)  # HH:MM
+    end_time = Column(String(10), nullable=False)  # HH:MM
+    start_location = Column(String(100), nullable=False)
+    end_location = Column(String(100), nullable=False)
+    version = Column(String(50), nullable=False)
+    start_garage = Column(String(10), nullable=True)  # 차량 출발전 차고지 (최대 10자)
+    end_garage = Column(String(10), nullable=True)    # 차량 종료후 차고지 (최대 10자)
+    is_regular_duty = Column(Boolean, default=False, nullable=False)  # 해당 시간표 회차의 당연 근무 여부
+
+    master = relationship("RouteMaster", back_populates="timetables")
+
+
+class Dispatch(Base):
+    """
+    배차 시스템 최종 실행 모델
+    - 날짜(target_date) + 시간표ID(timetable_id)의 조합으로 고유한 운행 슬롯을 보장합니다.
+    - 기사명, 차량번호, 출발 시간을 단순 외래키 참조가 아닌 스냅샷(Hard-copy) 형태로 저장하여 과거 이력을 보전합니다.
+    - 가상 자원(기사/차량)은 DB 테이블이 아닌 정적 Python 리스트로부터 선택 매핑됩니다.
+    """
+    __tablename__ = "dispatch"
+
+    id = Column(Integer, primary_key=True)
+    target_date = Column(Date, nullable=False, index=True)
+    timetable_id = Column(Integer, ForeignKey("route_timetable.id", ondelete="CASCADE"), nullable=False)
+    
+    # 기사 및 차량 배정 실명 스냅샷 (이력 보존을 위한 물리 데이터화)
+    driver_name = Column(String(50), nullable=True)
+    vehicle_no = Column(String(50), nullable=True)
+    start_time = Column(String(10), nullable=True)  # 운행 실제 출발 시각 스냅샷
+    
+    # 공지 및 최종 확정 상태
+    status = Column(String(50), default="DRAFT", nullable=False)
+    memo = Column(Text, nullable=True)
+
+    # 시간표 객체 참조 관계
+    timetable = relationship("RouteTimetable")
+
+    # 날짜 + 시간표 고유 제약 조건 (동일 일자에 한 시간표 슬롯이 중복 배정되는 것을 방지)
+    __table_args__ = (
+        UniqueConstraint('target_date', 'timetable_id', name='uq_dispatch_date_timetable'),
+    )
+
+
+

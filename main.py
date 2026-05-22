@@ -47,6 +47,7 @@ from domain.v1.admin import admin_router as v1_admin_router
 from domain.v1.admin import group_router as admin_group_router
 from domain.v1.admin import task_admin_router # [v1.6.0] 관리자 태스크 라우터 임포트
 from domain.v1.app import app_router as v1_app_router
+from domain.v1.custom import custom_router as v1_custom_router
 from domain.v1.comment import comment_router
 from domain.page import page_router
 
@@ -100,6 +101,7 @@ app.include_router(v1_admin_router.router, prefix="/v1")
 app.include_router(admin_group_router.router)
 app.include_router(task_admin_router.router, prefix="/v1") # /api/v1/admin/tasks 로 등록
 app.include_router(v1_app_router.router)
+app.include_router(v1_custom_router.router)
 app.include_router(comment_router.router)
 app.include_router(page_router.router)
 
