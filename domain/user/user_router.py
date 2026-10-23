@@ -6,7 +6,7 @@ from typing import Optional, List
 
 from database import get_db
 from domain.user import user_schema, user_crud
-from jose import jwt, JWTError
+# 레거시 취약점 및 미사용 라이브러리(python-jose) 제거: 현재 세션은 Redis 기반 UUID 세션 쿠키 방식으로 안전하게 관리됨
 from datetime import datetime, timedelta, timezone
 import uuid
 from redis_config import rd

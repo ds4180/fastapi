@@ -1,4 +1,6 @@
-from passlib.context import CryptContext
+# 현대적 패스워드 해싱 표준 라이브러리 pwdlib 적용 (방치된 passlib 대체 및 최신 bcrypt 보안 호환)
+from pwdlib import PasswordHash
+from pwdlib.hashers.bcrypt import BcryptHasher
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -6,7 +8,9 @@ from domain.user.user_schema import UserCreate
 from models import User, UserSession, UserProfile # UserProfile 임포트 추가
 from redis_config import rd
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# 기존 bcrypt 해시 데이터와 100% 완벽 호환되도록 BcryptHasher 적용
+# pwd_context.verify(), pwd_context.hash() 인터페이스가 그대로 유지되어 기존 호출부 수정 없이 동작
+pwd_context = PasswordHash((BcryptHasher(),))
 
 def get_session_list(db: Session, limit: int = 100):
     """최근 접속순으로 세션 목록 조회 및 실시간 Redis 동기화 (최대 100개)"""
