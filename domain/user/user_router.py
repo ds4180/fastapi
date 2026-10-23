@@ -1,160 +1,183 @@
-from fastapi import APIRouter, Depends, HTTPException, Cookie, Body, Request, Response
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+"""
+============================================================================
+[사용자 인증 및 계정 관리 API 라우터 (domain/user/user_router.py)]
+============================================================================
+
+💡 이 파일의 역할:
+사용자 로그인, 회원가입, 내 정보 조회(/me), 세션 목록 및 로그아웃 요청을 처리하는
+'순수 HTTP 라우터'입니다.
+
+🌟 리팩토링 핵심 (Core 분리 & 100% 하위 호환):
+1. 복잡한 Redis 세션 제어 로직은 `core/session.py` 엔진으로 완전히 분리했습니다.
+2. 유저 인증 의존성(`get_current_user`, `check_rank`)은 `core/deps.py` 사령탑으로 분리했습니다.
+3. 📌 [하위 호환성 100% 보장]:
+   다른 라우터들이 사용하던 `from domain.user.user_router import get_current_user` 문법이
+   한 줄도 깨지지 않도록, core/deps 의 핵심 심볼들을 여기서 Re-export(다시 내보내기)합니다!
+"""
+
+from typing import Optional, List
+from fastapi import APIRouter, Depends, HTTPException, Cookie, Request, Response
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from starlette import status
-from typing import Optional, List
 
 from database import get_db
+from models import User
 from domain.user import user_schema, user_crud
-# 레거시 취약점 및 미사용 라이브러리(python-jose) 제거: 현재 세션은 Redis 기반 UUID 세션 쿠키 방식으로 안전하게 관리됨
-from datetime import datetime, timedelta, timezone
-import uuid
-from redis_config import rd
-from models import User, UserSession
 
-router = APIRouter(prefix="/users")
+# ----------------------------------------------------------------------------
+# 🏛️ 백엔드 코어(core)에서 세션 엔진과 인증 의존성을 가져옵니다.
+# ----------------------------------------------------------------------------
+from core.config import settings
+from core.session import (
+    create_user_session,
+    terminate_session,
+    SESSION_EXPIRE_SECONDS,
+)
+from core.deps import (
+    get_current_user,
+    get_current_user_optional,
+    RankChecker,
+    check_rank,
+)
 
-# JWT 및 세션 정책
-REFRESH_TOKEN_EXPIRE_DAYS = 3  
+# 📌 외부 라우터들의 하위 호환성을 위해 Re-export 등록
+__all__ = [
+    "router",
+    "get_current_user",
+    "get_current_user_optional",
+    "RankChecker",
+    "check_rank",
+]
 
-# ----------------------------
-# 1. 최상위 의존성 (다른 함수가 참조하므로 가장 먼저 정의)
-# ----------------------------
+router = APIRouter(prefix="/users", tags=["Users"])
 
-def get_current_user(request: Request, session_id: Optional[str] = Cookie(None), db: Session = Depends(get_db)):
-    """필수 인증 의존성 + 슬라이딩 윈도우"""
-    if not session_id:
-        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
-    db_session = db.query(UserSession).filter(UserSession.session_key == session_id).first()
-    if not db_session or db_session.status != "ACTIVE":
-        raise HTTPException(status_code=401, detail="세션이 유효하지 않습니다.")
-    
-    db_session.last_activity = datetime.now()
-    db.commit()
-
-    user = db.query(User).filter(User.id == db_session.user_id).first()
-    if not user: raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
-
-    redis_key = f"session:{user.id}:{db_session.device_category}"
-    if not rd.sismember(redis_key, session_id):
-        db_session.status = "EXPIRED"
-        db.commit()
-        raise HTTPException(status_code=401, detail="다른 기기에서 로그인하여 접속이 종료되었습니다.")
-        
-    rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
-    return user
-
-def get_current_user_optional(request: Request, session_id: Optional[str] = Cookie(None), db: Session = Depends(get_db)):
-    """선택적 인증 의존성"""
-    if not session_id: return None
-    try:
-        user_agent = request.headers.get("user-agent", "").lower()
-        device_category = "MOBILE" if any(x in user_agent for x in ["mobi", "android", "iphone"]) else "DESKTOP"
-        db_session = db.query(UserSession).filter(UserSession.session_key == session_id, UserSession.status == "ACTIVE").first()
-        if not db_session: return None
-        user = db.query(User).filter(User.id == db_session.user_id).first()
-        if not user: return None
-        redis_key = f"session:{user.id}:{device_category}"
-        if not rd.sismember(redis_key, session_id): return None
-        rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
-        return user
-    except: return None
-
-# ----------------------------
-# 2. 권한 관련 클래스 및 데코레이터
-# ----------------------------
-
-class RankChecker:
-    def __init__(self, required_rank: int):
-        self.required_rank = required_rank
-    def __call__(self, current_user: User = Depends(get_current_user)):
-        user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
-        if user_rank < self.required_rank:
-            raise HTTPException(status_code=403, detail=f"권한 부족 (필수: {self.required_rank})")
-        return current_user
-
-def check_rank(required_rank: int):
-    def _check(current_user: User = Depends(get_current_user)):
-        user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
-        if user_rank < required_rank:
-            raise HTTPException(status_code=403, detail=f"권한 부족 (필수: {required_rank})")
-        return current_user
-    return _check
-
-# ----------------------------
-# 3. 라우터 엔드포인트들
-# ----------------------------
-
+# ----------------------------------------------------------------------------
+# 1. 로그인 엔드포인트 (/users/login)
+# ----------------------------------------------------------------------------
 @router.post("/login")
-def login_for_access_token(response: Response, request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    # ... (로그인 로직 동일) ...
+def login_for_access_token(
+    response: Response,
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    """
+    사용자 아이디/비밀번호 검증 및 신규 세션 발급
+    - 비밀번호 검증 성공 시 core.session 엔진을 통해 UUID 세션을 발급합니다.
+    - 브라우저 쿠키(session_id)에 세션 키를 안전하게 설정합니다.
+    """
     user = user_crud.get_user(db, username=form_data.username)
     if not user or not user_crud.pwd_context.verify(form_data.password, user.password):
-        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 틀렸습니다.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="아이디 또는 비밀번호가 틀렸습니다."
+        )
 
-    user_agent_full = request.headers.get("user-agent", "")
-    ip_address = request.client.host
-    device_category = "MOBILE" if any(x in user_agent_full.lower() for x in ["mobi", "android", "iphone"]) else "DESKTOP"
+    # 🚀 핵심 세션 생성 로직을 core 엔진으로 단 한 줄로 위임!
+    jti = create_user_session(db=db, user=user, request=request)
 
-    redis_key = f"session:{user.id}:{device_category}"
-    # 기존 세션이 있다면 해당 세션을 DB에서 만료 처리 및 Redis에서 삭제
-    current_jtis = rd.smembers(redis_key)
-    for jti_item in current_jtis:
-        jti = jti_item.decode('utf-8') if isinstance(jti_item, bytes) else jti_item
-        db.query(UserSession).filter(UserSession.session_key == jti).update({
-            "status": "KICKED_OUT", "logout_at": datetime.now()
-        })
-        rd.srem(redis_key, jti)
-    db.commit()
-
-    jti = str(uuid.uuid4())
-    rd.sadd(redis_key, jti)
-    rd.expire(redis_key, 60*60*24*REFRESH_TOKEN_EXPIRE_DAYS)
-
-    db_session = UserSession(
-        user_id=user.id, session_key=jti, device_category=device_category,
-        device_name=user_agent_full[:255], ip_address=ip_address,
-        status="ACTIVE", login_at=datetime.now(), last_activity=datetime.now()
+    # 브라우저에 session_id 쿠키 설정 (기존 설정 정책 100% 유지)
+    response.set_cookie(
+        key="session_id",
+        value=jti,
+        httponly=True,
+        max_age=SESSION_EXPIRE_SECONDS,
+        samesite="lax",
+        secure=False
     )
-    db.add(db_session)
-    db.commit()
-    
-    response.set_cookie(key="session_id", value=jti, httponly=True, max_age=60*60*24*REFRESH_TOKEN_EXPIRE_DAYS, samesite="lax", secure=False)
-    return {"message": "Login successful", "username": user.username}
 
+    return {
+        "message": "Login successful",
+        "username": user.username
+    }
+
+
+# ----------------------------------------------------------------------------
+# 2. 내 정보 조회 엔드포인트 (/users/me)
+# ----------------------------------------------------------------------------
 @router.get("/me", response_model=user_schema.User)
 def read_users_me(current_user: User = Depends(get_current_user)):
+    """현재 로그인된 사용자의 기본 정보 및 권한 등급(rank_level) 반환"""
     rank_val = current_user.rank() if callable(current_user.rank) else current_user.rank
-    return user_schema.User(id=current_user.id, username=current_user.username, email=current_user.email, rank_level=rank_val)
+    return user_schema.User(
+        id=current_user.id,
+        username=current_user.username,
+        email=current_user.email,
+        rank_level=rank_val
+    )
 
+
+# ----------------------------------------------------------------------------
+# 3. 회원 가입 엔드포인트 (/users/create)
+# ----------------------------------------------------------------------------
 @router.post("/create", response_model=user_schema.User, status_code=status.HTTP_201_CREATED)
 def create_user(user_create: user_schema.UserCreate, db: Session = Depends(get_db)):
+    """새로운 사용자 회원 가입"""
     db_user = user_crud.get_existing_user(db, user_create=user_create)
-    if db_user: raise HTTPException(status_code=409, detail="이미 등록된 사용자입니다.")
+    if db_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 등록된 사용자입니다."
+        )
     return user_crud.create_user(db=db, user_create=user_create)
 
+
+# ----------------------------------------------------------------------------
+# 4. 세션 목록 조회 엔드포인트 (/users/sessions)
+# ----------------------------------------------------------------------------
 @router.get("/sessions", response_model=List[user_schema.UserSessionResponse])
-def session_list(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def session_list(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """최근 접속한 사용자 세션 목록 조회"""
     return user_crud.get_session_list(db)
 
+
+# ----------------------------------------------------------------------------
+# 5. 특정 세션 강제 추방 엔드포인트 (/users/sessions/kick/{target_session_id})
+# ----------------------------------------------------------------------------
 @router.post("/sessions/kick/{target_session_id}")
-def kick_user_session(target_session_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def kick_user_session(
+    target_session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """관리자 전용: 특정 사용자의 세션을 강제로 만료(추방)시킵니다."""
     user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
-    if user_rank < 4: raise HTTPException(status_code=403, detail="권한 부족")
+    if user_rank < 4:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="권한 부족")
+
     result = user_crud.kick_session(db, session_id=target_session_id)
     return {"message": "success"} if result else {"error": "Session not found"}
 
+
+# ----------------------------------------------------------------------------
+# 6. 로그아웃 엔드포인트 (/users/logout)
+# ----------------------------------------------------------------------------
 @router.post("/logout")
-def logout(response: Response, session_id: Optional[str] = Cookie(None), db: Session = Depends(get_db)):
+def logout(
+    response: Response,
+    session_id: Optional[str] = Cookie(None),
+    db: Session = Depends(get_db)
+):
+    """로그아웃: Redis 및 DB 세션을 만료 처리하고 쿠키를 삭제합니다."""
     if session_id:
-        db_session = db.query(UserSession).filter(UserSession.session_key == session_id).first()
-        if db_session:
-            rd.srem(f"session:{db_session.user_id}:{db_session.device_category}", session_id)
-            db_session.status = "LOGOUT"; db_session.logout_at = datetime.now(); db.commit()
+        terminate_session(db=db, session_id=session_id)
+
     response.delete_cookie(key="session_id")
     return {"message": "Logout successful"}
 
+
+# ----------------------------------------------------------------------------
+# 7. 전체 회원 목록 조회 (/users/list)
+# ----------------------------------------------------------------------------
 @router.get("/list", response_model=user_schema.UserList)
-def user_list(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def user_list(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """전체 사용자 목록 조회"""
     return {"users": user_crud.get_user_list(db)}

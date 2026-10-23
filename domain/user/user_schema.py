@@ -1,5 +1,4 @@
-from pydantic import BaseModel, field_validator, EmailStr
-from pydantic_core.core_schema import FieldValidationInfo
+from pydantic import BaseModel, field_validator, EmailStr, ValidationInfo, ConfigDict
 from datetime import datetime
 from typing import Optional
 
@@ -17,8 +16,8 @@ class UserCreate(BaseModel):
         return v
 
     @field_validator('password2')
-    def passwords_match(cls, v, info: FieldValidationInfo):
-        if 'password1' in info.data and v != info.data['password1']:
+    def passwords_match(cls, v, info: ValidationInfo):
+        if info.data and 'password1' in info.data and v != info.data['password1']:
             raise ValueError('비밀번호가 일치하지 않습니다.')
         return v
 
@@ -45,12 +44,8 @@ class User(BaseModel):
     email: EmailStr # EmailStr로 타입 강화
     rank_level: int = 0 # UserProfile에서 가져올 것임
 
-    class Config:
-        from_attributes = True
-        # UserProfile의 rank_level을 User 스키마의 rank_level로 매핑
-        model_computed_fields = {
-            'rank_level': (lambda user: user.rank() if user.profile else 0, False)
-        }
+    # Pydantic v2 표준 ORM 모델 직렬화 설정
+    model_config = ConfigDict(from_attributes=True)
 
 class UserList(BaseModel):
     users: list[User]
@@ -67,5 +62,5 @@ class UserSessionResponse(BaseModel):
     logout_at: Optional[datetime] = None
     last_activity: datetime
 
-    class Config:
-        from_attributes = True
+    # Pydantic v2 표준 ORM 모델 직렬화 설정
+    model_config = ConfigDict(from_attributes=True)

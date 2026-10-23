@@ -1,6 +1,5 @@
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from core.config import settings
 
 # 📌 중앙 설정소(core/config.py)에서 검증된 PostgreSQL 접속 주소를 안전하게 가져옵니다.
