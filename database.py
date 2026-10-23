@@ -1,21 +1,20 @@
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from core.config import settings
 
-# PostgreSQL 접속 주소. 환경 변수가 없으면 기본값을 사용합니다.
-SQLALCHEMY_DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql+psycopg://lee:1234@db/bus_db"
-)
+# 📌 중앙 설정소(core/config.py)에서 검증된 PostgreSQL 접속 주소를 안전하게 가져옵니다.
+SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
-# SQLite 데이터베이스
 
 def get_db():
+    """
+    FastAPI 요청마다 DB 세션을 생성하고 작업 완료 시 자동으로 닫아주는 의존성 함수
+    """
     db = SessionLocal()
     try:
         yield db

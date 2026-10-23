@@ -61,23 +61,12 @@ app = FastAPI(lifespan=lifespan)
 # os.makedirs(upload_dir, exist_ok=True)
 # app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
 
-# 기본 허용 주소 목록
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "http://localhost",
-]
+from core.config import settings
 
-# 환경 변수 ALLOW_ORIGINS가 있으면 목록에 추가합니다. (쉼표로 구분하여 여러 개 추가 가능)
-env_origins = os.getenv("ALLOW_ORIGINS")
-if env_origins:
-    # "http://192.168.200.217,http://bus1942.com" 같은 문자열을 리스트로 변환
-    origins.extend([origin.strip() for origin in env_origins.split(",")])
-
+# 📌 [CORS 설정] 중앙 설정소(core/config.py)의 ALLOW_ORIGINS 목록을 일원화하여 적용합니다.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
