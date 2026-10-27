@@ -39,8 +39,10 @@ class AppRegistry(Base):
     main_component = Column(String, nullable=True)        # 메인 컴포넌트명 (동적 런처용)
     icon_default = Column(String, nullable=True)          # 기본 아이콘
     
-    min_read_rank = Column(Integer, default=0)            # 읽기 최소 권한
-    min_write_rank = Column(Integer, default=2)           # 쓰기 최소 권한
+    min_read_rank = Column(Integer, default=0)            # 4단계: 읽기 최소 권한 랭킹 (0~9)
+    min_write_rank = Column(Integer, default=2)           # 4단계: 쓰기 최소 권한 랭킹 (0~9)
+    allow_groups = Column(JSONB, nullable=False, default=list) # 3단계: 허용 그룹 목록 (주그룹/부그룹 소속 시 읽기·쓰기 모두 가능)
+    deny_groups = Column(JSONB, nullable=False, default=list)  # 2단계: 차단 그룹 목록 (주그룹/부그룹 소속 시 읽기·쓰기 모두 차단)
     admin_ids = Column(JSONB, default=list)               # 자치 관리자 ID 리스트
     
     config_schema = Column(JSONB, default=dict)           # 설정 스키마
@@ -114,6 +116,8 @@ class Menu(Base):
     order = Column(Integer, default=0)
     is_visible = Column(Boolean, default=True)
     min_rank = Column(Integer, default=0)
+    allow_groups = Column(JSONB, nullable=False, default=list) # 메뉴 허용 그룹 목록
+    deny_groups = Column(JSONB, nullable=False, default=list)  # 메뉴 차단 그룹 목록
 
     sub_menus = relationship(
         "Menu", 

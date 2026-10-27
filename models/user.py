@@ -10,9 +10,28 @@
 """
 
 from datetime import datetime
+from typing import Optional, List, Set
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean
 from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import JSONB
 from models.base import Base
+
+
+class Group(Base):
+    """
+    [코어 그룹 마스터 테이블 (groups)]
+    
+    💡 정책재정의.md 반영:
+    - 오직 root(rank_level == 9)만이 그룹 관리 페이지에서 생성·삭제·설정할 수 있는 공식 그룹 명부입니다.
+    - 사용자는 여기에 등록된 그룹 코드(code)를 주그룹(1개) 또는 부그룹(1개 이상)으로 부여받습니다.
+    """
+    __tablename__ = "groups"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(50), unique=True, nullable=False, index=True)  # 그룹 고유 식별 코드 (예: '운수팀', '배차담당')
+    name = Column(String(100), nullable=False)                          # 화면 표시용 그룹 이름
+    description = Column(Text, nullable=True)                           # 그룹 설명 및 용도
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
 class User(Base):
@@ -37,16 +56,50 @@ class User(Base):
     comments = relationship("Comment", back_populates="user")
     read_histories = relationship("PostRead", back_populates="user")
 
-    def rank(self):
-        """사용자 등급(권한 레벨 0~4) 반환"""
-        return self.profile.rank_level if self.profile else 0
+    def rank(self) -> int:
+        """
+        사용자 권한 랭킹(0~9) 반환 (기본값: 0)
+        - 0: GUEST, 1~8: 일반~관리자, 9: ROOT (시스템 절대 권한)
+        """
+        return self.profile.rank_level if self.profile and self.profile.rank_level is not None else 0
+
+    def is_root(self) -> bool:
+        """1단계 검증용: 사용자가 root(랭킹 9)인지 여부 반환"""
+        return self.rank() == 9
 
     @property
-    def role(self):
-        """역할 문자열 반환 (ROLE_GUEST, ROLE_ADMIN, ROLE_STAFF_L*)"""
+    def primary_group(self) -> Optional[str]:
+        """사용자의 주그룹(최대 1개, 없을 수 있음) 반환"""
+        return self.profile.primary_group if self.profile else None
+
+    @property
+    def secondary_groups(self) -> List[str]:
+        """사용자의 부그룹 리스트(1개 이상 복수 가능, 없을 수 있음) 반환"""
+        if self.profile and isinstance(self.profile.secondary_groups, list):
+            return self.profile.secondary_groups
+        return []
+
+    def all_groups(self) -> Set[str]:
+        """
+        2단계(deny) 및 3단계(allow) 고속 검사를 위해
+        사용자의 주그룹(1개)과 부그룹(N개)을 합친 집합(Set)을 반환합니다.
+        """
+        groups: Set[str] = set()
+        if self.primary_group:
+            groups.add(self.primary_group)
+        for g in self.secondary_groups:
+            if g:
+                groups.add(g)
+        return groups
+
+    @property
+    def role(self) -> str:
+        """역할 문자열 반환 (ROLE_GUEST, ROLE_ROOT, ROLE_ADMIN, ROLE_STAFF_L*)"""
         r = self.rank()
         if r == 0:
             return "ROLE_GUEST"
+        if r == 9:
+            return "ROLE_ROOT"
         if r == 4:
             return "ROLE_ADMIN"
         return f"ROLE_STAFF_L{r}"
@@ -54,12 +107,19 @@ class User(Base):
 
 class UserProfile(Base):
     """
-    사용자 상세 인사/프로필 정보 (기사 정보, 계좌, 사번 등)
+    사용자 상세 권한/그룹 및 인사 프로필 정보
+    
+    💡 정책재정의.md 반영:
+    - rank_level: 권한 랭킹 (0~9, 필수 기본값 0)
+    - primary_group: 주그룹 (선택 사항, 1개만 선택 가능)
+    - secondary_groups: 부그룹 (선택 사항, 1개 이상 복수 선택 가능 JSONB 리스트)
     """
     __tablename__ = "user_profiles"
 
     user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
-    rank_level = Column(Integer, default=0)
+    rank_level = Column(Integer, default=0, nullable=False)
+    primary_group = Column(String(50), nullable=True, default=None)
+    secondary_groups = Column(JSONB, nullable=False, default=list)
     is_active = Column(Boolean, default=True)
     employee_no = Column(String, nullable=True)
     resident_no = Column(String, nullable=True)

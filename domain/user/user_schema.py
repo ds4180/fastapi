@@ -42,7 +42,9 @@ class User(BaseModel):
     id: int
     username: str
     email: EmailStr # EmailStr로 타입 강화
-    rank_level: int = 0 # UserProfile에서 가져올 것임
+    rank_level: int = 0 # 권한 랭킹 (0~9, 9=root)
+    primary_group: Optional[str] = None # 주그룹 (선택 사항, 최대 1개)
+    secondary_groups: list[str] = []    # 부그룹 (선택 사항, 1개 이상 복수 선택 가능)
 
     # Pydantic v2 표준 ORM 모델 직렬화 설정
     model_config = ConfigDict(from_attributes=True)

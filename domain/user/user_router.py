@@ -39,6 +39,8 @@ from core.deps import (
     get_current_user_optional,
     RankChecker,
     check_rank,
+    check_root,
+    check_permission,
 )
 
 # 📌 외부 라우터들의 하위 호환성을 위해 Re-export 등록
@@ -48,6 +50,8 @@ __all__ = [
     "get_current_user_optional",
     "RankChecker",
     "check_rank",
+    "check_root",
+    "check_permission",
 ]
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -99,13 +103,18 @@ def login_for_access_token(
 # ----------------------------------------------------------------------------
 @router.get("/me", response_model=user_schema.User)
 def read_users_me(current_user: User = Depends(get_current_user)):
-    """현재 로그인된 사용자의 기본 정보 및 권한 등급(rank_level) 반환"""
+    """
+    현재 로그인된 사용자의 기본 정보 6대 항목 중 보안 키(비밀번호)를 제외한
+    아이디, 이메일, 권한랭킹(0~9), 주그룹(1개), 부그룹(N개 리스트)을 반환합니다.
+    """
     rank_val = current_user.rank() if callable(current_user.rank) else current_user.rank
     return user_schema.User(
         id=current_user.id,
         username=current_user.username,
         email=current_user.email,
-        rank_level=rank_val
+        rank_level=rank_val,
+        primary_group=current_user.primary_group,
+        secondary_groups=current_user.secondary_groups,
     )
 
 

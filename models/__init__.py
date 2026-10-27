@@ -16,8 +16,8 @@
 # 📌 1. 최소 척추 (Base & Mixin)
 from models.base import Base, TimestampMixin
 
-# 📌 2. 인증 및 사용자 코어
-from models.user import User, UserProfile, UserSession
+# 📌 2. 인증 및 사용자/그룹 코어
+from models.user import User, UserProfile, UserSession, Group
 
 # 📌 3. 시스템 메타 및 자율 신경계 태스크
 from models.system import (
@@ -70,10 +70,11 @@ __all__ = [
     # Base
     "Base",
     "TimestampMixin",
-    # User
+    # User & Group
     "User",
     "UserProfile",
     "UserSession",
+    "Group",
     # System
     "SystemConfig",
     "AppRegistry",

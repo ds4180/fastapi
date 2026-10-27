@@ -13,13 +13,19 @@ FastAPI의 `Depends(...)`에서 사용되는 시스템 전역 핵심 의존성(D
    한 줄로 로그인된 사용자를 손쉽게 주입받을 수 있습니다.
 """
 
-from typing import Optional
+from typing import Optional, Iterable
 from fastapi import Depends, HTTPException, Cookie, Request
 from starlette import status
 from sqlalchemy.orm import Session
 from database import get_db
 from models import User
 from core.session import validate_session
+from core.permission import (
+    ROOT_RANK,
+    get_user_rank,
+    compare_rank,
+    evaluate_permission,
+)
 
 
 def get_current_user(
@@ -72,33 +78,79 @@ def get_current_user_optional(
 class RankChecker:
     """
     [권한 등급 검사기 (클래스형)]
-    특정 등급(0: Guest, 1: 준회원, 2: 정회원, 3: 매니저, 4: 최고관리자) 이상만
-    허용하도록 라우터에서 `Depends(RankChecker(required_rank=2))` 형태로 사용합니다.
+    특정 랭킹(0~9) 조건을 만족하는 사용자만 허용하도록
+    라우터에서 `Depends(RankChecker(required_rank=2))` 형태로 사용합니다.
+    - root(랭킹 9)는 항상 통과합니다.
+    - op 인자를 통해 '>=', '>', '==', '<=', '<' 비교 연산을 모두 지원합니다.
     """
-    def __init__(self, required_rank: int):
+    def __init__(self, required_rank: int, op: str = ">="):
         self.required_rank = required_rank
+        self.op = op
 
     def __call__(self, current_user: User = Depends(get_current_user)) -> User:
-        user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
-        if user_rank < self.required_rank:
+        user_rank = get_user_rank(current_user)
+        if user_rank != ROOT_RANK and not compare_rank(user_rank, self.required_rank, self.op):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"권한이 부족합니다. (필요 등급: {self.required_rank})"
+                detail=f"권한이 부족합니다. (필요 랭킹 조건: {self.op} {self.required_rank})"
             )
         return current_user
 
 
-def check_rank(required_rank: int):
+def check_rank(required_rank: int, op: str = ">="):
     """
     [권한 등급 검사기 (함수형 팩토리)]
-    `Depends(check_rank(2))` 형태로 간편하게 권한을 검사합니다.
+    `Depends(check_rank(2))` 또는 `Depends(check_rank(9, "=="))` 형태로 간편하게 랭킹을 검사합니다.
+    - root(랭킹 9)는 항상 통과합니다.
     """
     def _check(current_user: User = Depends(get_current_user)) -> User:
-        user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
-        if user_rank < required_rank:
+        user_rank = get_user_rank(current_user)
+        if user_rank != ROOT_RANK and not compare_rank(user_rank, required_rank, op):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"권한이 부족합니다. (필요 등급: {required_rank})"
+                detail=f"권한이 부족합니다. (필요 랭킹 조건: {op} {required_rank})"
+            )
+        return current_user
+    return _check
+
+
+# 📌 [root(랭킹 9) 전용 가드]
+# 주그룹/부그룹 생성·삭제·설정 등 오직 시스템 최고 절대 권한(root)만 수행 가능한 라우터에 사용합니다.
+check_root = check_rank(ROOT_RANK, op="==")
+
+
+def check_permission(
+    action: str = "read",
+    min_read_rank: int = 0,
+    min_write_rank: int = 2,
+    allow_groups: Optional[Iterable[str]] = None,
+    deny_groups: Optional[Iterable[str]] = None,
+    op: str = ">=",
+):
+    """
+    [`정책재정의.md` 4단계 통합 권한 검사 의존성]
+    신규 도메인 앱 라우터에서 그룹(deny/allow)과 랭킹(0~9)을 결합하여 검증할 때 사용합니다.
+    
+    처리 순서 (core.permission.evaluate_permission 위임):
+    1. root(9) 인가? ➔ 통과
+    2. deny_groups에 부그룹/주그룹이 있는가? ➔ 403 차단
+    3. allow_groups에 부그룹/주그룹이 있는가? ➔ 통과 (읽기/쓰기 모두 가능)
+    4. min_read_rank / min_write_rank 와 사용자 랭킹 비교 ➔ 통과 또는 403 차단
+    """
+    def _check(current_user: User = Depends(get_current_user)) -> User:
+        allowed = evaluate_permission(
+            user=current_user,
+            action=action,
+            min_read_rank=min_read_rank,
+            min_write_rank=min_write_rank,
+            allow_groups=allow_groups,
+            deny_groups=deny_groups,
+            op=op,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="접근 권한이 없습니다. (그룹 제한 또는 권한 랭킹 부족)"
             )
         return current_user
     return _check
