@@ -29,9 +29,33 @@ class BulkActionRequest(BaseModel):
     folder_paths: List[str] = [] 
     tier: str = "PUBLIC"
 
+class PublishRequest(BaseModel):
+    asset_ids: List[int]
+    app_id: str = "general"
+    target_id: Optional[str] = None
+    access_level: str = "PUBLIC"
+    sub_path: Optional[str] = None
+
 class GCRequest(BaseModel):
     indices: List[int] = [1, 2, 3, 4, 5]
     scheduled_at: Optional[datetime] = None
+
+
+def _is_own_private_path(user: User, tier: str, sub_path: str) -> bool:
+    """사용자가 본인의 개인 폴더(PRIVATE/USERS/{user.id})에 접근 중인지 검증"""
+    if tier.upper() != "PRIVATE":
+        return False
+    clean = sub_path.strip("/")
+    user_root = f"USERS/{user.id}"
+    return clean == user_root or clean.startswith(f"{user_root}/")
+
+
+def _validate_safe_path(target_dir: str):
+    """Path Traversal(../)을 통한 MEDIA_ROOT 외부 경로 이탈 차단"""
+    real_root = os.path.realpath(media_config.MEDIA_ROOT)
+    real_target = os.path.realpath(target_dir)
+    if not (real_target == real_root or real_target.startswith(real_root + os.sep)):
+        raise HTTPException(status_code=400, detail="Invalid path (Path traversal blocked)")
 
 # [v3.2] 보안 미디어 서빙 (X-Accel-Redirect)
 TIER_INTERNAL_MAP = {
@@ -162,7 +186,16 @@ async def media_upload(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """[v3.2] 통합 파일 업로드 엔드포인트"""
+    """[v3.3] 통합 파일 업로드 엔드포인트 (개인 폴더 및 공용 티어 권한 검증 포함)"""
+    target_tier = (access_level or media_service.media_get_access_level(current_user, app_id)).upper()
+    clean_sub_path = (sub_path or "").strip("/")
+
+    if current_user.rank() < 4:
+        if target_tier == "SYSTEM":
+            raise HTTPException(status_code=403, detail="SYSTEM 영역 업로드는 관리자만 가능합니다.")
+        if target_tier == "PRIVATE" and clean_sub_path and not _is_own_private_path(current_user, "PRIVATE", clean_sub_path):
+            raise HTTPException(status_code=403, detail="본인의 개인 폴더에만 업로드할 수 있습니다.")
+
     assets = await media_service.media_process_upload(
         db=db,
         user=current_user,
@@ -174,6 +207,30 @@ async def media_upload(
     )
     return assets
 
+@router.post("/publish")
+async def media_publish(
+    req: PublishRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """[v3.3] 내 파일함(PRIVATE)에 미리 업로드된 파일을 서비스 영역(PUBLIC/PROTECTED)으로 물리 복사(Publish)"""
+    if not req.asset_ids:
+        raise HTTPException(status_code=400, detail="선택된 파일이 없습니다.")
+    target_tier = (req.access_level or "PUBLIC").upper()
+    if current_user.rank() < 4 and target_tier not in ["PUBLIC", "PROTECTED"]:
+        raise HTTPException(status_code=403, detail="서비스 배포는 PUBLIC 또는 PROTECTED 영역으로만 가능합니다.")
+
+    published = media_service.media_publish_assets(
+        db=db,
+        user=current_user,
+        asset_ids=req.asset_ids,
+        app_id=req.app_id,
+        target_id=req.target_id,
+        access_level=target_tier,
+        sub_path=req.sub_path
+    )
+    return published
+
 @router.get("/admin/list")
 async def media_admin_list(
     tier: str = "PUBLIC",
@@ -182,12 +239,33 @@ async def media_admin_list(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    upper_tier = tier.upper()
+    target_sub_path = sub_path.strip("/")
+
+    # [v3.3 권한 정책]
+    # - Rank >= 4 (관리자/root): 전체 티어 및 전체 사용자 폴더 관제 가능
+    # - Rank 1~3 (일반 사용자):
+    #   1) PRIVATE 티어: 본인 폴더(USERS/{current_user.id})만 조회 가능 (미지정 시 자동 보정)
+    #   2) SYSTEM 티어: 공용폴더(GLOBAL/OFFICE)는 Rank >= 2 열람 가능, 그 외 SYSTEM은 차단
+    #   3) PROTECTED / PUBLIC 티어: Rank >= 2 탐색 가능
     if current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="Permission denied")
-    
-    base_tier_folder = media_config.MEDIA_TIERS.get(tier.upper(), "PUBLIC")
-    target_sub_path = sub_path.strip("/").upper()
+        if upper_tier == "PRIVATE":
+            if not target_sub_path:
+                target_sub_path = f"USERS/{current_user.id}"
+            elif not _is_own_private_path(current_user, "PRIVATE", target_sub_path):
+                raise HTTPException(status_code=403, detail="본인의 개인 폴더만 조회할 수 있습니다.")
+        elif upper_tier == "SYSTEM":
+            if current_user.rank() < 2 or not (target_sub_path == "GLOBAL/OFFICE" or target_sub_path.startswith("GLOBAL/OFFICE/")):
+                raise HTTPException(status_code=403, detail="Permission denied")
+        elif upper_tier in ["PROTECTED", "PUBLIC"]:
+            if current_user.rank() < 2:
+                raise HTTPException(status_code=403, detail="Permission denied")
+        else:
+            raise HTTPException(status_code=403, detail="Permission denied")
+
+    base_tier_folder = media_config.MEDIA_TIERS.get(upper_tier, "PUBLIC")
     target_dir = os.path.join(media_config.MEDIA_ROOT, base_tier_folder, target_sub_path)
+    _validate_safe_path(target_dir)
     
     if not os.path.exists(target_dir):
         media_service.safe_makedirs(target_dir)
@@ -196,24 +274,28 @@ async def media_admin_list(
     try:
         with os.scandir(target_dir) as entries:
             for entry in entries:
+                # 숨김 폴더('.' 시작) 및 THUMB 폴더는 탐색기 폴더 목록에서 비노출 (하위 호환을 위해 구 DEL_ 접두어도 제외)
                 if entry.is_dir() and not entry.name.startswith('.'):
                     if entry.name not in [media_config.THUMB_FOLDER_NAME, 'tmp'] and not entry.name.startswith('DEL_'):
                         folders.append({
                             "name": entry.name,
                             "type": "folder",
-                            "path": os.path.join(sub_path, entry.name).strip("/")
+                            "path": os.path.join(target_sub_path, entry.name).strip("/")
                         })
     except Exception as e:
         print(f"Error scanning: {e}")
 
-    normalized_sub_path = sub_path.strip("/").upper()
+    normalized_sub_path = target_sub_path
     search_prefix = f"{base_tier_folder}/{normalized_sub_path}".strip("/")
     if normalized_sub_path:
         search_prefix += "/"
     
     base_filter = [
-        MediaAsset.access_level == tier.upper(),
-        MediaAsset.is_deleted == False
+        MediaAsset.access_level == upper_tier,
+        MediaAsset.is_deleted == False,
+        # 숨김 파일('.' 시작) 및 숨김 폴더('/.' 포함) 내부 파일은 목록에서 비노출
+        not_(MediaAsset.original_name.like(".%")),
+        not_(MediaAsset.file_path.like("%/.%"))
     ]
     
     if recursive:
@@ -228,7 +310,7 @@ async def media_admin_list(
 
     return {
         "tier": tier,
-        "current_path": sub_path,
+        "current_path": target_sub_path,
         "folders": sorted(folders, key=lambda x: x['name']),
         "files": all_files 
     }
@@ -238,17 +320,29 @@ async def media_admin_create_folder(
     req: FolderCreateRequest,
     current_user: User = Depends(get_current_user)
 ):
+    upper_tier = req.tier.upper()
+    clean_sub_path = req.sub_path.strip("/")
+    clean_folder_name = req.folder_name.strip("/")
+
+    if not clean_folder_name or "/" in clean_folder_name or "\\" in clean_folder_name or clean_folder_name in [".", ".."]:
+        raise HTTPException(status_code=400, detail="유효하지 않은 폴더 이름입니다.")
+
+    # [v3.3 권한 정책] 일반 사용자는 본인 개인 폴더(PRIVATE/USERS/{id}) 하위에서만 폴더 생성 가능
     if current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="Permission denied")
+        if not clean_sub_path and upper_tier == "PRIVATE":
+            clean_sub_path = f"USERS/{current_user.id}"
+        if not _is_own_private_path(current_user, upper_tier, clean_sub_path):
+            raise HTTPException(status_code=403, detail="본인의 개인 폴더에서만 새 폴더를 생성할 수 있습니다.")
     
-    base_tier_folder = media_config.MEDIA_TIERS.get(req.tier.upper(), "PUBLIC")
-    new_dir = os.path.join(media_config.MEDIA_ROOT, base_tier_folder, req.sub_path.upper(), req.folder_name.upper())
+    base_tier_folder = media_config.MEDIA_TIERS.get(upper_tier, "PUBLIC")
+    new_dir = os.path.join(media_config.MEDIA_ROOT, base_tier_folder, clean_sub_path, clean_folder_name)
+    _validate_safe_path(new_dir)
     
     if os.path.exists(new_dir):
         raise HTTPException(status_code=400, detail="Folder already exists")
     
     media_service.safe_makedirs(new_dir)
-    return {"message": "Folder created", "path": os.path.join(req.sub_path, req.folder_name).upper()}
+    return {"message": "Folder created", "path": os.path.join(clean_sub_path, clean_folder_name).strip("/")}
 
 @router.post("/admin/backup")
 async def media_admin_backup(
@@ -278,25 +372,37 @@ async def media_admin_bulk_delete(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="Permission denied")
-    
+    is_admin = current_user.rank() >= 4
     submitted_count = 0
 
-    # 1. 파일별 비동기 삭제 예약
+    # 1. 파일별 비동기 삭제 예약 (일반 유저는 본인 소유 파일만 삭제 가능)
     if req.asset_ids:
         for asset_id in req.asset_ids:
+            asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id, MediaAsset.is_deleted == False).first()
+            if not asset:
+                continue
+            if not is_admin and asset.user_id != current_user.id:
+                continue
             if media_service.delete_asset(db, asset_id):
                 submitted_count += 1
 
-    # 2. 폴더 내 모든 자산 식별 후 삭제 예약
+    # 2. 폴더 내 모든 자산 식별 후 삭제 예약 (및 폴더 숨김 격리)
     if req.folder_paths:
-        base_tier_folder = media_config.MEDIA_TIERS.get(req.tier.upper(), "PUBLIC")
+        upper_tier = req.tier.upper()
+        base_tier_folder = media_config.MEDIA_TIERS.get(upper_tier, "PUBLIC")
+        today_str = datetime.now().strftime("%Y%m%d")
+
         for fpath in req.folder_paths:
-            db_prefix = f"{base_tier_folder}/{fpath.upper()}/"
+            clean_fpath = fpath.strip("/")
+            # 일반 유저는 본인 개인 폴더(PRIVATE/USERS/{id}/...) 하위 폴더만 삭제 가능
+            if not is_admin:
+                if not _is_own_private_path(current_user, upper_tier, clean_fpath) or clean_fpath == f"USERS/{current_user.id}":
+                    continue
+
+            db_prefix = f"{base_tier_folder}/{clean_fpath}/"
             # 해당 폴더 하위의 모든 살아있는 자산 조회
             assets = db.query(MediaAsset).filter(
-                MediaAsset.access_level == req.tier.upper(),
+                MediaAsset.access_level == upper_tier,
                 MediaAsset.file_path.like(f"{db_prefix}%"),
                 MediaAsset.is_deleted == False
             ).all()
@@ -305,7 +411,21 @@ async def media_admin_bulk_delete(
                 if media_service.delete_asset(db, asset.id):
                     submitted_count += 1
 
-    return {"message": f"{submitted_count}건의 삭제 작업이 비동기 예약되었습니다."}
+            # 물리 폴더 자체도 .DEL_{YYYYMMDD}_{폴더명} 으로 리네임하여 탐색기에서 숨김 격리
+            abs_folder = os.path.join(media_config.MEDIA_ROOT, base_tier_folder, clean_fpath)
+            try:
+                _validate_safe_path(abs_folder)
+                if os.path.isdir(abs_folder):
+                    parent_dir = os.path.dirname(abs_folder)
+                    folder_base = os.path.basename(abs_folder)
+                    if not folder_base.startswith("."):
+                        isolated_folder = os.path.join(parent_dir, f"{media_config.PREFIX['DELETE']}{today_str}_{folder_base}")
+                        os.rename(abs_folder, isolated_folder)
+                        submitted_count += 1
+            except Exception as e:
+                print(f"Folder isolate error: {e}")
+
+    return {"message": f"{submitted_count}건의 삭제 작업이 처리되었습니다."}
 
 @router.post("/admin/gc")
 async def media_admin_run_gc(
@@ -334,8 +454,13 @@ async def media_admin_delete(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="Permission denied")
+    asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id, MediaAsset.is_deleted == False).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 이미 삭제되었습니다.")
+
+    # [v3.3 권한 정책] 본인 소유 자산이거나 관리자(rank >= 4)인 경우 삭제(격리) 허용
+    if asset.user_id != current_user.id and current_user.rank() < 4:
+        raise HTTPException(status_code=403, detail="본인의 파일만 삭제할 수 있습니다.")
     
     success = media_service.delete_asset(db, asset_id)
     if not success: raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 삭제에 실패했습니다.")

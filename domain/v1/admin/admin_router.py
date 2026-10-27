@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry, DayOff, ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance, RouteMaster, RouteTimetable
+from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry, DayOff, Page, ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance, RouteMaster, RouteTimetable
 from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker, check_rank
-from core.permission import can_access_app
+from core.permission import can_access_app, evaluate_permission
 from domain.v1.admin import admin_schema
 from typing import List, Optional, Any
 from datetime import date
@@ -86,6 +86,12 @@ def update_user_rank(
 @router.get("/apps", response_model=List[admin_schema.AppRegistrySchema])
 def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     """시스템에 등록된 모든 App 엔진 목록 조회 (관리자용)"""
+    # 레거시 'STATIC' 값을 표준 'CUSTOM'으로 자동 정규화 동기화
+    legacy_apps = db.query(AppRegistry).filter(AppRegistry.app_type == "STATIC").all()
+    if legacy_apps:
+        for app in legacy_apps:
+            app.app_type = "CUSTOM"
+        db.commit()
     return db.query(AppRegistry).order_by(AppRegistry.app_id).all()
 
 @router.get("/apps/{app_id}", response_model=admin_schema.AppRegistrySchema)
@@ -94,6 +100,10 @@ def get_app_detail(app_id: str, db: Session = Depends(get_db)):
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not db_app:
         raise HTTPException(status_code=404, detail="등록되지 않은 앱 엔진입니다.")
+    if db_app.app_type == "STATIC":
+        db_app.app_type = "CUSTOM"
+        db.commit()
+        db.refresh(db_app)
     return db_app
 
 @router.post("/apps", response_model=admin_schema.AppRegistrySchema)
@@ -108,7 +118,11 @@ def create_app_registry(
     if existing:
         raise HTTPException(status_code=400, detail="이미 등록된 앱 식별자입니다.")
     
-    db_app = AppRegistry(**app_in.dict())
+    payload = app_in.dict()
+    if payload.get("app_type") == "STATIC":
+        payload["app_type"] = "CUSTOM"
+    
+    db_app = AppRegistry(**payload)
     db.add(db_app)
     db.commit()
     db.refresh(db_app)
@@ -128,6 +142,8 @@ def update_app_registry(
     
     # 전달된 필드만 부분 업데이트 (exclude_unset=True)
     update_data = app_in.dict(exclude_unset=True)
+    if update_data.get("app_type") == "STATIC":
+        update_data["app_type"] = "CUSTOM"
     for key, value in update_data.items():
         setattr(db_app, key, value)
     
@@ -137,39 +153,64 @@ def update_app_registry(
 
 @router.delete("/apps/{app_id}")
 def delete_app(app_id: str, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
-    """앱 등록 제거"""
+    """앱 등록 제거 (SYSTEM 앱은 삭제 불가)"""
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not db_app:
         raise HTTPException(status_code=404, detail="앱을 찾을 수 없습니다.")
+    if db_app.app_type == "SYSTEM":
+        raise HTTPException(status_code=403, detail="SYSTEM 앱은 시스템 필수 관제 앱이므로 삭제할 수 없습니다.")
     db.delete(db_app)
     db.commit()
     return {"message": "success"}
 
 # --- Menu Management (지능형 메뉴 관리) ---
 
+# 📄 PAGES 레이어로 이관된 순수 정적/데모 페이지 경로 매핑
+MIGRATED_PAGES_MAP = {
+    "/v1/custom/chart": "/v1/pages/chart",
+    "/v1/custom/canvas": "/v1/pages/canvas",
+    "/v1/custom/uploadfile": "/v1/pages/uploadfile",
+}
+
 def resolve_menu_url(menu: Menu, db: Session) -> str:
-    """[v2.2 최종] APP(표준)과 CUSTOM(커스텀) 분기형 주소 조립기"""
-    # 🔗 [URL 레이어] 오직 URL 타입만 수동 입력 주소 사용
+    """[v2.3 표준] INSTANCE / CUSTOM / SYSTEM 앱 분류 일치형 주소 조립기"""
+    # 🔗 [URL 레이어] 오직 URL 타입만 수동 입력 주소 사용 (PAGES 이관 경로 자동 보정 포함)
     if menu.link_type == "URL":
-        return menu.external_url or "#"
+        raw_url = menu.external_url or "#"
+        if raw_url in MIGRATED_PAGES_MAP:
+            menu.external_url = MIGRATED_PAGES_MAP[raw_url]
+            db.commit()
+            return menu.external_url
+        return raw_url
 
     if menu.link_type in ["FOLDER", "DIVIDER"]:
         return "#"
         
-    # ⚙️ [엔진 기반 레이어] APP 또는 CUSTOM
-    if (menu.link_type in ["APP", "CUSTOM"]) and menu.app_id:
+    # ⚙️ [엔진 기반 레이어] INSTANCE(구 APP), CUSTOM, SYSTEM
+    if (menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP"]) and menu.app_id:
         instance_id = str(menu.app_instance_id) if menu.app_instance_id is not None else ""
         
-        # 관리자 여부 판별 (-1)
-        if instance_id == "-1":
+        # 연결된 AppRegistry의 실제 app_type 확인
+        db_app = db.query(AppRegistry).filter(AppRegistry.app_id == menu.app_id).first()
+        app_type = db_app.app_type if db_app else menu.link_type
+        if app_type == "STATIC":
+            app_type = "CUSTOM"
+        elif app_type == "APP":
+            app_type = "INSTANCE"
+
+        # 1) SYSTEM 앱이거나 관리자 화면 모드(-1)인 경우 -> 무조건 /v1/admin/{app_id}
+        if menu.link_type == "SYSTEM" or app_type == "SYSTEM" or instance_id == "-1":
             return f"{API_VERSION_PREFIX}/admin/{menu.app_id}"
             
-        # [v2.2 최종] link_type에 따른 프리픽스 분기
-        # APP -> /v1/app, CUSTOM -> /v1/custom
-        prefix = f"{API_VERSION_PREFIX}/custom" if menu.link_type == "CUSTOM" else f"{API_VERSION_PREFIX}/app"
+        # 2) CUSTOM 앱인 경우 (추상화 인스턴스 제외 단일 앱) -> /v1/custom/{app_id}
+        if menu.link_type == "CUSTOM" or app_type == "CUSTOM":
+            return f"{API_VERSION_PREFIX}/custom/{menu.app_id}"
 
-        if instance_id and instance_id != "":
-            return f"{prefix}/{menu.app_id}/{instance_id}"
+        # 3) INSTANCE 앱인 경우 (기본 추상화 다중 인스턴스 앱) -> /v1/app/{app_id}/{slug}
+        prefix = f"{API_VERSION_PREFIX}/app"
+        slug_or_id = get_instance_slug(menu, db)
+        if slug_or_id and slug_or_id != "":
+            return f"{prefix}/{menu.app_id}/{slug_or_id}"
             
         return f"{prefix}/{menu.app_id}"
 
@@ -180,11 +221,22 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
     return menu.external_url or "#"
 
 def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
-    # app_id가 'board'인 경우 BoardConfig에서 slug를 조회
+    """
+    [인스턴스 ID -> 슬러그(Slug) 변환 헬퍼]
+    - INSTANCE 앱(board, page 등)에 연결된 숫자형 인스턴스 ID를 실제 URL용 슬러그(slug)로 변환합니다.
+    - 관리자 화면(-1)이거나 슬러그가 없는 경우에는 원본 문자열을 반환합니다.
+    """
+    if menu.app_instance_id is None:
+        return None
+    if menu.app_instance_id == -1:
+        return "-1"
     if menu.app_id == 'board' and menu.app_instance_id:
         board = db.query(BoardConfig).filter(BoardConfig.id == menu.app_instance_id).first()
         return board.slug if board else str(menu.app_instance_id)
-    return str(menu.app_instance_id) if menu.app_instance_id is not None else None
+    if menu.app_id == 'page' and menu.app_instance_id:
+        page_obj = db.query(Page).filter(Page.id == menu.app_instance_id).first()
+        return page_obj.slug if page_obj else str(menu.app_instance_id)
+    return str(menu.app_instance_id)
 
 def filter_menu_tree(
     menus: List[Menu],
@@ -203,8 +255,10 @@ def filter_menu_tree(
     sorted_menus = sorted(menus, key=lambda x: x.order)
     
     for m in sorted_menus:
+        # 📌 [버그 수정]: 메뉴는 AppRegistry 객체가 아니라 개별 속성(min_rank, allow_groups, deny_groups)을
+        #    직접 전달하므로 core.permission.evaluate_permission()으로 4단계 권한을 판별합니다.
         is_allowed = True if bypass_auth else (
-            m.is_visible and can_access_app(
+            bool(m.is_visible) and evaluate_permission(
                 user=current_user,
                 action="read",
                 min_read_rank=m.min_rank if m.min_rank is not None else 0,
@@ -213,13 +267,14 @@ def filter_menu_tree(
             )
         )
         if is_allowed:
-            # 동적 URL 계산
+            # 동적 URL 계산 (INSTANCE / CUSTOM / SYSTEM 분류 체계 반영)
             final_url = resolve_menu_url(m, db)
+            normalized_link_type = "INSTANCE" if m.link_type == "APP" else m.link_type
             
             menu_data = {
                 "id": m.id, "title": m.title, "parent_id": m.parent_id,
                 "icon_name": m.icon_name, "icon_color": m.icon_color,
-                "link_type": m.link_type, "external_url": final_url,
+                "link_type": normalized_link_type, "external_url": final_url,
                 "order": m.order, "is_visible": m.is_visible, "min_rank": m.min_rank,
                 "allow_groups": m.allow_groups or [],
                 "deny_groups": m.deny_groups or [],
@@ -246,13 +301,23 @@ def get_public_menus(
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])
 def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
-    """관리자용 전체 메뉴 트리 (Slug 변환 포함)"""
+    """관리자용 전체 메뉴 트리 (Slug 변환 및 레거시 APP -> INSTANCE 자동 동기화 포함)"""
+    legacy_menus = db.query(Menu).filter(Menu.link_type == "APP").all()
+    if legacy_menus:
+        for lm in legacy_menus:
+            lm.link_type = "INSTANCE"
+        db.commit()
     root_menus = db.query(Menu).options(joinedload(Menu.sub_menus)).filter(Menu.parent_id == None).order_by(Menu.order).all()
     return filter_menu_tree(root_menus, admin, db, bypass_auth=True)
 
 @router.post("/menu", response_model=admin_schema.MenuSchema)
 def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     data = menu_in.dict()
+    if data.get("link_type") == "APP":
+        data["link_type"] = "INSTANCE"
+    elif data.get("link_type") == "SYSTEM":
+        data["app_instance_id"] = -1
+
     original_instance_id = data.get("app_instance_id")
     
     if original_instance_id and isinstance(original_instance_id, str):
@@ -278,6 +343,11 @@ def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = De
     if not db_menu: raise HTTPException(status_code=404)
     
     data = menu_in.dict(exclude_unset=True)
+    if data.get("link_type") == "APP":
+        data["link_type"] = "INSTANCE"
+    elif data.get("link_type") == "SYSTEM":
+        data["app_instance_id"] = -1
+
     original_instance_id = data.get("app_instance_id")
     
     if original_instance_id and isinstance(original_instance_id, str):

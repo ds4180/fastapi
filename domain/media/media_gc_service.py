@@ -14,7 +14,7 @@ class MediaGCService:
     def __init__(self, db: Session):
         self.db = db
         self.today_str = datetime.now().strftime("%Y%m%d")
-        self.gc_del_root = os.path.join(config.MEDIA_ROOT, f"DEL_GC_{self.today_str}")
+        self.gc_del_root = os.path.join(config.MEDIA_ROOT, f".DEL_GC_{self.today_str}")
 
     def run_tasks(self, task_indices: list[int]):
         """
@@ -61,10 +61,12 @@ class MediaGCService:
             if not os.path.exists(tier_root): continue
 
             for root, dirs, files in os.walk(tier_root):
-                # 썸네일 폴더 등 특수 폴더 제외
+                # 썸네일 폴더 및 숨김 폴더('.' 시작) 제외
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d != config.THUMB_FOLDER_NAME]
                 if config.THUMB_FOLDER_NAME in root: continue
 
                 for f in files:
+                    if f.startswith('.'): continue
                     full_path = os.path.join(root, f)
                     rel_path = os.path.relpath(full_path, config.MEDIA_ROOT)
                     
@@ -138,7 +140,7 @@ class MediaGCService:
             item_path = os.path.join(config.MEDIA_ROOT, item)
             if not os.path.isdir(item_path): continue
             
-            if item.startswith("DEL_"):
+            if item.startswith(".DEL_") or item.startswith("DEL_"):
                 # 생성 시간 또는 이름의 날짜 기반 체크
                 mtime = datetime.fromtimestamp(os.path.getmtime(item_path))
                 if mtime < limit_date:

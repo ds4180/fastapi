@@ -79,10 +79,9 @@ async def media_process_upload(
         # 2. 카테고리 판별
         category = config.MEDIA_CATEGORIES["IMAGE"] if mime_type.startswith("image/") else config.MEDIA_CATEGORIES["DOCUMENT"]
             
-        # 3. 경로 확정 (시스템-대문자, 유저-소문자)
+        # 3. 경로 확정 (사용자 지정 경로는 입력 대소문자 그대로 보존, 시스템 기본 경로는 대문자)
         if sub_path:
-            # [v3.1] 시스템 표준에 따라 하위 경로도 대문자로 치환 (GLOBAL/OFFICE 등)
-            safe_sub_path = sub_path.strip("/").upper() 
+            safe_sub_path = sub_path.strip("/")
             tier_folder = config.MEDIA_TIERS.get(final_access_level.upper(), "PUBLIC")
             relative_dir = os.path.join(tier_folder, safe_sub_path).replace("\\", "/")
         else:
@@ -188,3 +187,132 @@ def delete_asset(db: Session, asset_id: int):
     )
     db.commit()
     return True
+
+
+def media_publish_assets(
+    db: Session,
+    user: User,
+    asset_ids: List[int],
+    app_id: str = "general",
+    target_id: Optional[str] = None,
+    access_level: str = "PUBLIC",
+    sub_path: Optional[str] = None
+) -> List[MediaAsset]:
+    """
+    [v3.3] 개인 보관함(PRIVATE 등)에 미리 업로드된 파일을 서비스 영역(PUBLIC/PROTECTED)으로
+    직접 업로드(media_process_upload)와 동일한 경로·네이밍·썸네일 규칙으로 물리 복사(Publish)합니다.
+    """
+    import shutil
+
+    results = []
+    final_access_level = access_level.upper() if access_level else media_get_access_level(user, app_id)
+
+    source_assets = db.query(MediaAsset).filter(
+        MediaAsset.id.in_(asset_ids),
+        MediaAsset.is_deleted == False
+    ).all()
+
+    for src_asset in source_assets:
+        # 권한 확인: 본인 소유 파일이거나 관리자(rank >= 4)만 배포 가능
+        if src_asset.user_id != user.id and user.rank() < 4:
+            continue
+
+        src_abs_path = os.path.join(config.MEDIA_ROOT, src_asset.file_path)
+        if not os.path.exists(src_abs_path):
+            logger.warning(f"[Media Publish] 원본 파일 없음: {src_abs_path}")
+            continue
+
+        original_name = src_asset.original_name
+        file_ext = os.path.splitext(original_name)[1].upper()
+        if not file_ext:
+            file_ext = os.path.splitext(src_asset.file_path)[1].upper()
+        mime_type = src_asset.mime_type or "application/octet-stream"
+        category = src_asset.category or (
+            config.MEDIA_CATEGORIES["IMAGE"] if mime_type.startswith("image/") else config.MEDIA_CATEGORIES["DOCUMENT"]
+        )
+
+        # 경로 확정 (직접 업로드와 100% 동일 규칙)
+        if sub_path:
+            safe_sub_path = sub_path.strip("/")
+            tier_folder = config.MEDIA_TIERS.get(final_access_level, "PUBLIC")
+            relative_dir = os.path.join(tier_folder, safe_sub_path).replace("\\", "/")
+        else:
+            relative_dir = media_generate_path(final_access_level, category, user.id)
+
+        abs_dir = os.path.join(config.MEDIA_ROOT, relative_dir)
+        safe_makedirs(abs_dir)
+
+        # 새 UUID 부여 및 네이밍 규칙 적용 (원본 삭제와 완전 분리)
+        unique_uuid = str(uuid.uuid4())
+        if category == config.MEDIA_CATEGORIES["IMAGE"]:
+            filename = f"{config.PREFIX['IMAGE']}{unique_uuid}{file_ext}"
+        else:
+            filename = f"{config.PREFIX['DOC']}{unique_uuid[:8]}_{original_name}{file_ext}"
+
+        filename = get_unique_filename(abs_dir, filename)
+        relative_file_path = os.path.join(relative_dir, filename).replace("\\", "/")
+        abs_file_path = os.path.join(abs_dir, filename)
+
+        # 물리 파일 복사 및 권한 설정
+        shutil.copy2(src_abs_path, abs_file_path)
+        os.chmod(abs_file_path, 0o644)
+
+        file_size = os.path.getsize(abs_file_path)
+        meta_info = {"original_name": original_name, "published_from": src_asset.id}
+        thumb_main_path = None
+
+        # 이미지인 경우 SM 썸네일 즉시 생성
+        if category == config.MEDIA_CATEGORIES["IMAGE"]:
+            try:
+                with Image.open(abs_file_path) as img:
+                    meta_info["width"], meta_info["height"] = img.size
+                    thumb_dir = os.path.join(abs_dir, config.THUMB_FOLDER_NAME)
+                    safe_makedirs(thumb_dir)
+
+                    if img.mode in ("P", "CMYK"):
+                        img = img.convert("RGB")
+
+                    sm_cfg = config.MEDIA_THUMB_CONFIG["SM"]
+                    sm_img = img.copy()
+                    sm_img.thumbnail(sm_cfg["size"], Image.Resampling.LANCZOS)
+                    sm_filename = f"{config.PREFIX['THUMB']}{unique_uuid}_{sm_cfg['suffix']}.WEBP"
+                    sm_abs_path = os.path.join(thumb_dir, sm_filename)
+                    sm_rel_path = os.path.join(relative_dir, config.THUMB_FOLDER_NAME, sm_filename).replace("\\", "/")
+
+                    sm_img.save(sm_abs_path, "WEBP", quality=config.WEBP_QUALITY)
+                    os.chmod(sm_abs_path, 0o644)
+
+                    meta_info["thumbs"] = {"sm": sm_rel_path}
+                    thumb_main_path = sm_rel_path
+            except Exception as e:
+                logger.error(f"[Media Publish Error] SM Thumbnail failed: {e}")
+
+        new_asset = MediaAsset(
+            user_id=user.id,
+            access_level=final_access_level,
+            app_id=app_id,
+            target_id=target_id,
+            original_name=original_name,
+            file_path=relative_file_path,
+            thumbnail_path=thumb_main_path,
+            meta_info=meta_info,
+            file_size=file_size,
+            mime_type=mime_type,
+            category=category
+        )
+        db.add(new_asset)
+        db.flush()
+
+        if category == config.MEDIA_CATEGORIES["IMAGE"]:
+            enqueue_task(
+                db=db,
+                task_type="THUMB_GEN",
+                payload={"asset_id": new_asset.id},
+                unique_key=f"thumb-gen-{new_asset.id}",
+                priority=7
+            )
+
+        results.append(new_asset)
+
+    db.commit()
+    return results

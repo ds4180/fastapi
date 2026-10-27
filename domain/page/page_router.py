@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from database import get_db
 from domain.page import page_schema, page_crud
-from domain.user.user_router import get_current_user, check_rank
+from domain.user.user_router import get_current_user, get_current_user_optional, check_rank
+from core.permission import can_access_page
 from models import User
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 
 router = APIRouter(
@@ -74,12 +75,20 @@ def admin_delete_page(
 @router.get("/detail/{slug}", response_model=page_schema.PageResponse)
 def get_page_detail(
     slug: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional)
 ):
-    """사용자용 페이지 상세 조회 (게시일시, 활성화, 권한 체크 포함)"""
+    """사용자용 페이지 상세 조회 (게시일시, 활성화, 4단계 권한 체크 포함)"""
     db_page = page_crud.get_page_by_slug(db, slug)
     if not db_page:
         raise HTTPException(status_code=404, detail="존재하지 않는 페이지입니다.")
+    
+    # 🛡️ [정책재정의.md 4단계 권한 입구 검문: 1.root ➔ 2.deny ➔ 3.allow ➔ 4.min_rank]
+    if not can_access_page(current_user, db_page, action="read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"'{db_page.title}' 페이지 열람 권한이 없습니다."
+        )
     
     # 🚨 [보안 보강] 시스템 활성화 여부 체크
     if not db_page.is_active:

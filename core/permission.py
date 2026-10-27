@@ -143,3 +143,48 @@ def can_access_app(user: Optional[User], app_obj: Any, action: str = "read", op:
         deny_groups=getattr(app_obj, "deny_groups", None) or [],
         op=op,
     )
+
+
+def can_access_board(user: Optional[User], board_obj: Any, action: str = "read", op: str = ">=") -> bool:
+    """
+    [BoardConfig 객체 기반 4단계 권한 판별 헬퍼]
+    1. root(9) 무조건 통과
+    2. deny_groups 포함 시 즉시 차단
+    3. allow_groups 포함 시 즉시 통과
+    4. min_read_rank / min_write_rank 비교
+    """
+    if not board_obj:
+        return False
+
+    return evaluate_permission(
+        user=user,
+        action=action,
+        min_read_rank=getattr(board_obj, "min_read_rank", 0) or 0,
+        min_write_rank=getattr(board_obj, "min_write_rank", 2) or 0,
+        allow_groups=getattr(board_obj, "allow_groups", None) or [],
+        deny_groups=getattr(board_obj, "deny_groups", None) or [],
+        op=op,
+    )
+
+
+def can_access_page(user: Optional[User], page_obj: Any, action: str = "read", op: str = ">=") -> bool:
+    """
+    [Page 객체 기반 4단계 권한 판별 헬퍼]
+    1. root(9) 무조건 통과
+    2. deny_groups 포함 시 즉시 차단
+    3. allow_groups 포함 시 즉시 통과
+    4. min_rank (열람 요구 등급) 비교
+    """
+    if not page_obj:
+        return False
+
+    return evaluate_permission(
+        user=user,
+        action=action,
+        min_read_rank=getattr(page_obj, "min_rank", 0) or 0,
+        min_write_rank=9,
+        allow_groups=getattr(page_obj, "allow_groups", None) or [],
+        deny_groups=getattr(page_obj, "deny_groups", None) or [],
+        op=op,
+    )
+

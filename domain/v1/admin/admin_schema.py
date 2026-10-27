@@ -7,7 +7,7 @@ class MenuBase(BaseModel):
     title: str
     icon_name: Optional[str] = None
     icon_color: Optional[str] = None
-    link_type: str = "URL" # URL, APP, PAGE, DIVIDER
+    link_type: str = "INSTANCE" # INSTANCE, CUSTOM, SYSTEM, URL, PAGE, FOLDER, DIVIDER
     external_url: Optional[str] = None
     order: int = 0
     is_visible: bool = True
@@ -96,7 +96,7 @@ class AppRegistryBase(BaseModel):
     name: str
     title: Optional[str] = None                     # UI 표시 공식 명칭
     description: Optional[str] = None
-    app_type: str = "INSTANCE"                      # INSTANCE | STATIC | SYSTEM
+    app_type: str = "INSTANCE"                      # INSTANCE | CUSTOM | SYSTEM
     frontend_route: Optional[str] = None            # Svelte 라우트 경로
     main_component: Optional[str] = None            # Dynamic Import용 컴포넌트명
     icon_default: Optional[str] = None              # 기본 아이콘

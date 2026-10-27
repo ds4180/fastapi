@@ -4,7 +4,7 @@ from database import get_db
 from models import AppRegistry, ServiceInstance, BoardConfig, Post, Page
 from domain.v1.admin.service_service import resolve_service_instance
 from domain.user.user_router import get_current_user_optional
-from core.permission import can_access_app
+from core.permission import can_access_app, can_access_board, can_access_page
 from typing import Optional, Any, Dict
 
 router = APIRouter(prefix="/v1/app", tags=["App Engine"])
@@ -29,13 +29,11 @@ def get_app_data(
         raise HTTPException(status_code=404, detail="App not registered")
 
     # 1-1. 🛡️ [4단계 권한 입구 검문] (1.root(9) ➔ 2.deny_groups ➔ 3.allow_groups ➔ 4.min_read_rank)
+    # can_access_app 함수는 (user, app_obj, action) 시그니처를 사용하여 AppRegistry 객체를 직접 검증합니다.
     if not can_access_app(
         user=current_user,
+        app_obj=app_info,
         action="read",
-        min_read_rank=app_info.min_read_rank if app_info.min_read_rank is not None else 0,
-        min_write_rank=app_info.min_write_rank if app_info.min_write_rank is not None else 2,
-        allow_groups=app_info.allow_groups or [],
-        deny_groups=app_info.deny_groups or [],
     ):
         raise HTTPException(
             status_code=403,
@@ -64,6 +62,13 @@ def get_app_data(
             if not board:
                 return result # 인스턴스 없음 반환
 
+            # 🛡️ [인스턴스 단위 4단계 권한 검문: 1.root ➔ 2.deny ➔ 3.allow ➔ 4.min_read_rank]
+            if not can_access_board(current_user, board, action="read"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"해당 게시판('{board.name}')에 접근할 권한이 없습니다."
+                )
+
             result["parent_config"] = board
             
             # 2. 목록 vs 상세 분기
@@ -90,6 +95,12 @@ def get_app_data(
             page_slug = parts[0]
             page = db.query(Page).filter(Page.slug == page_slug).first()
             if page:
+                # 🛡️ [인스턴스 단위 4단계 권한 검문: 1.root ➔ 2.deny ➔ 3.allow ➔ 4.min_rank]
+                if not can_access_page(current_user, page, action="read"):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"해당 페이지('{page.title}')에 접근할 권한이 없습니다."
+                    )
                 result["instance"] = page
                 # 페이지는 아직 서비스 바인딩 필드가 없으므로 bindings=[]
 

@@ -34,7 +34,7 @@ class AppRegistry(Base):
     title = Column(String, nullable=True)                 # UI 표시용 공식 명칭
     description = Column(Text, nullable=True)             # 요약 설명
     
-    app_type = Column(String, default="INSTANCE")         # INSTANCE, STATIC, SYSTEM
+    app_type = Column(String, default="INSTANCE")         # INSTANCE(기본 추상화 인스턴스), CUSTOM(단일 앱), SYSTEM(관리자 전용/삭제불가)
     frontend_route = Column(String, nullable=True)        # Svelte 라우트 경로
     main_component = Column(String, nullable=True)        # 메인 컴포넌트명 (동적 런처용)
     icon_default = Column(String, nullable=True)          # 기본 아이콘
@@ -108,7 +108,7 @@ class Menu(Base):
     title = Column(String, nullable=False)
     icon_name = Column(String, nullable=True)
     icon_color = Column(String, nullable=True)
-    link_type = Column(String, default="URL") # URL, APP, PAGE, DIVIDER
+    link_type = Column(String, default="INSTANCE") # INSTANCE, CUSTOM, SYSTEM, URL, PAGE, FOLDER, DIVIDER
     app_id = Column(String, ForeignKey("app_registry.app_id"), nullable=True)
     app_instance_id = Column(Integer, nullable=True)
     page_id = Column(Integer, nullable=True)

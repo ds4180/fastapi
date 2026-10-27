@@ -24,12 +24,12 @@ MEDIA_CATEGORIES = {
     "ARCHIVE": "archive"
 }
 
-# 4. 네이밍 접두어 (Prefix) - v3.1 표준
+# 4. 네이밍 접두어 (Prefix) - v3.3 표준 (숨김/격리는 '.' 접두어 적용)
 PREFIX = {
     "IMAGE": "IMG_",
     "DOC": "DOC_",
     "THUMB": "TMB_",
-    "DELETE": "DEL_"
+    "DELETE": ".DEL_"
 }
 
 # 5. 썸네일 설정
