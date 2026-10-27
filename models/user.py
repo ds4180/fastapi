@@ -24,12 +24,16 @@ class Group(Base):
     💡 정책재정의.md 반영:
     - 오직 root(rank_level == 9)만이 그룹 관리 페이지에서 생성·삭제·설정할 수 있는 공식 그룹 명부입니다.
     - 사용자는 여기에 등록된 그룹 코드(code)를 주그룹(1개) 또는 부그룹(1개 이상)으로 부여받습니다.
+    - group_type: 'PRIMARY'(주그룹/본소속) | 'SECONDARY'(부그룹/직무·특권·제재)
+    - category: 'GENERAL'(일반) | 'PRIVILEGE'(특권/Allow용) | 'RESTRICTION'(제재/Deny용)
     """
     __tablename__ = "groups"
 
     id = Column(Integer, primary_key=True)
     code = Column(String(50), unique=True, nullable=False, index=True)  # 그룹 고유 식별 코드 (예: '운수팀', '배차담당')
     name = Column(String(100), nullable=False)                          # 화면 표시용 그룹 이름
+    group_type = Column(String(20), nullable=False, default="PRIMARY")  # PRIMARY, SECONDARY
+    category = Column(String(20), nullable=False, default="GENERAL")    # GENERAL, PRIVILEGE, RESTRICTION
     description = Column(Text, nullable=True)                           # 그룹 설명 및 용도
     created_at = Column(DateTime, default=datetime.now, nullable=False)
 

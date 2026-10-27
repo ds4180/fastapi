@@ -26,7 +26,9 @@ class Page(Base):
     
     status = Column(String, default="DRAFT")                       # DRAFT, PUBLISHED
     is_active = Column(Boolean, default=True)                      # 활성 여부
-    min_rank = Column(Integer, default=0)                          # 열람 가능 최소 등급
+    min_rank = Column(Integer, default=0)                          # 열람 가능 최소 등급 (0~9)
+    allow_groups = Column(JSONB, default=list, nullable=False)     # 허용 그룹
+    deny_groups = Column(JSONB, default=list, nullable=False)      # 차단 그룹 (Deny-Wins)
     redirect_url = Column(String, nullable=True)                  # 외부 리다이렉트 URL
     
     is_deleted = Column(Boolean, default=False, nullable=False)    # 논리 삭제 플래그

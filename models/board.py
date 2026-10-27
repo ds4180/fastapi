@@ -40,6 +40,13 @@ class BoardConfig(Base):
     
     perm_read = Column(JSONB, default={"ROLE_GUEST": "GLOBAL"})
     perm_write = Column(JSONB, default={"ROLE_USER": "GLOBAL"})
+    
+    # 🛡️ 4단계 권한 및 그룹 정책 (정책재정의.md)
+    min_read_rank = Column(Integer, default=0, nullable=False)        # 4단계: 읽기 최소 랭킹 (0~9)
+    min_write_rank = Column(Integer, default=2, nullable=False)       # 4단계: 쓰기 최소 랭킹 (0~9)
+    allow_groups = Column(JSONB, default=list, nullable=False)        # 3단계: 허용 그룹 (소속 시 랭킹 무관 즉시 허용)
+    deny_groups = Column(JSONB, default=list, nullable=False)         # 2단계: 차단 그룹 (Deny-Wins)
+    
     is_active = Column(Boolean, default=True)
     create_date = Column(DateTime, nullable=False, default=datetime.now)
 
