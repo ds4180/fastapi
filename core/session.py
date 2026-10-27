@@ -27,6 +27,11 @@ from core.config import settings
 SESSION_EXPIRE_DAYS = settings.REFRESH_TOKEN_EXPIRE_DAYS
 SESSION_EXPIRE_SECONDS = 60 * 60 * 24 * SESSION_EXPIRE_DAYS
 
+# 📌 DB 최근 활동 시각(last_activity) 갱신 최소 주기 (5분 = 300초)
+# 매 API 요청마다 DB COMMIT을 수행하면 동시 요청 시 Row Lock 경합이 발생하므로,
+# Redis 만료 시간은 매번 즉시 연장하되 DB 기록은 5분 주기로 스로틀링(Throttling)합니다.
+ACTIVITY_UPDATE_INTERVAL_SECONDS = 300
+
 
 def detect_device_category(user_agent: str) -> str:
     """
@@ -120,9 +125,18 @@ def validate_session(db: Session, session_id: Optional[str]) -> Optional[User]:
         return None
 
     # 4. 슬라이딩 윈도우 (활동 감지 시 세션 만료 시간 3일 자동 연장)
-    db_session.last_activity = datetime.now()
-    db.commit()
+    # 💡 [성능 최적화]: Redis TTL은 메모리 연산이므로 매 요청마다 즉시 연장하고,
+    #    PostgreSQL DB의 last_activity 업데이트는 마지막 기록 후 5분(300초)이 지났을 때만
+    #    조건부로 Commit하여 병렬 API 호출 시 발생하는 DB Row Lock 경합을 원천 차단합니다.
     rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
+
+    now = datetime.now()
+    if (
+        not db_session.last_activity
+        or (now - db_session.last_activity).total_seconds() >= ACTIVITY_UPDATE_INTERVAL_SECONDS
+    ):
+        db_session.last_activity = now
+        db.commit()
 
     return user
 

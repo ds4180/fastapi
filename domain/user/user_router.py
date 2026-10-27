@@ -130,9 +130,9 @@ def create_user(user_create: user_schema.UserCreate, db: Session = Depends(get_d
 @router.get("/sessions", response_model=List[user_schema.UserSessionResponse])
 def session_list(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_rank(4))
 ):
-    """최근 접속한 사용자 세션 목록 조회"""
+    """관리자 전용(Rank 4): 최근 접속한 사용자들의 세션 및 접속 기기/IP 목록을 조회합니다."""
     return user_crud.get_session_list(db)
 
 
@@ -143,13 +143,9 @@ def session_list(
 def kick_user_session(
     target_session_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_rank(4))
 ):
-    """관리자 전용: 특정 사용자의 세션을 강제로 만료(추방)시킵니다."""
-    user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
-    if user_rank < 4:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="권한 부족")
-
+    """관리자 전용(Rank 4): 특정 사용자의 세션을 강제로 만료(추방)시킵니다."""
     result = user_crud.kick_session(db, session_id=target_session_id)
     return {"message": "success"} if result else {"error": "Session not found"}
 
