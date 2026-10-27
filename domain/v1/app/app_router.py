@@ -4,6 +4,7 @@ from database import get_db
 from models import AppRegistry, ServiceInstance, BoardConfig, Post, Page
 from domain.v1.admin.service_service import resolve_service_instance
 from domain.user.user_router import get_current_user_optional
+from core.permission import can_access_app
 from typing import Optional, Any, Dict
 
 router = APIRouter(prefix="/v1/app", tags=["App Engine"])
@@ -26,6 +27,20 @@ def get_app_data(
     app_info = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not app_info:
         raise HTTPException(status_code=404, detail="App not registered")
+
+    # 1-1. 🛡️ [4단계 권한 입구 검문] (1.root(9) ➔ 2.deny_groups ➔ 3.allow_groups ➔ 4.min_read_rank)
+    if not can_access_app(
+        user=current_user,
+        action="read",
+        min_read_rank=app_info.min_read_rank if app_info.min_read_rank is not None else 0,
+        min_write_rank=app_info.min_write_rank if app_info.min_write_rank is not None else 2,
+        allow_groups=app_info.allow_groups or [],
+        deny_groups=app_info.deny_groups or [],
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=f"해당 앱('{app_info.title or app_id}')에 접근할 권한이 없습니다."
+        )
 
     # 2. 경로 분석 (slug: board_slug/id or just id)
     parts = slug.split('/')

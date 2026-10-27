@@ -12,6 +12,8 @@ class MenuBase(BaseModel):
     order: int = 0
     is_visible: bool = True
     min_rank: int = 0
+    allow_groups: List[str] = []
+    deny_groups: List[str] = []
     app_id: Optional[str] = None
     app_instance_id: Optional[int] = None
     page_id: Optional[int] = None
@@ -30,6 +32,8 @@ class MenuUpdate(BaseModel):
     order: Optional[int] = None
     is_visible: Optional[bool] = None
     min_rank: Optional[int] = None
+    allow_groups: Optional[List[str]] = None
+    deny_groups: Optional[List[str]] = None
     app_id: Optional[str] = None
     app_instance_id: Optional[Any] = None
     page_id: Optional[int] = None
@@ -49,6 +53,8 @@ class MenuSchema(MenuBase):
 # --- 유저 관리 스키마 ---
 class UserProfileSchema(BaseModel):
     rank_level: int = 0
+    primary_group: Optional[str] = None
+    secondary_groups: List[str] = []
     is_active: bool = True
     employee_no: Optional[str] = None
     joined_date: Optional[date] = None
@@ -94,9 +100,11 @@ class AppRegistryBase(BaseModel):
     frontend_route: Optional[str] = None            # Svelte 라우트 경로
     main_component: Optional[str] = None            # Dynamic Import용 컴포넌트명
     icon_default: Optional[str] = None              # 기본 아이콘
-    # 보안 주권 설정
-    min_read_rank: int = 0                          # 읽기/진입 최소 권한
-    min_write_rank: int = 2                         # 쓰기/행위 최소 권한
+    # 보안 주권 설정 (4단계 권한: 1.root(9) ➔ 2.deny_groups ➔ 3.allow_groups ➔ 4.rank)
+    min_read_rank: int = 0                          # 읽기/진입 최소 권한 (0~9)
+    min_write_rank: int = 2                         # 쓰기/행위 최소 권한 (0~9)
+    allow_groups: List[str] = []                    # 허용 그룹 코드 목록 (읽기/쓰기 모두 허용)
+    deny_groups: List[str] = []                     # 차단 그룹 코드 목록 (Deny-Wins)
     admin_ids: List[int] = []                       # 앱 자치 관리자 user_id 목록
     config_schema: Dict[str, Any] = {}              # 인스턴스별 설정 스키마
     is_active: bool = True
@@ -114,6 +122,8 @@ class AppRegistryUpdate(BaseModel):
     icon_default: Optional[str] = None
     min_read_rank: Optional[int] = None
     min_write_rank: Optional[int] = None
+    allow_groups: Optional[List[str]] = None
+    deny_groups: Optional[List[str]] = None
     admin_ids: Optional[List[int]] = None
     config_schema: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None

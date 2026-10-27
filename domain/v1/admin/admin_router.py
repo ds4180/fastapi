@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session, joinedload
 from database import get_db
 from models import User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry, DayOff, ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance, RouteMaster, RouteTimetable
 from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker, check_rank
+from core.permission import can_access_app
 from domain.v1.admin import admin_schema
 from typing import List, Optional, Any
 from datetime import date
@@ -185,14 +186,33 @@ def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
         return board.slug if board else str(menu.app_instance_id)
     return str(menu.app_instance_id) if menu.app_instance_id is not None else None
 
-def filter_menu_tree(menus: List[Menu], user_rank: int, db: Session):
-    """재귀적 메뉴 필터링 및 동적 URL 주입 + Slug 변환 적용"""
+def filter_menu_tree(
+    menus: List[Menu],
+    current_user: Optional[User],
+    db: Session,
+    bypass_auth: bool = False
+):
+    """
+    [4단계 권한 기반 재귀적 메뉴 필터링 및 동적 URL 주입]
+    1. root(9) 인가? ➔ 무조건 노출
+    2. 메뉴의 deny_groups 에 사용자의 부그룹/주그룹이 있는가? ➔ 즉시 숨김
+    3. 메뉴의 allow_groups 에 사용자의 부그룹/주그룹이 있는가? ➔ 랭킹 무관 노출
+    4. 메뉴의 min_rank 와 사용자 랭킹 비교 ➔ 이상이면 노출
+    """
     filtered = []
-    # 정렬 추가: 하위 메뉴들이 'order' 필드 기준으로 정렬되도록 보장
     sorted_menus = sorted(menus, key=lambda x: x.order)
     
     for m in sorted_menus:
-        if m.is_visible and m.min_rank <= user_rank:
+        is_allowed = True if bypass_auth else (
+            m.is_visible and can_access_app(
+                user=current_user,
+                action="read",
+                min_read_rank=m.min_rank if m.min_rank is not None else 0,
+                allow_groups=m.allow_groups or [],
+                deny_groups=m.deny_groups or [],
+            )
+        )
+        if is_allowed:
             # 동적 URL 계산
             final_url = resolve_menu_url(m, db)
             
@@ -201,8 +221,10 @@ def filter_menu_tree(menus: List[Menu], user_rank: int, db: Session):
                 "icon_name": m.icon_name, "icon_color": m.icon_color,
                 "link_type": m.link_type, "external_url": final_url,
                 "order": m.order, "is_visible": m.is_visible, "min_rank": m.min_rank,
+                "allow_groups": m.allow_groups or [],
+                "deny_groups": m.deny_groups or [],
                 "app_id": m.app_id, "app_instance_id": get_instance_slug(m, db),
-                "sub_menus": filter_menu_tree(m.sub_menus, user_rank, db)
+                "sub_menus": filter_menu_tree(m.sub_menus, current_user, db, bypass_auth=bypass_auth)
             }
             filtered.append(menu_data)
     return filtered
@@ -212,23 +234,21 @@ def get_public_menus(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
-    """일반 사용자용 공개 메뉴 조회 (지능형 URL 생성 포함)"""
-    user_rank = 0
-    if current_user:
-        user_rank = current_user.rank() if callable(current_user.rank) else current_user.rank
-    
+    """일반 사용자용 공개 메뉴 조회 (4단계 그룹/랭킹 권한 필터링 및 지능형 URL 생성 포함)"""
+    # 📌 SQL 단계에서 min_rank로 미리 자르지 않고(그룹 허용 예외 반영을 위해),
+    #    가시성(is_visible=True)이 켜진 루트 메뉴를 모두 가져온 뒤 4단계 권한 엔진(filter_menu_tree)으로 판별합니다.
     root_menus = db.query(Menu).options(joinedload(Menu.sub_menus)).filter(
-        Menu.parent_id == None, Menu.is_visible == True, Menu.min_rank <= user_rank
+        Menu.parent_id == None, Menu.is_visible == True
     ).order_by(Menu.order).all()
     
-    filtered_menus = filter_menu_tree(root_menus, user_rank, db)
+    filtered_menus = filter_menu_tree(root_menus, current_user, db, bypass_auth=False)
     return filtered_menus
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])
 def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
     """관리자용 전체 메뉴 트리 (Slug 변환 포함)"""
     root_menus = db.query(Menu).options(joinedload(Menu.sub_menus)).filter(Menu.parent_id == None).order_by(Menu.order).all()
-    return filter_menu_tree(root_menus, 999, db)
+    return filter_menu_tree(root_menus, admin, db, bypass_auth=True)
 
 @router.post("/menu", response_model=admin_schema.MenuSchema)
 def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
