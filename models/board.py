@@ -9,10 +9,13 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Table, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Table, UniqueConstraint, JSON
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.dialects.postgresql import JSONB
 from models.base import Base
+
+# SQLite와 PostgreSQL 크로스 호환 JSON 타입 정의
+JSONType = JSON().with_variant(JSONB, "postgresql")
 
 # --- N:M 다대다 조인 테이블 ---
 post_tag = Table(
@@ -35,17 +38,17 @@ class BoardConfig(Base):
     service_instance_id = Column(Integer, ForeignKey("service_instance.id"), nullable=True)
     
     items_per_page = Column(Integer, default=10)
-    fields_def = Column(JSONB, default=list) 
-    options = Column(JSONB, default=dict)
+    fields_def = Column(JSONType, default=list) 
+    options = Column(JSONType, default=dict)
     
-    perm_read = Column(JSONB, default={"ROLE_GUEST": "GLOBAL"})
-    perm_write = Column(JSONB, default={"ROLE_USER": "GLOBAL"})
+    perm_read = Column(JSONType, default={"ROLE_GUEST": "GLOBAL"})
+    perm_write = Column(JSONType, default={"ROLE_USER": "GLOBAL"})
     
     # 🛡️ 4단계 권한 및 그룹 정책 (정책재정의.md)
     min_read_rank = Column(Integer, default=0, nullable=False)        # 4단계: 읽기 최소 랭킹 (0~9)
     min_write_rank = Column(Integer, default=2, nullable=False)       # 4단계: 쓰기 최소 랭킹 (0~9)
-    allow_groups = Column(JSONB, default=list, nullable=False)        # 3단계: 허용 그룹 (소속 시 랭킹 무관 즉시 허용)
-    deny_groups = Column(JSONB, default=list, nullable=False)         # 2단계: 차단 그룹 (Deny-Wins)
+    allow_groups = Column(JSONType, default=list, nullable=False)        # 3단계: 허용 그룹 (소속 시 랭킹 무관 즉시 허용)
+    deny_groups = Column(JSONType, default=list, nullable=False)         # 2단계: 차단 그룹 (Deny-Wins)
     
     is_active = Column(Boolean, default=True)
     create_date = Column(DateTime, nullable=False, default=datetime.now)
@@ -62,8 +65,8 @@ class Post(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     title = Column(String, nullable=False)
     content = Column(Text, nullable=True)
-    content_json = Column(JSONB, nullable=False) # TipTap 에디터 JSON 데이터
-    extra_data = Column(JSONB, default=dict)
+    content_json = Column(JSONType, nullable=False, default=dict) # TipTap 에디터 JSON 데이터
+    extra_data = Column(JSONType, default=dict)
     
     status = Column(String, default="published")
     view_count = Column(Integer, default=0)
