@@ -9,10 +9,13 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from models.base import Base
+
+# 🌐 크로스 DB 호환 (운영: PostgreSQL JSONB, 테스트: SQLite JSON)
+JSONType = JSON().with_variant(JSONB, "postgresql")
 
 
 class MediaAsset(Base):
@@ -33,7 +36,7 @@ class MediaAsset(Base):
     thumbnail_path = Column(String(500), nullable=True)  # 기본 썸네일 경로
     
     # 이미지 해상도 및 다중 썸네일 규격 ({ "width": 1024, "thumbs": {"sm": "...", "md": "..."} })
-    meta_info = Column(JSONB, default=dict)
+    meta_info = Column(JSONType, default=dict)
     
     file_size = Column(Integer, nullable=True)
     mime_type = Column(String(100), nullable=True)

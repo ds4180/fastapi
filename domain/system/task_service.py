@@ -104,3 +104,89 @@ def enqueue_task(
     db.flush() # ID를 즉시 생성하기 위해 호출 (커밋은 호출한 곳에서 수행)
     return new_task
 
+
+def bootstrap_default_cron_tasks(db: Session) -> int:
+    """
+    [자율신경계 필수 Cron 태스크 자동 시드 (Startup Bootstrap)]
+    시스템 최초 가동 또는 재시작 시, 자율신경계가 무인으로 순환하기 위한
+    핵심 4대 정기 스케줄러 태스크를 DB에 자동 등록합니다.
+    (이미 PENDING 또는 RUNNING 상태인 작업이 있으면 중복 등록하지 않음)
+    """
+    core_cron_definitions = [
+        {
+            "task_type": "DYNAMIC_GROUP_REFRESH",
+            "unique_key": "cron:dynamic_group_refresh",
+            "payload": {},
+            "priority": 3,
+            "repeat_interval": 600, # 10분마다
+            "cron_expression": None,
+            "tags": ["core", "dynamic_group", "cron"],
+            "desc": "기사·휴무·배차 동적 그룹 10분 주기 실시간 자율 연산"
+        },
+        {
+            "task_type": "SYSTEM_WATCHDOG_INSPECTION",
+            "unique_key": "cron:system_watchdog_inspection",
+            "payload": {},
+            "priority": 2,
+            "repeat_interval": 300, # 5분마다
+            "cron_expression": None,
+            "tags": ["core", "watchdog", "cron"],
+            "desc": "시스템 이상 징후(워커 실패/보안 침해/지시 미확인) 5분 주기 감시"
+        },
+        {
+            "task_type": "DATA_RETENTION_GC",
+            "unique_key": "cron:data_retention_gc",
+            "payload": {},
+            "priority": 8,
+            "repeat_interval": None,
+            "cron_expression": "0 3 * * *", # 매일 새벽 03:00
+            "tags": ["core", "retention", "gc", "cron"],
+            "desc": "만료 데이터(감사로그/세션/태스크) 및 Redis 메모리 매일 새벽 03:00 정기 정리"
+        },
+        {
+            "task_type": "MEDIA_GC",
+            "unique_key": "cron:media_gc",
+            "payload": {"indices": [1, 2, 3, 4, 5]},
+            "priority": 8,
+            "repeat_interval": None,
+            "cron_expression": "0 4 * * *", # 매일 새벽 04:00
+            "tags": ["core", "media", "gc", "cron"],
+            "desc": "미디어 임시 파일 및 삭제 자산 매일 새벽 04:00 정기 가비지 컬렉션"
+        }
+    ]
+
+    registered_count = 0
+    now = datetime.now()
+
+    for defn in core_cron_definitions:
+        existing = db.query(SystemTask).filter(
+            SystemTask.unique_key == defn["unique_key"],
+            SystemTask.status.in_(["PENDING", "RUNNING"])
+        ).first()
+
+        if not existing:
+            next_time = calculate_next_scheduled_at(
+                cron_expr=defn["cron_expression"],
+                interval_sec=defn["repeat_interval"],
+                base_time=now
+            ) or now
+
+            enqueue_task(
+                db=db,
+                task_type=defn["task_type"],
+                payload=defn["payload"],
+                priority=defn["priority"],
+                scheduled_at=next_time,
+                cron_expression=defn["cron_expression"],
+                repeat_interval=defn["repeat_interval"],
+                unique_key=defn["unique_key"],
+                tags=defn["tags"]
+            )
+            registered_count += 1
+            logger.info(f"🌱 [Bootstrap] 자율신경계 정기 태스크 등록 완료: {defn['task_type']} ({defn['desc']})")
+
+    if registered_count > 0:
+        db.commit()
+
+    return registered_count
+

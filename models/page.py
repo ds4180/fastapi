@@ -9,9 +9,12 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from models.base import Base
+
+# 🌐 크로스 DB 호환 (운영: PostgreSQL JSONB, 테스트: SQLite JSON)
+JSONType = JSON().with_variant(JSONB, "postgresql")
 
 
 class Page(Base):
@@ -22,13 +25,13 @@ class Page(Base):
     slug = Column(String, unique=True, index=True, nullable=False) # URL 경로용 고유 식별자
     title = Column(String, nullable=False)                         # 페이지 제목
     content = Column(Text, nullable=True)                          # HTML/텍스트 본문
-    content_json = Column(JSONB, nullable=False)                   # TipTap 에디터 JSON 데이터
+    content_json = Column(JSONType, nullable=False)                # TipTap 에디터 JSON 데이터
     
     status = Column(String, default="DRAFT")                       # DRAFT, PUBLISHED
     is_active = Column(Boolean, default=True)                      # 활성 여부
     min_rank = Column(Integer, default=0)                          # 열람 가능 최소 등급 (0~9)
-    allow_groups = Column(JSONB, default=list, nullable=False)     # 허용 그룹
-    deny_groups = Column(JSONB, default=list, nullable=False)      # 차단 그룹 (Deny-Wins)
+    allow_groups = Column(JSONType, default=list, nullable=False)  # 허용 그룹
+    deny_groups = Column(JSONType, default=list, nullable=False)   # 차단 그룹 (Deny-Wins)
     redirect_url = Column(String, nullable=True)                  # 외부 리다이렉트 URL
     
     is_deleted = Column(Boolean, default=False, nullable=False)    # 논리 삭제 플래그

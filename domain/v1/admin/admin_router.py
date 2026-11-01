@@ -102,6 +102,11 @@ def get_dashboard_summary(
         "instruction_watchdog": {
             "unconfirmed_count": unconfirmed_instructions
         },
+        "watchdog_status": {
+            "enabled": True,
+            "fail_threshold": 3,
+            "security_alert": True
+        },
         # 하위 호환 필드
         "user_count": user_count,
         "board_count": board_count,

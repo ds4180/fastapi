@@ -176,3 +176,25 @@ async def _async_test_future_scheduled_task_not_picked_early(db_session):
     db_session.refresh(task)
     assert task.status == "PENDING"
     assert task.worker_id is None
+
+
+def test_bootstrap_default_cron_tasks(db_session):
+    """자율신경계 필수 Cron 태스크 자동 시드(부트스트랩) 및 중복 등록 방지 검증"""
+    from domain.system.task_service import bootstrap_default_cron_tasks
+    
+    # 1. 최초 시드: 4대 핵심 태스크 등록
+    count1 = bootstrap_default_cron_tasks(db_session)
+    assert count1 == 4
+
+    tasks = db_session.query(SystemTask).all()
+    assert len(tasks) == 4
+    task_types = {t.task_type for t in tasks}
+    assert "DYNAMIC_GROUP_REFRESH" in task_types
+    assert "SYSTEM_WATCHDOG_INSPECTION" in task_types
+    assert "DATA_RETENTION_GC" in task_types
+    assert "MEDIA_GC" in task_types
+
+    # 2. 재실행 시 멱등성 검증 (이미 PENDING 상태이므로 0건 추가 등록)
+    count2 = bootstrap_default_cron_tasks(db_session)
+    assert count2 == 0
+    assert db_session.query(SystemTask).count() == 4

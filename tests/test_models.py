@@ -68,3 +68,43 @@ def test_user_model_role_logic():
     staff_user = User(username="staff_test", email="staff@test.com")
     staff_user.profile = UserProfile(rank_level=2)
     assert staff_user.role == "ROLE_STAFF_L2", "등급 2는 ROLE_STAFF_L2여야 합니다."
+
+
+def test_cross_db_json_type_models():
+    """MediaAsset 및 Page 모델의 JSONType 크로스 DB(SQLite/PostgreSQL) 호환성 검증"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine("sqlite:///:memory:")
+    MediaAsset.__table__.create(engine)
+    Page.__table__.create(engine)
+
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    # 1. MediaAsset INSERT (meta_info JSONType)
+    asset = MediaAsset(
+        id=1,
+        user_id=1,
+        original_name="bus.png",
+        file_path="/uploads/bus.png",
+        meta_info={"width": 1920, "height": 1080, "tags": ["bus", "jeju"]}
+    )
+    # 2. Page INSERT (content_json, allow_groups, deny_groups JSONType)
+    page = Page(
+        id=1,
+        slug="intro",
+        title="회사 소개",
+        content_json={"type": "doc", "content": [{"type": "paragraph"}]},
+        allow_groups=["staff", "driver"],
+        deny_groups=["guest"]
+    )
+    session.add_all([asset, page])
+    session.commit()
+
+    loaded_asset = session.query(MediaAsset).first()
+    assert loaded_asset.meta_info["width"] == 1920
+
+    loaded_page = session.query(Page).first()
+    assert loaded_page.allow_groups == ["staff", "driver"]
+    assert loaded_page.content_json["type"] == "doc"
