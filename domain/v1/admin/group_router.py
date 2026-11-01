@@ -168,11 +168,14 @@ def combine_groups(
     rd.hset(KEY_META, new_name, json.dumps(meta))
     return {"name": new_name, "count": rd.scard(dest_key)}
 
-def _save_group(rd, name, uids, gtype, desc):
+def _save_group(rd, name, uids, gtype, desc, ttl_seconds: int = 172800):
     key = f"{KEY_DATA}{name}"
     rd.delete(key)
     if uids:
         rd.sadd(key, *uids)
+        # ⏳ [수명 주기 관리]: 일별/동적 그룹은 48시간 후 자동 만료되도록 TTL 강제 적용 (STD-SYS-009)
+        if gtype == "dynamic":
+            rd.expire(key, ttl_seconds)
     meta = {"name": name, "type": gtype, "desc": desc}
     rd.hset(KEY_META, name, json.dumps(meta))
 

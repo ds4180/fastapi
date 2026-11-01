@@ -245,6 +245,18 @@ async def handle_watchdog_inspection(task: SystemTask, db: Session):
     task.progress_pct = 100
     return report
 
+@register_handler("DATA_RETENTION_GC")
+async def handle_data_retention_gc(task: SystemTask, db: Session):
+    """
+    [자율신경계 GC] 시스템 데이터 보존 기간 초과 데이터 및 Redis 메모리 자동 정리 (STD-SYS-009)
+    """
+    from redis_config import rd
+    from domain.system.retention_service import run_data_retention_gc
+    logger.info("🧹 시스템 데이터 가비지 컬렉션(GC)을 수행합니다...")
+    report = run_data_retention_gc(db, rd)
+    task.progress_pct = 100
+    return report
+
 # --- [핵심 엔진] 단일 태스크 처리기 & 워커 루프 ---
 
 async def process_next_task(db: Session, worker_id: str) -> bool:

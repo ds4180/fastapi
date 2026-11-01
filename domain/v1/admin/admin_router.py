@@ -469,6 +469,13 @@ def get_public_configs(db: Session = Depends(get_db)):
     configs = db.query(SystemConfig).all()
     return {c.key: c.value for c in configs}
 
+@router.post("/system/gc/run")
+def run_manual_gc(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+    """[관리자 수동 즉시 실행] 데이터 보존 기간 초과 이력 및 Redis 메모리 가비지 컬렉션(GC) (STD-SYS-009)"""
+    from redis_config import rd
+    from domain.system.retention_service import run_data_retention_gc
+    return run_data_retention_gc(db, rd)
+
 # --- Board Configuration Management (게시판 설정 관리) ---
 
 @router.get("/boards", response_model=List[admin_schema.BoardConfigAdminSchema])
