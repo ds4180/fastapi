@@ -18,6 +18,7 @@ from database import get_db
 from models import User, UserSession, AuditLog
 from core.deps import check_rank
 from core.audit import safe_log_audit
+from redis_config import rd
 from domain.user import user_crud
 from domain.v1.admin.observability_schema import (
     AuditLogItemRes,
@@ -30,8 +31,36 @@ router = APIRouter(prefix="/v1/admin/observability", tags=["Admin Observability"
 
 
 # ==========================================================================
-# 🌐 1. 실시간 활성 세션 관제 (기존 /v1/admin/sessions 흡수·통합)
+# 🌐 1. 실시간 활성 세션 관제 (기존 /v1/admin/sessions 흡수·통합 & Redis 자기치유)
 # ==========================================================================
+
+def sync_expired_sessions(db: Session) -> int:
+    """
+    Redis 실시간 생존 확인 및 자기치유(Self-healing):
+    TTL 만료로 Redis에서 소멸된 유령 세션을 EXPIRED 상태로 전환하고 유효 활성 세션 수를 반환합니다.
+    """
+    active_sessions = (
+        db.query(UserSession)
+        .filter(UserSession.status == "ACTIVE")
+        .all()
+    )
+    modified = False
+    valid_count = 0
+    for s in active_sessions:
+        redis_key = f"session:{s.user_id}:{s.device_category}"
+        is_alive = rd.sismember(redis_key, s.session_key)
+        if not is_alive:
+            s.status = "EXPIRED"
+            s.logout_at = datetime.now()
+            modified = True
+        else:
+            valid_count += 1
+
+    if modified:
+        db.commit()
+
+    return valid_count
+
 
 @router.get(
     "/sessions",
@@ -44,8 +73,13 @@ def get_live_sessions(
 ):
     """
     관리자 전용(Rank 4 이상):
-    현재 시스템에 로그인되어 활동 중인 모든 기기/세션 목록을 실시간 조회합니다.
+    현재 시스템에 로그인되어 활동 중인 모든 기기/세션 목록을 실시간 조회하며,
+    Redis 생존 여부를 대조하여 만료된 세션은 EXPIRED로 즉시 자기치유 동기화합니다.
     """
+    # 1. Redis 실시간 동기화 (유령 세션 EXPIRED 처리)
+    sync_expired_sessions(db)
+
+    # 2. 실제 살아있는 ACTIVE 세션만 로드
     sessions = (
         db.query(UserSession)
         .join(User, UserSession.user_id == User.id)
@@ -79,19 +113,19 @@ def get_live_sessions(
     summary="특정 세션 강제 추방 (원클릭 KICK)"
 )
 def kick_session(
-    target_session_id: int,
+    target_session_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_rank(4))
 ):
     """
     관리자 전용(Rank 4 이상):
-    의심 세션을 강제로 만료시키며, 감사로그(SECURITY)에 행위 이력을 즉시 영구 기록합니다.
+    의심 세션을 강제로 만료시키며(ID 또는 session_key 모두 지원), 감사로그(SECURITY)에 행위 이력을 즉시 영구 기록합니다.
     """
     result = user_crud.kick_session(db, session_id=target_session_id)
     if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"세션 ID {target_session_id}을(를) 찾을 수 없습니다."
+            detail=f"세션 식별자 '{target_session_id}'을(를) 찾을 수 없습니다."
         )
 
     # 📜 [감사로그]: 관리자에 의한 세션 강제 추방 (SECURITY 로그)
@@ -101,15 +135,15 @@ def kick_session(
         log_type="SECURITY",
         severity="WARN",
         action="SESSION_KICKED",
-        title=f"관리자({current_user.username})에 의한 세션 #{target_session_id} 강제 추방",
+        title=f"관리자({current_user.username})에 의한 세션 #{result.id} 강제 추방",
         user=current_user,
         resource_type="user_session",
-        resource_id=str(target_session_id),
-        message=f"관리자 {current_user.username}(ID: {current_user.id})가 세션 #{target_session_id}을(를) 강제 종료시켰습니다.",
-        metadata={"admin_id": current_user.id, "target_session_id": target_session_id}
+        resource_id=str(result.id),
+        message=f"관리자 {current_user.username}(ID: {current_user.id})가 세션 #{result.id}을(를) 강제 종료시켰습니다.",
+        metadata={"admin_id": current_user.id, "target_session_id": result.id, "session_key": result.session_key}
     )
 
-    return {"message": "Success", "target_session_id": target_session_id}
+    return {"message": "Success", "target_session_id": result.id}
 
 
 # ==========================================================================
@@ -120,8 +154,8 @@ def _get_summary_stats(db: Session) -> ObservabilitySummaryRes:
     """오늘 기준 실시간 관제 요약 통계 집계"""
     today_start = datetime.combine(date.today(), datetime.min.time())
 
-    # 1. 현재 활성 세션 수
-    active_sessions = db.query(func.count(UserSession.id)).filter(UserSession.status == "ACTIVE").scalar() or 0
+    # 1. 현재 활성 세션 수 (Redis 실시간 자기치유 동기화 반영)
+    active_sessions = sync_expired_sessions(db)
 
     # 2. 오늘 로그인 수 (ACCESS & LOGIN_SUCCESS)
     today_logins = db.query(func.count(AuditLog.id)).filter(

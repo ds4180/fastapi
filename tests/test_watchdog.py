@@ -140,6 +140,24 @@ def test_watchdog_security_violation_alert(db_session):
     assert alarms[0].link == "/v1/admin/observability"
 
 
+def test_watchdog_ignores_normal_admin_actions(db_session):
+    """관리자의 정상 세션 강제 추방(SESSION_KICKED)은 보안 경보 대상에서 제외 검증"""
+    audit = AuditLog(
+        id=102,
+        app_id="system",
+        log_type="SECURITY",
+        severity="WARN",
+        action="SESSION_KICKED",
+        title="관리자에 의한 세션 강제 추방",
+        metadata_payload={"admin_id": 1, "target_session_id": 999}
+    )
+    db_session.add(audit)
+    db_session.commit()
+
+    res = check_and_alert_security_violation(db_session, audit)
+    assert res is False, "정상 세션 추방 액션이 보안 침해 경보로 처리되었습니다."
+
+
 def test_watchdog_instruction_delays(db_session):
     """긴급 현장 지시사항 미확인 지연 감시 검증"""
     now = datetime.now()

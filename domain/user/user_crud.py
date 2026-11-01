@@ -2,6 +2,7 @@
 from pwdlib import PasswordHash
 from pwdlib.hashers.bcrypt import BcryptHasher
 from datetime import datetime
+from typing import Union
 
 from sqlalchemy.orm import Session
 from domain.user.user_schema import UserCreate
@@ -37,12 +38,18 @@ def get_session_list(db: Session, limit: int = 100):
         
     return sessions
 
-def kick_session(db: Session, session_id: int):
-    """특정 세션을 강제로 쫓아냅니다."""
-    db_session = db.query(UserSession).filter(UserSession.id == session_id).first()
+def kick_session(db: Session, session_id: Union[int, str]):
+    """특정 세션을 강제로 쫓아냅니다 (ID 또는 session_key 모두 지원)."""
+    db_session = None
+    if isinstance(session_id, int) or (isinstance(session_id, str) and session_id.isdigit()):
+        db_session = db.query(UserSession).filter(UserSession.id == int(session_id)).first()
+
+    if not db_session and isinstance(session_id, str):
+        db_session = db.query(UserSession).filter(UserSession.session_key == session_id).first()
+
     if not db_session:
         return None
-    
+
     # 1. DB 상태 변경
     db_session.status = "KICKED_OUT"
     db_session.logout_at = datetime.now()
@@ -51,7 +58,7 @@ def kick_session(db: Session, session_id: int):
     # 2. Redis Set에서 해당 JTI 삭제
     redis_key = f"session:{db_session.user_id}:{db_session.device_category}"
     rd.srem(redis_key, db_session.session_key)
-        
+
     return db_session
 
 def get_existing_user(db: Session, user_create: UserCreate):

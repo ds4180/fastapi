@@ -125,9 +125,15 @@ def check_and_alert_security_violation(db: Session, audit_log: AuditLog) -> bool
     """
     [2. 보안 및 권한 침해 시도 감시]
     403 Forbidden 및 비정상 권한 침해 시도가 감사로그에 적재될 때 관리자에게 즉시 L4 경보를 발행합니다.
+    (관리자의 정상적인 시스템 통제 및 세션 추방 행위는 침해가 아니므로 제외)
     """
     cfg = get_watchdog_settings(db)
     if not cfg.get("watchdog_enabled", True) or not cfg.get("watchdog_security_alert", True):
+        return False
+
+    # 📌 관리자의 정상적인 통제 행위 및 세션 강제 추방은 보안 침해 경보 대상에서 제외
+    NORMAL_ACTIONS = {"SESSION_KICKED", "SESSION_REVOKED", "ADMIN_KICK", "PERM_CHANGED", "LOGIN_SUCCESS", "LOGOUT"}
+    if audit_log.action in NORMAL_ACTIONS or (audit_log.metadata_payload and audit_log.metadata_payload.get("admin_id")):
         return False
 
     cooldown_key = f"security_{audit_log.app_id or 'unknown'}"
