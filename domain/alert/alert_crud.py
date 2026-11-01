@@ -48,19 +48,44 @@ def get_active_alerts(db: Session, user: Optional[User] = None) -> List[Alert]:
     filtered_alerts: List[Alert] = []
     current_user_id_str = str(user.id)
 
+    # Redis 클라이언트 로드 (타겟 그룹 실시간 판별용)
+    rd_client = None
+    try:
+        from redis_config import rd
+        rd_client = rd
+    except Exception:
+        pass
+
     for a in all_active:
         # DB 컬럼 누락 방어
         if not hasattr(a, 'position') or a.position is None:
             a.position = 'top'
 
-        # 🎯 타겟 유저 필터링: 특정 대상이 지정된 알림인 경우 대상 확인
-        if a.target_users and a.target_users.strip():
+        is_matched = False
+
+        # 🎯 1. Redis 타겟 그룹 필터링 (target-group 앱 연산 출력물)
+        if hasattr(a, 'target_group') and a.target_group and a.target_group.strip():
+            tg_name = a.target_group.strip()
+            if rd_client:
+                try:
+                    if rd_client.sismember(f"group:data:{tg_name}", current_user_id_str):
+                        is_matched = True
+                except Exception:
+                    pass
+
+        # 🎯 2. 특정 타겟 유저 필터링
+        if not is_matched and a.target_users and a.target_users.strip():
             target_ids = [uid.strip() for uid in a.target_users.split(',') if uid.strip()]
             if current_user_id_str in target_ids:
-                filtered_alerts.append(a)
-            # 타겟 대상이 아니면 목록에서 제외
-        else:
-            # 타겟이 지정되지 않은 일반 전사 공지는 사내 로그인 임직원 모두에게 노출
+                is_matched = True
+
+        # 🎯 3. 그룹이나 개별 대상이 지정되지 않은 경우 전사 전체 공지로 노출
+        has_group = bool(hasattr(a, 'target_group') and a.target_group and a.target_group.strip())
+        has_users = bool(a.target_users and a.target_users.strip())
+        if not has_group and not has_users:
+            is_matched = True
+
+        if is_matched:
             filtered_alerts.append(a)
 
     return filtered_alerts
@@ -82,6 +107,8 @@ async def create_alert(
         level=alert_create.level,
         style=alert_create.style,
         position=alert_create.position or 'top',
+        category=alert_create.category or 'NOTIFICATION',
+        target_group=alert_create.target_group,
         route=alert_create.route,
         redirect_url=alert_create.redirect_url,
         start_date=alert_create.start_date,
@@ -97,7 +124,7 @@ async def create_alert(
     db.refresh(db_alert)
 
     # 📱 [전역 통합 알림 단일화 core.notify 호출]
-    cat = "INSTRUCTION" if alert_create.position == "modal" else "NOTIFICATION"
+    cat = alert_create.category or ("INSTRUCTION" if alert_create.position == "modal" else "NOTIFICATION")
     target_uids = []
     if alert_create.target_users and alert_create.target_users.strip():
         for uid_s in alert_create.target_users.split(","):
@@ -112,10 +139,11 @@ async def create_alert(
         message=alert_create.message,
         sender=user,
         target_user_ids=target_uids if target_uids else None,
+        target_groups=[alert_create.target_group] if alert_create.target_group else None,
         level=alert_create.level,
         link=alert_create.redirect_url,
         background_tasks=background_tasks,
-        extra_payload={"alert_id": db_alert.id}
+        extra_payload={"alert_id": db_alert.id, "target_group": alert_create.target_group}
     )
 
     # 🔔 실시간 웹소켓 갱신 신호 브로드캐스트 (기존 레거시 팝업/토스트 화면 동기화)

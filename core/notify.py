@@ -37,6 +37,18 @@ def resolve_target_user_ids(
         resolved_ids.update(target_user_ids)
 
     if target_groups and len(target_groups) > 0:
+        # 1. Redis 기반 동적/수동 타겟 그룹 (target-group 앱 연산 출력물) 조회
+        try:
+            from redis_config import rd
+            for g in target_groups:
+                if g:
+                    members = rd.smembers(f"group:data:{g}")
+                    for m in members:
+                        if str(m).isdigit():
+                            resolved_ids.add(int(m))
+        except Exception as e:
+            logger.warning(f"⚠️ [resolve_target_user_ids] Redis group lookup error: {e}")
+
         from models.user import UserProfile
         # 주그룹(primary_group) 일치 사원 조회
         profiles = db.query(UserProfile).filter(

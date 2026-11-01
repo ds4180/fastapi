@@ -17,6 +17,8 @@ class Alert(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     target_users: Optional[str] = None
+    target_group: Optional[str] = None
+    category: Optional[str] = "NOTIFICATION"
     confirm_text: str
     reset_sec: int
     create_date: datetime
@@ -36,6 +38,8 @@ class AlertCreate(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     target_users: Optional[str] = None
+    target_group: Optional[str] = None
+    category: Optional[str] = "NOTIFICATION"
     confirm_text: str = "확인하였습니다"
     reset_sec: int = 0
 
@@ -52,6 +56,8 @@ class AlertUpdate(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     target_users: Optional[str] = None
+    target_group: Optional[str] = None
+    category: Optional[str] = None
     confirm_text: Optional[str] = None
     reset_sec: Optional[int] = None
     is_active: Optional[bool] = None

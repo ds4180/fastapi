@@ -29,6 +29,8 @@ class Alert(Base):
     start_date = Column(DateTime, nullable=True)
     end_date = Column(DateTime, nullable=True)
     target_users = Column(String, nullable=True) # 특정 대상 유저 ID 목록 (쉼표 구분)
+    target_group = Column(String(100), nullable=True) # Redis 타겟 그룹명 (target-group 앱 연계)
+    category = Column(String(20), nullable=False, default="NOTIFICATION") # NOTIFICATION, INSTRUCTION, NOTICE
     confirm_text = Column(String, default="확인하였습니다")
     reset_sec = Column(Integer, default=0)
     create_date = Column(DateTime, nullable=False, default=datetime.now)

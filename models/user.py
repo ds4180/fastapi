@@ -11,10 +11,13 @@
 
 from datetime import datetime
 from typing import Optional, List, Set
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from models.base import Base
+
+# 🌐 크로스 DB 호환 (운영: PostgreSQL JSONB, 테스트: SQLite JSON)
+JSONType = JSON().with_variant(JSONB, "postgresql")
 
 
 class Group(Base):
@@ -123,7 +126,7 @@ class UserProfile(Base):
     user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
     rank_level = Column(Integer, default=0, nullable=False)
     primary_group = Column(String(50), nullable=True, default=None)
-    secondary_groups = Column(JSONB, nullable=False, default=list)
+    secondary_groups = Column(JSONType, nullable=False, default=list)
     is_active = Column(Boolean, default=True)
     employee_no = Column(String, nullable=True)
     resident_no = Column(String, nullable=True)
