@@ -23,16 +23,20 @@ from fastapi.staticfiles import StaticFiles
 async def lifespan(app: FastAPI):
     # --- [Startup] 애플리케이션 시작 시 ---
     
-    # 0. 자율신경계 필수 정기 태스크 자동 시드 (Bootstrap)
+    # 0. 자율신경계 필수 정기 태스크 및 시스템 앱 자동 시드 (Bootstrap)
     try:
         from database import SessionLocal
         from domain.system.task_service import bootstrap_default_cron_tasks
+        from domain.system.app_service import bootstrap_system_apps
         with SessionLocal() as db:
             seeded = bootstrap_default_cron_tasks(db)
             if seeded > 0:
                 print(f"🌱 자율신경계 필수 정기 태스크 {seeded}건이 성공적으로 등록되었습니다.")
+            app_seed = bootstrap_system_apps(db)
+            if app_seed["created"] > 0:
+                print(f"✨ 시스템 앱 {app_seed['created']}건이 성공적으로 등록되었습니다.")
     except Exception as e:
-        print(f"⚠️ 자율신경계 부트스트랩 오류: {e}")
+        print(f"⚠️ 시스템 부트스트랩 오류: {e}")
 
     # 1. 웹소켓 실시간 연결 유지(Ping) 루프 시작
     ping_task = asyncio.create_task(ws_service.ping_loop())

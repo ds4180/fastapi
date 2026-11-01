@@ -160,8 +160,7 @@ def bootstrap_default_cron_tasks(db: Session) -> int:
 
     for defn in core_cron_definitions:
         existing = db.query(SystemTask).filter(
-            SystemTask.unique_key == defn["unique_key"],
-            SystemTask.status.in_(["PENDING", "RUNNING"])
+            SystemTask.unique_key == defn["unique_key"]
         ).first()
 
         if not existing:
