@@ -96,17 +96,30 @@ async def create_alert(
     db.commit()
     db.refresh(db_alert)
 
-    # 🔔 실시간 웹소켓 갱신 신호 브로드캐스트 (접속 중인 모든 클라이언트 화면 즉시 갱신)
-    background_tasks.add_task(manager.broadcast, {"type": "new_alert"})
+    # 📱 [전역 통합 알림 단일화 core.notify 호출]
+    cat = "INSTRUCTION" if alert_create.position == "modal" else "NOTIFICATION"
+    target_uids = []
+    if alert_create.target_users and alert_create.target_users.strip():
+        for uid_s in alert_create.target_users.split(","):
+            if uid_s.strip().isdigit():
+                target_uids.append(int(uid_s.strip()))
 
-    # 📱 [HIST-007 표준] Level 5 (비상 긴급/시스템 락) 알림인 경우 전사 Web Push 자동 발송 예약
-    if alert_create.level == 5:
-        background_tasks.add_task(
-            send_push_to_all,
-            title="[긴급] 시스템 비상 공지",
-            body=alert_create.message,
-            url=alert_create.redirect_url or "/"
-        )
+    from core.notify import safe_notify
+    safe_notify(
+        db=db,
+        category=cat,
+        title=f"[{cat}] 사내 공지/지시",
+        message=alert_create.message,
+        sender=user,
+        target_user_ids=target_uids if target_uids else None,
+        level=alert_create.level,
+        link=alert_create.redirect_url,
+        background_tasks=background_tasks,
+        extra_payload={"alert_id": db_alert.id}
+    )
+
+    # 🔔 실시간 웹소켓 갱신 신호 브로드캐스트 (기존 레거시 팝업/토스트 화면 동기화)
+    background_tasks.add_task(manager.broadcast, {"type": "new_alert"})
 
     return db_alert
 

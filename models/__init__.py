@@ -68,6 +68,9 @@ from models.push import PushSubscription
 # 📌 8. 전역 감사로그 및 보안 관제 코어
 from models.audit import AuditLog, SENSITIVE_FIELDS
 
+# 📌 9. 전사 통합 미니앱 마이크로 텍스트 엔진
+from models.miniapp import MiniappItem
+
 # 외부 노출 심볼 목록 (명시적 공개)
 __all__ = [
     # Base
@@ -115,4 +118,7 @@ __all__ = [
     "Page",
     "MediaAsset",
     "PushSubscription",
+    "AuditLog",
+    "SENSITIVE_FIELDS",
+    "MiniappItem",
 ]

@@ -48,6 +48,7 @@ from domain.v1.admin import group_router as admin_group_router
 from domain.v1.admin import auth_group_router # [조직/권한 그룹 마스터 라우터]
 from domain.v1.admin import observability_router # [통합 관제 및 감사로그 라우터]
 from domain.v1.admin import task_admin_router # [v1.6.0] 관리자 태스크 라우터 임포트
+from domain.v1.miniapp import miniapp_router # [미니앱 통합 액션 피드 라우터]
 from domain.v1.app import app_router as v1_app_router
 from domain.v1.custom import custom_router as v1_custom_router
 from domain.v1.comment import comment_router
@@ -222,6 +223,7 @@ app.include_router(v1_admin_router.router, prefix="/v1")
 app.include_router(admin_group_router.router)
 app.include_router(auth_group_router.router)
 app.include_router(observability_router.router) # [통합 관제 및 감사로그 라우터]
+app.include_router(miniapp_router.router) # [전사 통합 미니앱 마이크로 텍스트 엔진]
 app.include_router(task_admin_router.router, prefix="/v1") # /api/v1/admin/tasks 로 등록
 app.include_router(v1_app_router.router)
 app.include_router(v1_custom_router.router)
