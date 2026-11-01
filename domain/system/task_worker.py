@@ -221,6 +221,19 @@ async def handle_media_gc(task: SystemTask, db: Session):
     
     return {"status": "finished", "results": results}
 
+@register_handler("DYNAMIC_GROUP_REFRESH")
+async def handle_dynamic_group_refresh(task: SystemTask, db: Session):
+    """
+    [자율신경계 스케줄러] 휴무자, 근무자, 노선별 배차 실 비즈니스 동적 그룹 자동 연산 갱신
+    """
+    from redis_config import redis_client
+    from domain.v1.admin.group_router import calculate_and_refresh_dynamic_groups
+    
+    logger.info("👥 동적 타겟 그룹 실시간 자동 연산을 시작합니다...")
+    results = calculate_and_refresh_dynamic_groups(db, redis_client)
+    task.progress_pct = 100
+    return {"status": "finished", "results": results}
+
 # --- [핵심 엔진] 단일 태스크 처리기 & 워커 루프 ---
 
 async def process_next_task(db: Session, worker_id: str) -> bool:

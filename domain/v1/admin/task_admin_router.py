@@ -29,7 +29,8 @@ def list_task_types(
         "MEDIA_ISOLATE": {"file_path": "/path/to/file", "asset_id": 1},
         "THUMB_GEN": {"asset_id": 1},
         "MEDIA_BACKUP": {"asset_ids": [1, 2], "target_user_id": 1},
-        "MEDIA_GC": {"indices": [1, 2, 3, 4, 5]}
+        "MEDIA_GC": {"indices": [1, 2, 3, 4, 5]},
+        "DYNAMIC_GROUP_REFRESH": {}
     }
     
     return [{"type": t, "example": guidelines.get(t, {})} for t in TASK_HANDLERS.keys()]
