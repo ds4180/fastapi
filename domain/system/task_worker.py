@@ -2,7 +2,8 @@ import asyncio
 import logging
 import traceback
 import os
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 
@@ -11,6 +12,7 @@ from database import SessionLocal
 from domain.media import media_config as config
 from PIL import Image
 from domain.media import media_service # [v3.2] safe_makedirs 사용을 위해 임포트
+from domain.system.task_service import enqueue_task, calculate_next_scheduled_at
 
 # 로깅 설정
 logger = logging.getLogger("task_worker")
@@ -219,59 +221,113 @@ async def handle_media_gc(task: SystemTask, db: Session):
     
     return {"status": "finished", "results": results}
 
-# --- [핵심 엔진] 워커 루프 ---
+# --- [핵심 엔진] 단일 태스크 처리기 & 워커 루프 ---
+
+async def process_next_task(db: Session, worker_id: str) -> bool:
+    """
+    [단일 태스크 안전 선점 및 실행기]
+    - 분산 환경 안전 선점 (PostgreSQL: FOR UPDATE SKIP LOCKED)
+    - 핸들러 실행
+    - 성공 시: SUCCESS 처리 및 자율 순환 루프(Cron/Interval 차기 작업 자동 발행)
+    - 실패 시: 지수 백오프(Exponential Backoff) 기반 scheduled_at 연기 또는 FAILED 마감
+    - 반환값: 작업을 하나라도 처리했으면 True, 처리할 작업이 없었으면 False
+    """
+    query = db.query(SystemTask).filter(
+        and_(
+            SystemTask.status == "PENDING",
+            SystemTask.scheduled_at <= datetime.now()
+        )
+    ).order_by(SystemTask.priority.asc(), SystemTask.created_at.asc())
+
+    # PostgreSQL 다중 워커 환경에서는 SKIP LOCKED 적용
+    if db.bind and db.bind.dialect.name == "postgresql":
+        task = query.with_for_update(skip_locked=True).first()
+    else:
+        task = query.first()
+
+    if not task:
+        return False
+
+    # 작업 점유
+    task.status = "RUNNING"
+    task.started_at = datetime.now()
+    task.worker_id = worker_id
+    db.commit()
+
+    logger.info(f"⚙️  작업 시작 [{worker_id}]: {task.task_type} (ID: {task.id})")
+
+    handler = TASK_HANDLERS.get(task.task_type)
+    if not handler:
+        task.status = "FAILED"
+        task.completed_at = datetime.now()
+        task.error_log = f"처리기를 찾을 수 없는 작업 타입입니다: {task.task_type}"
+        db.commit()
+        logger.error(f"❌ 작업 타입 미존재 오류: {task.id} ({task.task_type})")
+        return True
+
+    try:
+        result_data = await handler(task, db)
+        task.status = "SUCCESS"
+        task.result = result_data or {}
+        task.completed_at = datetime.now()
+        task.progress_pct = 100
+        logger.info(f"✅ 작업 완료: {task.id} ({task.task_type})")
+
+        # 🔄 반복 태스크인 경우 자율 재발행 (Self-Reissuing Loop)
+        if task.cron_expression or task.repeat_interval:
+            next_time = calculate_next_scheduled_at(
+                cron_expr=task.cron_expression,
+                interval_sec=task.repeat_interval,
+                base_time=datetime.now()
+            )
+            if next_time:
+                enqueue_task(
+                    db=db,
+                    task_type=task.task_type,
+                    payload=task.payload,
+                    priority=task.priority,
+                    scheduled_at=next_time,
+                    cron_expression=task.cron_expression,
+                    repeat_interval=task.repeat_interval,
+                    parent_id=task.id,
+                    created_by=task.created_by,
+                    tags=task.tags,
+                    max_retries=task.max_retries,
+                    timeout_sec=task.timeout_sec
+                )
+                logger.info(f"🔄 반복 태스크 차기 발행 완료: ID={task.id} -> 차기 예약={next_time}")
+
+    except Exception as e:
+        db.rollback()
+        task.retry_count += 1
+        task.error_log = traceback.format_exc()
+        if task.retry_count >= task.max_retries:
+            task.status = "FAILED"
+            task.completed_at = datetime.now()
+            logger.error(f"❌ 작업 영구 실패 (최대 재시도 초과): {task.id}")
+        else:
+            # 지수 백오프 적용 (1차: 10초, 2차: 40초, 3차: 80초, 최대 300초)
+            delay_sec = min(300, (2 ** task.retry_count) * 10)
+            task.scheduled_at = datetime.now() + timedelta(seconds=delay_sec)
+            task.status = "PENDING"
+            logger.warning(f"⚠️ 작업 재시도 예약 (시도 {task.retry_count}/{task.max_retries}, {delay_sec}초 후): ID={task.id}")
+
+    db.commit()
+    return True
+
 
 async def run_task_worker():
-    """[워커 엔진] PENDING 상태인 작업을 찾아 하나씩 처리하는 무한 루프"""
-    logger.info("🚀 시스템 태스크 워커(v3.1) 가동 시작!")
+    """[워커 엔진] PENDING 상태인 작업을 찾아 하나씩 안전하게 처리하는 무한 루프"""
+    worker_id = f"worker-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    logger.info(f"🚀 시스템 태스크 워커(v3.2 자율신경계) 가동 시작! (Worker ID: {worker_id})")
     
     while True:
         db = SessionLocal()
         try:
-            # 지금 해야 할 일 조회 (우선순위 및 예약시간 고려)
-            task = db.query(SystemTask).filter(
-                and_(
-                    SystemTask.status == "PENDING",
-                    SystemTask.scheduled_at <= datetime.now()
-                )
-            ).order_by(SystemTask.priority.asc(), SystemTask.created_at.asc()).first()
-
-            if not task:
+            processed = await process_next_task(db, worker_id)
+            if not processed:
                 await asyncio.sleep(2)
                 continue
-
-            # 작업 점유
-            task.status = "RUNNING"
-            task.started_at = datetime.now()
-            task.worker_id = "main_worker"
-            db.commit()
-
-            logger.info(f"⚙️  작업 시작: {task.task_type} (ID: {task.id})")
-
-            handler = TASK_HANDLERS.get(task.task_type)
-            if not handler:
-                raise Exception(f"처리기를 찾을 수 없는 작업 타입입니다: {task.task_type}")
-
-            try:
-                result_data = await handler(task, db)
-                task.status = "SUCCESS"
-                task.result = result_data
-                task.completed_at = datetime.now()
-                task.progress_pct = 100
-                logger.info(f"✅ 작업 완료: {task.id}")
-            except Exception as e:
-                db.rollback()
-                task.retry_count += 1
-                task.error_log = traceback.format_exc()
-                if task.retry_count >= task.max_retries:
-                    task.status = "FAILED"
-                    logger.error(f"❌ 작업 영구 실패: {task.id}")
-                else:
-                    task.status = "PENDING"
-                    logger.warning(f"⚠️ 작업 재시도 예정: {task.id}")
-
-            db.commit()
-
         except Exception as global_e:
             logger.error(f"🚨 워커 엔진 오류: {str(global_e)}")
             await asyncio.sleep(5)

@@ -9,10 +9,13 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, JSON
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.dialects.postgresql import JSONB
 from models.base import Base
+
+# SQLite와 PostgreSQL 크로스 호환 JSON 타입 정의
+JSONType = JSON().with_variant(JSONB, "postgresql")
 
 
 class SystemConfig(Base):
@@ -20,7 +23,7 @@ class SystemConfig(Base):
     __tablename__ = "system_config"
 
     key = Column(String, primary_key=True, index=True)
-    value = Column(JSONB, nullable=False)
+    value = Column(JSONType, nullable=False)
     description = Column(String, nullable=True)
     updated_date = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -41,11 +44,11 @@ class AppRegistry(Base):
     
     min_read_rank = Column(Integer, default=0)            # 4단계: 읽기 최소 권한 랭킹 (0~9)
     min_write_rank = Column(Integer, default=2)           # 4단계: 쓰기 최소 권한 랭킹 (0~9)
-    allow_groups = Column(JSONB, nullable=False, default=list) # 3단계: 허용 그룹 목록 (주그룹/부그룹 소속 시 읽기·쓰기 모두 가능)
-    deny_groups = Column(JSONB, nullable=False, default=list)  # 2단계: 차단 그룹 목록 (주그룹/부그룹 소속 시 읽기·쓰기 모두 차단)
-    admin_ids = Column(JSONB, default=list)               # 자치 관리자 ID 리스트
+    allow_groups = Column(JSONType, nullable=False, default=list) # 3단계: 허용 그룹 목록 (주그룹/부그룹 소속 시 읽기·쓰기 모두 가능)
+    deny_groups = Column(JSONType, nullable=False, default=list)  # 2단계: 차단 그룹 목록 (주그룹/부그룹 소속 시 읽기·쓰기 모두 차단)
+    admin_ids = Column(JSONType, default=list)               # 자치 관리자 ID 리스트
     
-    config_schema = Column(JSONB, default=dict)           # 설정 스키마
+    config_schema = Column(JSONType, default=dict)           # 설정 스키마
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -69,7 +72,7 @@ class ServiceEngine(Base):
     version = Column(String, nullable=False, default="1.0.0")
     
     frontend_plugin = Column(String, nullable=True) # 렌더링할 Svelte 컴포넌트 경로
-    config_schema = Column(JSONB, default=dict)     # 엔진별 필수 설정 스키마
+    config_schema = Column(JSONType, default=dict)     # 엔진별 필수 설정 스키마
     
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
@@ -82,7 +85,7 @@ class ServiceApp(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     engine_id = Column(String, ForeignKey("service_engine.id"), nullable=False)
-    config = Column(JSONB, default=dict)
+    config = Column(JSONType, default=dict)
     
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
@@ -94,7 +97,7 @@ class ServiceInstance(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
-    service_app_ids = Column(JSONB, default=list) # 조립될 서비스 앱 ID 리스트
+    service_app_ids = Column(JSONType, default=list) # 조립될 서비스 앱 ID 리스트
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
 
@@ -116,8 +119,8 @@ class Menu(Base):
     order = Column(Integer, default=0)
     is_visible = Column(Boolean, default=True)
     min_rank = Column(Integer, default=0)
-    allow_groups = Column(JSONB, nullable=False, default=list) # 메뉴 허용 그룹 목록
-    deny_groups = Column(JSONB, nullable=False, default=list)  # 메뉴 차단 그룹 목록
+    allow_groups = Column(JSONType, nullable=False, default=list) # 메뉴 허용 그룹 목록
+    deny_groups = Column(JSONType, nullable=False, default=list)  # 메뉴 차단 그룹 목록
 
     sub_menus = relationship(
         "Menu", 
@@ -136,8 +139,8 @@ class SystemTask(Base):
 
     id = Column(Integer, primary_key=True)
     task_type = Column(String(50), nullable=False, index=True) # 작업 종류 (예: 'MEDIA_GC', 'MAIL_SEND')
-    payload = Column(JSONB, default=dict)                      # 작업 입력 데이터
-    result = Column(JSONB, default=dict)                       # 작업 결과물
+    payload = Column(JSONType, default=dict)                   # 작업 입력 데이터
+    result = Column(JSONType, default=dict)                    # 작업 결과물
 
     priority = Column(Integer, default=5, index=True)          # 우선순위 (1: 매우급함, 10: 여유있음)
     unique_key = Column(String(100), unique=True)              # 중복 작업 방지 키
@@ -157,7 +160,7 @@ class SystemTask(Base):
     expires_at = Column(DateTime, nullable=True)               # 만료 시각
     timeout_sec = Column(Integer, default=300)                 # 타임아웃 제한 (초)
     error_log = Column(Text, nullable=True)                    # 에러 로그
-    tags = Column(JSONB, default=list)                         # 검색용 태그
+    tags = Column(JSONType, default=list)                      # 검색용 태그
     
     created_by = Column(Integer, ForeignKey("users.id"))       # 작업 생성자
     correlation_id = Column(String(100), index=True)           # 요청 추적 ID
