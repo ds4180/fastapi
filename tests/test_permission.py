@@ -15,7 +15,7 @@
 """
 
 from models import User, UserProfile, AppRegistry
-from core.permission import evaluate_permission, can_access_app, compare_rank
+from core.permission import evaluate_permission, can_access_app, compare_rank, extract_groups_for_action
 
 
 def _make_user(username: str, rank: int, primary_group=None, secondary_groups=None) -> User:
@@ -124,3 +124,77 @@ def test_step4_rank_fallback_and_comparisons():
     assert compare_rank(3, 2, ">") is True
     assert compare_rank(2, 2, "==") is True
     assert compare_rank(1, 2, "<") is True
+
+
+def test_extract_groups_for_action_utility():
+    """
+    [JSONB 추출기 검증]
+    extract_groups_for_action 함수가 단순 리스트, 딕셔너리, 문자열, all 키를 완벽히 처리하는지 검증합니다.
+    """
+    # 1. 단순 리스트 모드 (하위 호환)
+    assert extract_groups_for_action(["운수팀", "정비팀"], action="read") == {"운수팀", "정비팀"}
+    assert extract_groups_for_action(["운수팀", "정비팀"], action="write") == {"운수팀", "정비팀"}
+
+    # 2. 딕셔너리 액션 분리 모드
+    dict_groups = {"read": ["운수팀"], "write": ["배차담당"], "all": ["비상대책위"]}
+    assert extract_groups_for_action(dict_groups, action="read") == {"운수팀", "비상대책위"}
+    assert extract_groups_for_action(dict_groups, action="write") == {"배차담당", "비상대책위"}
+    assert extract_groups_for_action(dict_groups, action="delete") == {"비상대책위"}
+
+    # 3. None 또는 빈 값
+    assert extract_groups_for_action(None) == set()
+    assert extract_groups_for_action([]) == set()
+    assert extract_groups_for_action({}) == set()
+
+
+def test_step3_action_dict_mode_allow():
+    """
+    [JSONB 세분화 허용 검증]
+    allow_groups = {"read": ["운수팀"], "write": ["배차담당"]} 일 때:
+    - 운수팀 사원(rank 1)은 읽기는 통과하나, 쓰기는 쓰기 랭킹(4)에 막혀 차단되어야 한다.
+    - 배차담당 사원(rank 1)은 쓰기 allow에 등록되어 있으므로 쓰기 랭킹(4)보다 낮아도 쓰기가 통과되어야 한다.
+    """
+    driver = _make_user("driver_a", rank=1, primary_group="운수팀")
+    dispatcher = _make_user("dispatcher_b", rank=1, primary_group="총무팀", secondary_groups=["배차담당"])
+    executive = _make_user("executive_c", rank=5, primary_group="기획실")
+
+    app_perms = {
+        "min_read_rank": 3,
+        "min_write_rank": 4,
+        "allow_groups": {"read": ["운수팀"], "write": ["배차담당"]},
+        "deny_groups": [],
+    }
+
+    # 운수팀 사원 (rank 1)
+    assert evaluate_permission(user=driver, action="read", **app_perms) is True   # allow["read"]로 즉시 통과
+    assert evaluate_permission(user=driver, action="write", **app_perms) is False  # allow["write"]에 없고 rank 1 < 4
+
+    # 배차담당 사원 (rank 1)
+    assert evaluate_permission(user=dispatcher, action="read", **app_perms) is False # allow["read"]에 없고 rank 1 < 3
+    assert evaluate_permission(user=dispatcher, action="write", **app_perms) is True  # allow["write"]로 즉시 통과
+
+    # 고위 임원 (rank 5) - 그룹 미지정이지만 4단계 랭킹(5 >= 3, 5 >= 4)으로 둘 다 통과
+    assert evaluate_permission(user=executive, action="read", **app_perms) is True
+    assert evaluate_permission(user=executive, action="write", **app_perms) is True
+
+
+def test_step2_action_dict_mode_deny():
+    """
+    [JSONB 세분화 차단 검증]
+    deny_groups = {"write": ["수습기사"]} 일 때:
+    - 수습기사(rank 2)는 읽기(min_read_rank 1)는 정상 통과하지만, 쓰기(action="write")는 Deny-Wins로 즉시 차단되어야 한다.
+    """
+    apprentice = _make_user("apprentice_kim", rank=2, primary_group="운수팀", secondary_groups=["수습기사"])
+
+    app_perms = {
+        "min_read_rank": 1,
+        "min_write_rank": 2,
+        "allow_groups": [],
+        "deny_groups": {"write": ["수습기사"]},
+    }
+
+    # 읽기는 deny_groups["write"]에 걸리지 않으므로 4단계 랭킹(2 >= 1)으로 통과!
+    assert evaluate_permission(user=apprentice, action="read", **app_perms) is True
+
+    # 쓰기는 deny_groups["write"]에 수습기사가 있으므로 랭킹(2 >= 2)과 무관하게 즉시 차단!
+    assert evaluate_permission(user=apprentice, action="write", **app_perms) is False

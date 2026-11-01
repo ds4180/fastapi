@@ -12,16 +12,22 @@ FastAPI 라우터에 섞여 있던 '멀티 디바이스 세션(DESKTOP/MOBILE)' 
 2. 같은 기기에서 새 로그인이 발생하면 이전 세션을 강제 종료(KICKED_OUT)합니다.
 3. 고유한 UUID 세션 키(JTI)를 발급하고, Redis Set 및 PostgreSQL에 안전하게 이중 저장합니다.
 4. 요청이 올 때마다 세션 유효성을 검증하고, 슬라이딩 윈도우(만료 시간 자동 연장)를 적용합니다.
+5. [v2.0 자가 치유]: Redis 재부팅 시 DB ACTIVE 세션을 바탕으로 키를 자동 복구(Self-Healing)하고,
+   `joinedload`를 통해 단 1회의 쿼리로 User와 UserProfile을 일괄 로드합니다.
 """
 
 import uuid
+import logging
 from datetime import datetime
 from typing import Optional
 from fastapi import Request
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
+from redis.exceptions import RedisError
 from redis_config import rd
 from models import User, UserSession
 from core.config import settings
+
+logger = logging.getLogger("core.session")
 
 # 📌 세션 유효 기간 (일 단위) - 중앙 설정소에서 가져옴
 SESSION_EXPIRE_DAYS = settings.REFRESH_TOKEN_EXPIRE_DAYS
@@ -95,41 +101,57 @@ def validate_session(db: Session, session_id: Optional[str]) -> Optional[User]:
     """
     세션 키의 유효성을 검증하고, 유효한 경우 사용자(User) 객체를 반환합니다.
     
-    - 세션이 없거나 비활성 상태면 None을 반환합니다.
-    - Redis 생존 여부를 대조하여 다른 기기에서 밀려났는지 확인합니다.
-    - 활동이 확인되면 최근 활동 시각(last_activity)과 Redis 만료 시간을 연장(슬라이딩 윈도우)합니다.
+    💡 [2중 정합성 및 자가 치유(Self-Healing)]:
+    1. DB에서 UserSession과 User, UserProfile을 단 1회의 고속 JOIN(joinedload)으로 일괄 로드합니다.
+    2. Redis에 세션 키가 살아있는지 검사합니다.
+       - Redis에 존재: 정상 작동 (TTL 3일 슬라이딩 연장)
+       - Redis에 부재(재부팅 등으로 휘발): DB 상태가 'ACTIVE'이므로 DB를 파괴하지 않고,
+         오히려 Redis에 세션 키를 다시 복원(자가 치유)하여 유저 로그아웃을 방어합니다.
+    3. Redis 일시 순단/에러(RedisError) 발생 시에도 시스템이 500으로 중단되지 않고
+       안전하게 DB 세션으로 폴백합니다.
     """
     if not session_id:
         return None
 
-    # 1. DB에서 세션 레코드 조회
-    db_session = db.query(UserSession).filter(
-        UserSession.session_key == session_id,
-        UserSession.status == "ACTIVE"
-    ).first()
+    # 🚀 [개선 1] joinedload로 UserSession + User + UserProfile을 단 1번의 쿼리로 초고속 로드 (N+1 제거)
+    db_session = (
+        db.query(UserSession)
+        .options(
+            joinedload(UserSession.user).joinedload(User.profile)
+        )
+        .filter(
+            UserSession.session_key == session_id,
+            UserSession.status == "ACTIVE"
+        )
+        .first()
+    )
 
-    if not db_session:
+    if not db_session or not db_session.user:
         return None
 
-    # 2. 유저 정보 조회
-    user = db.query(User).filter(User.id == db_session.user_id).first()
-    if not user:
-        return None
-
-    # 3. Redis 실시간 생존 확인 (다른 기기에서 로그인되어 밀려났는지 판별)
+    user = db_session.user
     redis_key = f"session:{user.id}:{db_session.device_category}"
-    if not rd.sismember(redis_key, session_id):
-        # Redis에 없다면 세션 만료로 전환
-        db_session.status = "EXPIRED"
-        db.commit()
-        return None
 
-    # 4. 슬라이딩 윈도우 (활동 감지 시 세션 만료 시간 3일 자동 연장)
-    # 💡 [성능 최적화]: Redis TTL은 메모리 연산이므로 매 요청마다 즉시 연장하고,
-    #    PostgreSQL DB의 last_activity 업데이트는 마지막 기록 후 5분(300초)이 지났을 때만
-    #    조건부로 Commit하여 병렬 API 호출 시 발생하는 DB Row Lock 경합을 원천 차단합니다.
-    rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
+    # 🛡️ [개선 2] Redis 실시간 검증, 자가 치유(Self-Healing) 및 에러 방어막
+    try:
+        if not rd.sismember(redis_key, session_id):
+            # ✨ [자가 치유 Self-Healing]:
+            # Redis가 재부팅되어 메모리가 비워졌거나 TTL이 일찍 끝났더라도,
+            # DB가 ACTIVE 상태라면 세션을 죽이지 않고 Redis에 키를 다시 복구 등록합니다!
+            rd.sadd(redis_key, session_id)
+            rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
+            logger.info(
+                f"✨ [Session Self-Healing] Redis 세션 복구 완료 "
+                f"(User: {user.username}, Device: {db_session.device_category})"
+            )
+        else:
+            # 정상 활동: 슬라이딩 윈도우 TTL 3일 연장
+            rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
+    except RedisError as redis_err:
+        # 🛡️ [장애 방어]: Redis 일시 순단 시 500 에러를 뿜지 않고 DB 세션으로 안전 통과
+        logger.warning(f"⚠️ [Session] Redis 일시 통신 장애, DB 세션으로 안전 폴백: {redis_err}")
 
+    # [3단계] DB 최근 활동 시각(last_activity) 스로틀링 갱신 (5분 주기 DB Commit 락 경합 방지)
     now = datetime.now()
     if (
         not db_session.last_activity

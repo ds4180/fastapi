@@ -63,6 +63,13 @@ app = FastAPI(lifespan=lifespan)
 # app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
 
 from core.config import settings
+from core.exceptions import CoreException
+from fastapi import Request
+
+# 📌 [전역 예외 핸들러] CoreException 발생 시 일관된 표준 에러 응답(Envelope) 반환
+@app.exception_handler(CoreException)
+async def core_exception_handler(request: Request, exc: CoreException):
+    return exc.to_response()
 
 # 📌 [CORS 설정] 중앙 설정소(core/config.py)의 ALLOW_ORIGINS 목록을 일원화하여 적용합니다.
 app.add_middleware(

@@ -12,8 +12,8 @@ FastAPI의 HTTP 요청(Request/Cookie/HTTPException)과 완전히 분리된
 2. 주그룹(primary_group)은 최대 1개(선택), 부그룹(secondary_groups)은 1개 이상 복수(선택) 가능합니다.
 3. 그룹은 항상 권한 랭킹보다 우선하며, 권한 판별은 반드시 아래 [1 ➔ 2 ➔ 3 ➔ 4단계] 순서를 따릅니다:
    - [1단계] root(랭킹 == 9) 인가? ➔ YES면 무조건 허용 (읽기/쓰기 모두 가능)
-   - [2단계] 앱의 deny 목록에 사용자의 부그룹 또는 주그룹이 있는가? ➔ YES면 무조건 차단 (Deny-Wins)
-   - [3단계] 앱의 allow 목록에 사용자의 부그룹 또는 주그룹이 있는가? ➔ YES면 무조건 허용 (읽기/쓰기 모두 가능)
+   - [2단계] 앱의 deny 목록(단순 리스트 또는 {"read": [...], "write": [...]})에 사용자의 부그룹 또는 주그룹이 있는가? ➔ YES면 무조건 차단 (Deny-Wins)
+   - [3단계] 앱의 allow 목록(단순 리스트 또는 {"read": [...], "write": [...]})에 사용자의 부그룹 또는 주그룹이 있는가? ➔ YES면 무조건 허용 (Allow-Wins)
    - [4단계] 앱의 읽기/쓰기 랭킹과 사용자의 랭킹(0~9)을 비교(>=, >, <, <=, ==)하여 최종 결정
 """
 
@@ -74,21 +74,65 @@ def compare_rank(user_rank: int, target_rank: int, op: str = ">=") -> bool:
     raise ValueError(f"지원하지 않는 랭킹 비교 연산자입니다: {op} (허용: '>=', '>', '==', '<=', '<')")
 
 
+def extract_groups_for_action(group_data: Any, action: str = "read") -> set[str]:
+    """
+    [JSONB 듀얼 모드 그룹 추출기]
+    allow_groups 및 deny_groups의 두 가지 규격을 유연하게 처리합니다:
+    1. 단순 리스트/이터러블 모드: ["운수팀", "배차담당"]
+       - 읽기/쓰기 구분 없이 모든 action에 공통 적용됩니다.
+    2. 액션별 분리 딕셔너리 모드: {"read": ["운수팀"], "write": ["배차담당"], "all": ["기획실"]}
+       - 요청된 action 키에 해당하는 그룹 목록과 "all" 키의 그룹 목록을 합쳐서 반환합니다.
+    """
+    if not group_data:
+        return set()
+
+    # 딕셔너리 형태인 경우 (액션별 분리 모드)
+    if isinstance(group_data, dict):
+        result: set[str] = set()
+        # 요청된 특정 action(예: 'read' 또는 'write')에 지정된 그룹
+        specific_groups = group_data.get(action)
+        if isinstance(specific_groups, (list, set, tuple)):
+            for g in specific_groups:
+                if g:
+                    result.add(str(g))
+        elif isinstance(specific_groups, str) and specific_groups:
+            result.add(specific_groups)
+
+        # 전체 공통 적용 키('all')가 있다면 합집합 처리
+        all_groups = group_data.get("all")
+        if isinstance(all_groups, (list, set, tuple)):
+            for g in all_groups:
+                if g:
+                    result.add(str(g))
+        elif isinstance(all_groups, str) and all_groups:
+            result.add(all_groups)
+
+        return result
+
+    # 단순 리스트/문자열/셋 형태인 경우 (하위 호환 마스터 모드)
+    if isinstance(group_data, (list, set, tuple)):
+        return {str(g) for g in group_data if g}
+    if isinstance(group_data, str) and group_data:
+        return {group_data}
+
+    return set()
+
+
 def evaluate_permission(
     user: Optional[User],
     action: str = "read",
     min_read_rank: int = 0,
     min_write_rank: int = 2,
-    allow_groups: Optional[Iterable[str]] = None,
-    deny_groups: Optional[Iterable[str]] = None,
+    allow_groups: Optional[Any] = None,
+    deny_groups: Optional[Any] = None,
     op: str = ">=",
 ) -> bool:
     """
-    [`정책재정의.md` 4단계 권한 처리 핵심 엔진]
+    [`정책재정의.md` 4단계 권한 처리 핵심 엔진 (JSONB 듀얼 규격 지원)]
 
     1단계: root(랭킹 == 9) 인가? ➔ 무조건 True (읽기/쓰기 모두 가능)
-    2단계: deny 목록에 사용자의 부그룹 또는 주그룹이 있는가? ➔ 있으면 무조건 False (차단)
-    3단계: allow 목록에 사용자의 부그룹 또는 주그룹이 있는가? ➔ 있으면 무조건 True (읽기/쓰기 모두 가능)
+    2단계: deny 목록(action 대응 또는 전체)에 사용자의 부그룹 또는 주그룹이 있는가? ➔ 있으면 무조건 False (차단)
+    3단계: allow 목록(action 대응 또는 전체)에 사용자의 부그룹 또는 주그룹이 있는가? ➔ 있으면 무조건 True (허용)
     4단계: 앱의 읽기(min_read_rank) 또는 쓰기(min_write_rank) 랭킹과 사용자 랭킹(0~9) 비교
     """
     user_rank = get_user_rank(user)
@@ -103,20 +147,19 @@ def evaluate_permission(
 
     # ------------------------------------------------------------------------
     # [2단계] 앱의 deny 값에 부그룹이나 주그룹이 있는가? (Deny-Wins)
+    #         단순 리스트 모드 및 {"read": [...], "write": [...]} 액션별 모드 지원
     # ------------------------------------------------------------------------
-    if deny_groups:
-        deny_set = {g for g in deny_groups if g}
-        if user_groups & deny_set:
-            return False
+    effective_deny = extract_groups_for_action(deny_groups, action=action)
+    if user_groups & effective_deny:
+        return False
 
     # ------------------------------------------------------------------------
     # [3단계] 앱의 allow 값에 부그룹이나 주그룹이 있는가? (Allow-Wins)
-    #         속하는 경우 읽기·쓰기가 모두 가능하므로 action과 무관하게 True 반환!
+    #         단순 리스트 모드 및 {"read": [...], "write": [...]} 액션별 모드 지원
     # ------------------------------------------------------------------------
-    if allow_groups:
-        allow_set = {g for g in allow_groups if g}
-        if user_groups & allow_set:
-            return True
+    effective_allow = extract_groups_for_action(allow_groups, action=action)
+    if user_groups & effective_allow:
+        return True
 
     # ------------------------------------------------------------------------
     # [4단계] 앱의 읽기/쓰기 랭킹과 사용자의 랭킹(0~9) 비교 (기본값 Fallback)

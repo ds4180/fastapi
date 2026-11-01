@@ -28,3 +28,47 @@ def test_device_category_detection():
 
     assert detect_device_category(windows_ua) == "DESKTOP", "윈도우 PC 접속을 데스크톱으로 인식하지 못했습니다."
     assert detect_device_category(mac_ua) == "DESKTOP", "맥북 PC 접속을 데스크톱으로 인식하지 못했습니다."
+
+
+def test_validate_session_self_healing(monkeypatch):
+    """
+    [검사 2] Redis 재부팅 등으로 키가 유실되었더라도,
+    DB가 ACTIVE 상태라면 세션을 파괴(EXPIRED)하지 않고 Redis에 키를 자가 치유(Self-Healing) 등록하는가?
+    """
+    from unittest.mock import MagicMock
+    from models import User, UserProfile, UserSession
+    from core.session import validate_session
+
+    # 1. 가상 DB 세션 및 유저 세트 준비
+    user = User(id=99, username="tester", email="tester@jeju.live")
+    user.profile = UserProfile(rank_level=2)
+    session_record = UserSession(
+        user_id=99,
+        session_key="test-jti-uuid",
+        device_category="DESKTOP",
+        status="ACTIVE",
+    )
+    session_record.user = user
+
+    mock_db = MagicMock()
+    # db.query(UserSession).options(...).filter(...).first() 체인 모킹
+    mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = session_record
+
+    # 2. Redis 모킹 (처음 sismember는 False로 메모리 휘발 상황 시뮬레이션)
+    mock_rd = MagicMock()
+    mock_rd.sismember.return_value = False
+    monkeypatch.setattr("core.session.rd", mock_rd)
+
+    # 3. 세션 검증 실행
+    validated_user = validate_session(mock_db, "test-jti-uuid")
+
+    # 4. 검증:
+    # - 유저가 정상 반환되어야 함 (로그아웃 안 됨!)
+    assert validated_user is not None
+    assert validated_user.username == "tester"
+    # - DB 상태가 EXPIRED로 덮어써지지 않고 여전히 ACTIVE 유지
+    assert session_record.status == "ACTIVE"
+    # - Redis에 해당 키가 자가 치유로 다시 sadd 되었는지 확인
+    mock_rd.sadd.assert_called_once_with("session:99:DESKTOP", "test-jti-uuid")
+    mock_rd.expire.assert_called_once()
+

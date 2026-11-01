@@ -8,7 +8,7 @@
 - 그룹 삭제 시 사용자 프로필 및 앱 레지스트리에서 연계된 코드를 자동 Cascade 정화합니다.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -31,6 +31,32 @@ from domain.v1.admin.auth_group_schema import (
 )
 
 router = APIRouter(prefix="/v1/admin/auth-groups", tags=["Admin Auth Groups"])
+
+
+def remove_group_from_spec(spec: Any, target_code: str) -> tuple[Any, bool]:
+    """
+    allow_groups 또는 deny_groups (단순 리스트 or JSONB 딕셔너리)에서 target_code를 안전하게 제거합니다.
+    """
+    if not spec:
+        return spec, False
+    if isinstance(spec, list):
+        if target_code in spec:
+            return [g for g in spec if g != target_code], True
+        return spec, False
+    if isinstance(spec, dict):
+        changed = False
+        new_dict = {}
+        for action, groups in spec.items():
+            if isinstance(groups, list):
+                if target_code in groups:
+                    new_dict[action] = [g for g in groups if g != target_code]
+                    changed = True
+                else:
+                    new_dict[action] = groups
+            else:
+                new_dict[action] = groups
+        return (new_dict, True) if changed else (spec, False)
+    return spec, False
 
 
 # ==========================================================================
@@ -205,18 +231,36 @@ def delete_group_master(
         if isinstance(prof.secondary_groups, list) and deleted_code in prof.secondary_groups:
             prof.secondary_groups = [g for g in prof.secondary_groups if g != deleted_code]
 
-    # 3. 앱 allow/deny 목록에서 제거
-    affected_apps = db.query(AppRegistry).all()
-    for app in affected_apps:
-        changed = False
-        if app.allow_groups and deleted_code in app.allow_groups:
-            app.allow_groups = [g for g in app.allow_groups if g != deleted_code]
-            changed = True
-        if app.deny_groups and deleted_code in app.deny_groups:
-            app.deny_groups = [g for g in app.deny_groups if g != deleted_code]
-            changed = True
-        if changed:
+    # 3. 앱, 게시판, 페이지 allow/deny 목록에서 deleted_code 안전 정화 (JSONB 듀얼 모드 완벽 지원)
+    for app in db.query(AppRegistry).all():
+        allow_cleaned, c1 = remove_group_from_spec(app.allow_groups, deleted_code)
+        deny_cleaned, c2 = remove_group_from_spec(app.deny_groups, deleted_code)
+        if c1:
+            app.allow_groups = allow_cleaned
+        if c2:
+            app.deny_groups = deny_cleaned
+        if c1 or c2:
             db.add(app)
+
+    for board in db.query(BoardConfig).all():
+        allow_cleaned, c1 = remove_group_from_spec(board.allow_groups, deleted_code)
+        deny_cleaned, c2 = remove_group_from_spec(board.deny_groups, deleted_code)
+        if c1:
+            board.allow_groups = allow_cleaned
+        if c2:
+            board.deny_groups = deny_cleaned
+        if c1 or c2:
+            db.add(board)
+
+    for page_obj in db.query(Page).all():
+        allow_cleaned, c1 = remove_group_from_spec(page_obj.allow_groups, deleted_code)
+        deny_cleaned, c2 = remove_group_from_spec(page_obj.deny_groups, deleted_code)
+        if c1:
+            page_obj.allow_groups = allow_cleaned
+        if c2:
+            page_obj.deny_groups = deny_cleaned
+        if c1 or c2:
+            db.add(page_obj)
 
     # 4. 그룹 레코드 삭제
     db.delete(group)

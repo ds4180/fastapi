@@ -5,6 +5,7 @@ from models import AppRegistry, ServiceInstance, BoardConfig, Post, Page
 from domain.v1.admin.service_service import resolve_service_instance
 from domain.user.user_router import get_current_user_optional
 from core.permission import can_access_app, can_access_board, can_access_page
+from core.exceptions import CoreException, AccessDeniedError, ResourceNotFoundError
 from typing import Optional, Any, Dict
 
 router = APIRouter(prefix="/v1/app", tags=["App Engine"])
@@ -26,7 +27,7 @@ def get_app_data(
     # 1. 앱 레지스트리 정보 확인
     app_info = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not app_info:
-        raise HTTPException(status_code=404, detail="App not registered")
+        raise ResourceNotFoundError(f"등록되지 않은 앱입니다: '{app_id}'", resource="app", resource_id=app_id)
 
     # 1-1. 🛡️ [4단계 권한 입구 검문] (1.root(9) ➔ 2.deny_groups ➔ 3.allow_groups ➔ 4.min_read_rank)
     # can_access_app 함수는 (user, app_obj, action) 시그니처를 사용하여 AppRegistry 객체를 직접 검증합니다.
@@ -35,9 +36,10 @@ def get_app_data(
         app_obj=app_info,
         action="read",
     ):
-        raise HTTPException(
-            status_code=403,
-            detail=f"해당 앱('{app_info.title or app_id}')에 접근할 권한이 없습니다."
+        raise AccessDeniedError(
+            f"해당 앱('{app_info.title or app_id}')에 접근할 권한이 없습니다.",
+            resource="app",
+            resource_id=app_id
         )
 
     # 2. 경로 분석 (slug: board_slug/id or just id)
@@ -64,9 +66,10 @@ def get_app_data(
 
             # 🛡️ [인스턴스 단위 4단계 권한 검문: 1.root ➔ 2.deny ➔ 3.allow ➔ 4.min_read_rank]
             if not can_access_board(current_user, board, action="read"):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"해당 게시판('{board.name}')에 접근할 권한이 없습니다."
+                raise AccessDeniedError(
+                    f"해당 게시판('{board.name}')에 접근할 권한이 없습니다.",
+                    resource="board",
+                    resource_id=board.slug
                 )
 
             result["parent_config"] = board
@@ -97,13 +100,17 @@ def get_app_data(
             if page:
                 # 🛡️ [인스턴스 단위 4단계 권한 검문: 1.root ➔ 2.deny ➔ 3.allow ➔ 4.min_rank]
                 if not can_access_page(current_user, page, action="read"):
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"해당 페이지('{page.title}')에 접근할 권한이 없습니다."
+                    raise AccessDeniedError(
+                        f"해당 페이지('{page.title}')에 접근할 권한이 없습니다.",
+                        resource="page",
+                        resource_id=page.slug
                     )
                 result["instance"] = page
                 # 페이지는 아직 서비스 바인딩 필드가 없으므로 bindings=[]
 
+    except (CoreException, HTTPException):
+        # 🛡️ [핵심 안전장치]: 정상적인 401, 403, 404 예외는 500으로 마스킹하지 않고 그대로 상위 통과!
+        raise
     except Exception as e:
         print(f"❌ [AppRouter] Dynamic Loading Error: {e}")
         raise HTTPException(status_code=500, detail="Internal data resolution error")

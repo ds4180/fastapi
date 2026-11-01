@@ -7,7 +7,7 @@
 """
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Union, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -96,8 +96,8 @@ class AppPermissionItemRes(BaseModel):
     app_type: str
     min_read_rank: int
     min_write_rank: int
-    allow_groups: List[str] = []
-    deny_groups: List[str] = []
+    allow_groups: Union[List[str], Dict[str, Any], Any] = Field(default_factory=list)
+    deny_groups: Union[List[str], Dict[str, Any], Any] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -107,8 +107,8 @@ class AppPermissionsUpdateReq(BaseModel):
     """앱 권한 랭킹 및 allow/deny 설정 변경 요청 (오직 root만 수행 가능)"""
     min_read_rank: Optional[int] = Field(default=None, ge=0, le=9)
     min_write_rank: Optional[int] = Field(default=None, ge=0, le=9)
-    allow_groups: Optional[List[str]] = Field(default=None, description="허용 그룹 코드 리스트")
-    deny_groups: Optional[List[str]] = Field(default=None, description="차단 그룹 코드 리스트 (Deny-Wins)")
+    allow_groups: Optional[Union[List[str], Dict[str, Any], Any]] = Field(default=None, description="허용 그룹 (단순 배열 또는 {read:[], write:[]} 객체)")
+    deny_groups: Optional[Union[List[str], Dict[str, Any], Any]] = Field(default=None, description="차단 그룹 (단순 배열 또는 {read:[], write:[]} 객체)")
 
 
 # --------------------------------------------------------------------------
@@ -125,14 +125,14 @@ class InstancePermissionItemRes(BaseModel):
     icon: Optional[str] = Field(default="mdi:apps", description="아이콘")
     min_read_rank: int = Field(default=0, ge=0, le=9)
     min_write_rank: int = Field(default=2, ge=0, le=9)
-    allow_groups: List[str] = []
-    deny_groups: List[str] = []
+    allow_groups: Union[List[str], Dict[str, Any], Any] = Field(default_factory=list)
+    deny_groups: Union[List[str], Dict[str, Any], Any] = Field(default_factory=list)
 
 
 class InstancePermissionUpdateReq(BaseModel):
     """인스턴스 권한 랭킹 및 allow/deny 설정 변경 요청"""
     min_read_rank: Optional[int] = Field(default=None, ge=0, le=9)
     min_write_rank: Optional[int] = Field(default=None, ge=0, le=9)
-    allow_groups: Optional[List[str]] = None
-    deny_groups: Optional[List[str]] = None
+    allow_groups: Optional[Union[List[str], Dict[str, Any], Any]] = Field(default=None, description="허용 그룹 (단순 배열 또는 {read:[], write:[]} 객체)")
+    deny_groups: Optional[Union[List[str], Dict[str, Any], Any]] = Field(default=None, description="차단 그룹 (단순 배열 또는 {read:[], write:[]} 객체)")
 
