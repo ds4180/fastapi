@@ -8,6 +8,7 @@
 """
 
 from core.config import settings
+from core.middleware import RequestIDMiddleware
 from core.exceptions import (
     CoreException,
     AuthenticationRequiredError,

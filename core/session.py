@@ -26,6 +26,7 @@ from redis.exceptions import RedisError
 from redis_config import rd
 from models import User, UserSession
 from core.config import settings
+from core.audit import safe_log_audit
 
 logger = logging.getLogger("core.session")
 
@@ -73,6 +74,19 @@ def create_user_session(db: Session, user: User, request: Request) -> str:
             "logout_at": datetime.now()
         })
         rd.srem(redis_key, old_jti)
+        # 📜 [감사로그]: 중복 로그인으로 인한 이전 세션 강제 추방 자동 기록
+        safe_log_audit(
+            db=db,
+            app_id="auth",
+            log_type="ACCESS",
+            severity="WARN",
+            action="KICKED_OUT",
+            title=f"중복 로그인으로 이전 {device_category} 세션 강제 종료 (KICKED_OUT)",
+            user=user,
+            ip_address=ip_address,
+            metadata={"device": device_category, "session_key": old_jti[:8] + "..."},
+            commit=False
+        )
     db.commit()
 
     # [2단계] 새로운 고유 세션 키(JTI) 발급
@@ -92,6 +106,20 @@ def create_user_session(db: Session, user: User, request: Request) -> str:
         last_activity=datetime.now()
     )
     db.add(db_session)
+
+    # 📜 [감사로그]: 신규 로그인 세션 발급 완료 기록
+    safe_log_audit(
+        db=db,
+        app_id="auth",
+        log_type="ACCESS",
+        severity="INFO",
+        action="LOGIN_SUCCESS",
+        title=f"{user.username} 로그인 성공 ({device_category})",
+        user=user,
+        ip_address=ip_address,
+        metadata={"device": device_category, "user_agent": user_agent[:200]},
+        commit=False
+    )
     db.commit()
 
     return new_jti
@@ -180,6 +208,21 @@ def terminate_session(db: Session, session_id: Optional[str]) -> bool:
         # DB 세션 상태 업데이트
         db_session.status = "LOGOUT"
         db_session.logout_at = datetime.now()
+
+        # 📜 [감사로그]: 정상 로그아웃 기록
+        user_obj = db.query(User).filter(User.id == db_session.user_id).first()
+        safe_log_audit(
+            db=db,
+            app_id="auth",
+            log_type="ACCESS",
+            severity="INFO",
+            action="LOGOUT",
+            title=f"{user_obj.username if user_obj else f'UID {db_session.user_id}'} 로그아웃 ({db_session.device_category})",
+            user=user_obj,
+            ip_address=db_session.ip_address,
+            metadata={"device": db_session.device_category, "session_key": session_id[:8] + "..."},
+            commit=False
+        )
         db.commit()
         return True
 

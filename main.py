@@ -46,6 +46,7 @@ from domain.v1.board import board_router as v1_board_router
 from domain.v1.admin import admin_router as v1_admin_router
 from domain.v1.admin import group_router as admin_group_router
 from domain.v1.admin import auth_group_router # [조직/권한 그룹 마스터 라우터]
+from domain.v1.admin import observability_router # [통합 관제 및 감사로그 라우터]
 from domain.v1.admin import task_admin_router # [v1.6.0] 관리자 태스크 라우터 임포트
 from domain.v1.app import app_router as v1_app_router
 from domain.v1.custom import custom_router as v1_custom_router
@@ -64,14 +65,137 @@ app = FastAPI(lifespan=lifespan)
 
 from core.config import settings
 from core.exceptions import CoreException
+from core.middleware import RequestIDMiddleware
+from core.audit import safe_log_audit
+from core.session import validate_session
+from database import SessionLocal
 from fastapi import Request
+from fastapi.responses import JSONResponse
+import traceback
+from datetime import datetime
 
-# 📌 [전역 예외 핸들러] CoreException 발생 시 일관된 표준 에러 응답(Envelope) 반환
+# 📌 [전역 예외 핸들러 1] CoreException 표준 처리 및 403 보안 침해 / 500 에러 자동 감사로그 포획
 @app.exception_handler(CoreException)
 async def core_exception_handler(request: Request, exc: CoreException):
-    return exc.to_response()
+    req_id = getattr(request.state, "request_id", None)
+    ip = request.client.host if request.client else "unknown"
 
-# 📌 [CORS 설정] 중앙 설정소(core/config.py)의 ALLOW_ORIGINS 목록을 일원화하여 적용합니다.
+    # 세션 쿠키에서 유저 식별 (감사로그 행위자 파악)
+    session_id = request.cookies.get("session_id")
+    user = None
+    if session_id:
+        try:
+            with SessionLocal() as db:
+                user = validate_session(db, session_id)
+        except Exception:
+            pass
+
+    # 🚨 403 권한 침해 시 즉시 SECURITY 감사로그 적재
+    if exc.status_code == 403:
+        with SessionLocal() as db:
+            safe_log_audit(
+                db=db,
+                app_id=exc.resource or "system",
+                log_type="SECURITY",
+                severity="WARN",
+                action="ACCESS_DENIED",
+                title=f"403 권한 침해 차단: {request.method} {request.url.path}",
+                user=user,
+                resource_type=exc.resource,
+                message=exc.message,
+                ip_address=ip,
+                metadata={
+                    "request_id": req_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "error_code": exc.code,
+                }
+            )
+    elif exc.status_code >= 500:
+        with SessionLocal() as db:
+            safe_log_audit(
+                db=db,
+                app_id=exc.resource or "system",
+                log_type="ERROR",
+                severity="ERROR",
+                action="CORE_EXCEPTION",
+                title=f"500 코어 서버 장애: {request.method} {request.url.path}",
+                user=user,
+                resource_type=exc.resource,
+                message=exc.message,
+                ip_address=ip,
+                metadata={
+                    "request_id": req_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "error_code": exc.code,
+                }
+            )
+
+    resp = exc.to_response()
+    if req_id:
+        resp.headers["X-Request-ID"] = req_id
+    return resp
+
+
+# 📌 [전역 예외 핸들러 2] 처리되지 않은 미처리 500 서버 장애 자동 캡처 (스택 트레이스 영구 보존)
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    req_id = getattr(request.state, "request_id", None)
+    ip = request.client.host if request.client else "unknown"
+    stack_trace = traceback.format_exc()
+
+    session_id = request.cookies.get("session_id")
+    user = None
+    if session_id:
+        try:
+            with SessionLocal() as db:
+                user = validate_session(db, session_id)
+        except Exception:
+            pass
+
+    with SessionLocal() as db:
+        safe_log_audit(
+            db=db,
+            app_id="system",
+            log_type="ERROR",
+            severity="CRITICAL",
+            action="UNHANDLED_EXCEPTION",
+            title=f"500 미처리 서버 장애: {request.method} {request.url.path}",
+            user=user,
+            message=f"{str(exc)}\n\n[스택 트레이스]:\n{stack_trace}",
+            ip_address=ip,
+            metadata={
+                "request_id": req_id,
+                "method": request.method,
+                "path": request.url.path,
+                "exception_type": exc.__class__.__name__,
+            }
+        )
+
+    headers = {}
+    if req_id:
+        headers["X-Request-ID"] = req_id
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": {
+                "code": "INTERNAL_SERVER_ERROR",
+                "status": 500,
+                "message": "서버 내부 처리 중 예기치 못한 장애가 발생했습니다.",
+                "request_id": req_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        },
+        headers=headers
+    )
+
+# 📌 [미들웨어 등록 1] X-Request-ID 상관관계 추적 미들웨어 (모든 요청에 고유 추적 ID 발급)
+app.add_middleware(RequestIDMiddleware)
+
+# 📌 [미들웨어 등록 2] CORS 설정 (중앙 설정소 core/config.py 목록 적용)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOW_ORIGINS,
@@ -97,6 +221,7 @@ app.include_router(v1_board_router.router)
 app.include_router(v1_admin_router.router, prefix="/v1")
 app.include_router(admin_group_router.router)
 app.include_router(auth_group_router.router)
+app.include_router(observability_router.router) # [통합 관제 및 감사로그 라우터]
 app.include_router(task_admin_router.router, prefix="/v1") # /api/v1/admin/tasks 로 등록
 app.include_router(v1_app_router.router)
 app.include_router(v1_custom_router.router)

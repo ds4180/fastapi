@@ -18,6 +18,10 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
+# 🏛️ [감사로그 리스너 등록]: AuditMixin을 상속받은 모델의 변경사항(Diff-Patch)을 자동 캡처
+from core.audit_listener import setup_audit_listeners
+setup_audit_listeners()
+
 def get_db():
     """
     FastAPI 요청마다 DB 세션을 생성하고 작업 완료 시 자동으로 닫아주는 의존성 함수

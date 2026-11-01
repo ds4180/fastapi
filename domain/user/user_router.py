@@ -29,6 +29,7 @@ from domain.user import user_schema, user_crud
 # 🏛️ 백엔드 코어(core)에서 세션 엔진과 인증 의존성을 가져옵니다.
 # ----------------------------------------------------------------------------
 from core.config import settings
+from core.audit import safe_log_audit
 from core.session import (
     create_user_session,
     terminate_session,
@@ -74,6 +75,23 @@ def login_for_access_token(
     """
     user = user_crud.get_user(db, username=form_data.username)
     if not user or not user_crud.pwd_context.verify(form_data.password, user.password):
+        # 📜 [감사로그]: 로그인 실패 기록 (계정 존재 여부 및 비밀번호 불일치)
+        ip = request.client.host if request.client else "unknown"
+        safe_log_audit(
+            db=db,
+            app_id="auth",
+            log_type="ACCESS",
+            severity="WARN",
+            action="LOGIN_FAILED",
+            title=f"로그인 실패: {form_data.username}",
+            user=user if user else None,
+            message="비밀번호가 일치하지 않거나 존재하지 않는 계정입니다.",
+            ip_address=ip,
+            metadata={
+                "attempted_username": form_data.username,
+                "user_agent": request.headers.get("user-agent", "")[:200]
+            }
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="아이디 또는 비밀번호가 틀렸습니다."
@@ -156,6 +174,21 @@ def kick_user_session(
 ):
     """관리자 전용(Rank 4): 특정 사용자의 세션을 강제로 만료(추방)시킵니다."""
     result = user_crud.kick_session(db, session_id=target_session_id)
+    if result:
+        # 📜 [감사로그]: 관리자에 의한 세션 강제 추방 (SECURITY 로그)
+        safe_log_audit(
+            db=db,
+            app_id="system",
+            log_type="SECURITY",
+            severity="WARN",
+            action="SESSION_KICKED",
+            title=f"관리자({current_user.username})에 의한 세션 #{target_session_id} 강제 추방",
+            user=current_user,
+            resource_type="user_session",
+            resource_id=str(target_session_id),
+            message=f"관리자 {current_user.username}(ID: {current_user.id})가 세션 #{target_session_id}을(를) 강제 종료시켰습니다.",
+            metadata={"admin_id": current_user.id, "target_session_id": target_session_id}
+        )
     return {"message": "success"} if result else {"error": "Session not found"}
 
 

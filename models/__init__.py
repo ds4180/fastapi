@@ -14,7 +14,7 @@
 """
 
 # 📌 1. 최소 척추 (Base & Mixin)
-from models.base import Base, TimestampMixin
+from models.base import Base, TimestampMixin, AuditMixin
 
 # 📌 2. 인증 및 사용자/그룹 코어
 from models.user import User, UserProfile, UserSession, Group
@@ -65,11 +65,18 @@ from models.page import Page
 from models.media import MediaAsset
 from models.push import PushSubscription
 
+# 📌 8. 전역 감사로그 및 보안 관제 코어
+from models.audit import AuditLog, SENSITIVE_FIELDS
+
 # 외부 노출 심볼 목록 (명시적 공개)
 __all__ = [
     # Base
     "Base",
     "TimestampMixin",
+    "AuditMixin",
+    # Audit & Observability
+    "AuditLog",
+    "SENSITIVE_FIELDS",
     # User & Group
     "User",
     "UserProfile",
