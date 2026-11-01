@@ -139,6 +139,12 @@ def log_audit(
     if commit:
         db.commit()
         db.refresh(audit_record)
+        if log_type.upper() == "SECURITY":
+            try:
+                from domain.system.watchdog_service import check_and_alert_security_violation
+                check_and_alert_security_violation(db, audit_record)
+            except Exception as we:
+                logger.warning(f"⚠️ Watchdog 보안 경보 발송 실패: {we}")
 
     return audit_record
 

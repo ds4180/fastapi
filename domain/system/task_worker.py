@@ -234,6 +234,17 @@ async def handle_dynamic_group_refresh(task: SystemTask, db: Session):
     task.progress_pct = 100
     return {"status": "finished", "results": results}
 
+@register_handler("SYSTEM_WATCHDOG_INSPECTION")
+async def handle_watchdog_inspection(task: SystemTask, db: Session):
+    """
+    [자율신경계 Watchdog] 시스템 이상 징후 종합 점검 및 자동 경보 루틴
+    """
+    from domain.system.watchdog_service import run_watchdog_inspection
+    logger.info("⚡ 시스템 Watchdog 자율 점검을 수행합니다...")
+    report = run_watchdog_inspection(db)
+    task.progress_pct = 100
+    return report
+
 # --- [핵심 엔진] 단일 태스크 처리기 & 워커 루프 ---
 
 async def process_next_task(db: Session, worker_id: str) -> bool:
@@ -318,6 +329,13 @@ async def process_next_task(db: Session, worker_id: str) -> bool:
             task.status = "FAILED"
             task.completed_at = datetime.now()
             logger.error(f"❌ 작업 영구 실패 (최대 재시도 초과): {task.id}")
+            db.commit()
+            try:
+                from domain.system.watchdog_service import check_and_alert_task_failure
+                check_and_alert_task_failure(db, failed_task_id=task.id)
+            except Exception as we:
+                logger.warning(f"⚠️ Watchdog 경보 트리거 오류: {we}")
+            return True
         else:
             # 지수 백오프 적용 (1차: 10초, 2차: 40초, 3차: 80초, 최대 300초)
             delay_sec = min(300, (2 ** task.retry_count) * 10)
