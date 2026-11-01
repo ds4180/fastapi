@@ -123,3 +123,20 @@ async def alert_toggle(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="알림을 찾을 수 없습니다.")
     
     return await alert_crud.toggle_alert(db, db_alert)
+
+
+@router.get("/{alert_id}/acknowledgements")
+def alert_acknowledgements(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(admin_rank_required)
+):
+    """
+    [관리자 전용] 특정 알림/지시사항의 사원별 수신 확인 현황 및 통계 조회
+    """
+    db_alert = alert_crud.get_alert(db, alert_id)
+    if not db_alert:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="알림을 찾을 수 없습니다.")
+
+    return alert_crud.get_alert_acknowledgements(db, alert_id)
+

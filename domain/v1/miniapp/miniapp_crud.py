@@ -5,6 +5,7 @@
 """
 
 from typing import Optional, List, Dict
+from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, func
 from models.miniapp import MiniappItem
@@ -154,6 +155,14 @@ def update_miniapp_item(
 
     if item_update.status is not None:
         item.status = item_update.status
+        # [양방향 수신확인] CONFIRMED 상태 전환 시 confirmed_at 타임스탬프 기록
+        if item_update.status in ("CONFIRMED", "COMPLETED"):
+            payload = dict(item.extra_payload or {})
+            if "confirmed_at" not in payload:
+                payload["confirmed_at"] = datetime.now().isoformat()
+            item.extra_payload = payload
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(item, "extra_payload")
     if item_update.title is not None:
         item.title = item_update.title
     if item_update.content is not None:

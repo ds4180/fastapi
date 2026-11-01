@@ -194,3 +194,63 @@ def update_alert(db: Session, db_alert: Alert, alert_update: AlertUpdate) -> Ale
     db.commit()
     db.refresh(db_alert)
     return db_alert
+
+
+def get_alert_acknowledgements(db: Session, alert_id: int) -> dict:
+    """
+    [지시사항 양방향 수신 확인 현황 집계]
+    특정 Alert ID와 연결된 모든 MiniappItem을 조회하여 수신 확인 통계를 산출합니다.
+    """
+    from models.miniapp import MiniappItem
+
+    # extra_payload에 alert_id가 저장된 미니앱 아이템 조회
+    all_items = db.query(MiniappItem).filter(
+        MiniappItem.receiver_id.is_not(None)
+    ).all()
+
+    alert_items = []
+    for item in all_items:
+        ep = item.extra_payload or {}
+        if ep.get("alert_id") == alert_id:
+            alert_items.append(item)
+
+    total_count = len(alert_items)
+    confirmed_users = []
+    pending_users = []
+
+    receiver_ids = [item.receiver_id for item in alert_items]
+    users_by_id = {}
+    if receiver_ids:
+        users = db.query(User).filter(User.id.in_(receiver_ids)).all()
+        users_by_id = {u.id: u for u in users}
+
+    for item in alert_items:
+        u = users_by_id.get(item.receiver_id)
+        u_info = {
+            "user_id": item.receiver_id,
+            "username": getattr(u, "username", f"user_{item.receiver_id}") if u else f"user_{item.receiver_id}",
+            "real_name": (getattr(u, "real_name", None) or getattr(u, "username", "사원")) if u else "사원",
+            "phone": getattr(u, "phone", None) if u else None,
+            "status": item.status,
+            "confirmed_at": (item.extra_payload or {}).get("confirmed_at")
+        }
+
+        if item.status in ("CONFIRMED", "COMPLETED"):
+            confirmed_users.append(u_info)
+        else:
+            pending_users.append(u_info)
+
+    confirmed_count = len(confirmed_users)
+    pending_count = len(pending_users)
+    confirm_rate = round((confirmed_count / total_count * 100), 1) if total_count > 0 else 0.0
+
+    return {
+        "alert_id": alert_id,
+        "total_count": total_count,
+        "confirmed_count": confirmed_count,
+        "pending_count": pending_count,
+        "confirm_rate": confirm_rate,
+        "confirmed_users": confirmed_users,
+        "pending_users": pending_users
+    }
+
