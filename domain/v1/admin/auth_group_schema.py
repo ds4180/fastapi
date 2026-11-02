@@ -121,6 +121,7 @@ class InstancePermissionItemRes(BaseModel):
     instance_type: str = Field(..., description="'BOARD' | 'PAGE' | 'APP'")
     title: str = Field(..., description="인스턴스 화면 명칭 (예: '공지게시판', '결근계 관리')")
     slug: Optional[str] = Field(default=None, description="URL 슬러그")
+    frontend_route: Optional[str] = Field(default=None, description="프론트엔드 실제 진입 라우트 주소")
     parent_engine: str = Field(..., description="상위 앱 엔진 명칭 (예: '게시판 (board)', '페이지 (page)', '단일 앱')")
     icon: Optional[str] = Field(default="mdi:apps", description="아이콘")
     min_read_rank: int = Field(default=0, ge=0, le=9)
