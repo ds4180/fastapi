@@ -332,3 +332,84 @@ def test_admin_group_manage_realtime_rank_governance(db_session):
 
     with pytest.raises(AccessDeniedError):
         guard_tg_read(current_user=lee_admin, db=db_session)
+
+
+def test_admin_group_manage_instance_permission_update(db_session):
+    """
+    [group-manage 인스턴스 권한 변경 및 admin_group_manage 거버넌스 연동 검증]
+    - 'admin_groups' 오타로 인한 ResourceNotFoundError 방지 검증 (app_id: admin_group_manage)
+    - update_instance_permissions 엔드포인트가 check_groups_write 거버넌스 가드와 실시간 연동되는지 검증
+    """
+    from domain.v1.admin.auth_group_router import update_instance_permissions, check_groups_write
+    from domain.v1.admin.auth_group_schema import InstancePermissionUpdateReq
+    from core.exceptions import AccessDeniedError
+
+    # 1. admin_group_manage 시스템 앱 등록
+    gm_app = AppRegistry(
+        app_id="admin_group_manage",
+        name="조직·권한 통제소",
+        min_read_rank=9,
+        min_write_rank=9,
+        allow_groups=[],
+        deny_groups=[]
+    )
+    # 대상 커스텀 앱 등록
+    target_app = AppRegistry(
+        app_id="custom_board_app",
+        name="커스텀 게시판 앱",
+        min_read_rank=2,
+        min_write_rank=4,
+        allow_groups=[],
+        deny_groups=[]
+    )
+    db_session.add_all([gm_app, target_app])
+    db_session.commit()
+
+    # 2. Rank 9 (root) 관리자가 열람 최소 랭크를 3으로, 실행 최소 랭크를 5로 변경
+    root_user = _make_user("root_admin", rank=9)
+    req = InstancePermissionUpdateReq(
+        min_read_rank=3,
+        min_write_rank=5,
+        allow_groups=["운수팀"],
+        deny_groups=["휴직자"]
+    )
+    res = update_instance_permissions(
+        instance_type="APP",
+        target_id="custom_board_app",
+        req=req,
+        db=db_session,
+        current_user=root_user
+    )
+    assert res.min_read_rank == 3
+    assert res.min_write_rank == 5
+    assert res.allow_groups == ["운수팀"]
+    assert res.deny_groups == ["휴직자"]
+
+    # 3. DB 영속화 확인
+    db_target = db_session.query(AppRegistry).filter(AppRegistry.app_id == "custom_board_app").first()
+    assert db_target.min_read_rank == 3
+    assert db_target.min_write_rank == 5
+
+    # 4. admin_group_manage의 실행 최소 랭크가 9일 때, Rank 4 관리자가 수정을 시도하면 차단되는지 검증
+    lee_admin = _make_user("lee", rank=4)
+    with pytest.raises(AccessDeniedError):
+        check_groups_write(current_user=lee_admin, db=db_session)
+
+    # 5. admin_group_manage의 실행 최소 랭크를 4로 완화 시 Rank 4 관리자도 즉시 수정 가능해지는 동적 거버넌스 검증
+    gm_app.min_write_rank = 4
+    db_session.commit()
+
+    passed_lee = check_groups_write(current_user=lee_admin, db=db_session)
+    assert passed_lee.username == "lee"
+
+    # 이제 Rank 4인 lee 관리자가 권한 수정 수행 성공
+    req2 = InstancePermissionUpdateReq(min_read_rank=1, min_write_rank=2)
+    res2 = update_instance_permissions(
+        instance_type="APP",
+        target_id="custom_board_app",
+        req=req2,
+        db=db_session,
+        current_user=passed_lee
+    )
+    assert res2.min_read_rank == 1
+    assert res2.min_write_rank == 2

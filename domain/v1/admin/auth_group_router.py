@@ -15,7 +15,7 @@ from sqlalchemy import func
 
 from database import get_db
 from models import User, UserProfile, Group, AppRegistry, BoardConfig, Page
-from core.deps import get_current_user, check_root, require_app_permission
+from core.deps import get_current_user, require_app_permission
 from domain.v1.admin.auth_group_schema import (
     GroupCreateReq,
     GroupUpdateReq,
@@ -32,9 +32,9 @@ from domain.v1.admin.auth_group_schema import (
 
 router = APIRouter(prefix="/v1/admin/auth-groups", tags=["Admin Auth Groups"])
 
-# 🏛️ AppRegistry 거버넌스 연동 (admin_groups)
-check_groups_read = require_app_permission("admin_groups", action="read")
-check_groups_write = require_app_permission("admin_groups", action="write")
+# 🏛️ AppRegistry 거버넌스 연동 (admin_group_manage)
+check_groups_read = require_app_permission("admin_group_manage", action="read")
+check_groups_write = require_app_permission("admin_group_manage", action="write")
 
 
 def remove_group_from_spec(spec: Any, target_code: str) -> tuple[Any, bool]:
@@ -148,11 +148,11 @@ def get_group_master_list(
     return result
 
 
-@router.post("/master", response_model=GroupItemRes, status_code=status.HTTP_201_CREATED, summary="신규 공식 그룹 생성 (root 전용)")
+@router.post("/master", response_model=GroupItemRes, status_code=status.HTTP_201_CREATED, summary="신규 공식 그룹 생성")
 def create_group_master(
     req: GroupCreateReq,
     db: Session = Depends(get_db),
-    root_user: User = Depends(check_root)
+    current_user: User = Depends(check_groups_write)
 ):
     """
     새로운 주그룹 또는 부그룹을 등록합니다. (오직 root만 수행 가능)
@@ -191,15 +191,15 @@ def create_group_master(
     )
 
 
-@router.put("/master/{group_id}", response_model=GroupItemRes, summary="공식 그룹 정보 수정 (root 전용)")
+@router.put("/master/{group_id}", response_model=GroupItemRes, summary="공식 그룹 정보 수정")
 def update_group_master(
     group_id: int,
     req: GroupUpdateReq,
     db: Session = Depends(get_db),
-    root_user: User = Depends(check_root)
+    current_user: User = Depends(check_groups_write)
 ):
     """
-    그룹 표시명, 카테고리, 설명을 수정합니다. (오직 root만 수행 가능)
+    그룹 표시명, 카테고리, 설명을 수정합니다.
     식별 코드(code)는 데이터 무결성을 위해 변경 불가합니다.
     """
     group = db.query(Group).filter(Group.id == group_id).first()
@@ -233,11 +233,11 @@ def update_group_master(
     )
 
 
-@router.delete("/master/{group_id}", summary="공식 그룹 삭제 (root 전용 + Cascade 자동 정화)")
+@router.delete("/master/{group_id}", summary="공식 그룹 삭제 (Cascade 자동 정화)")
 def delete_group_master(
     group_id: int,
     db: Session = Depends(get_db),
-    root_user: User = Depends(check_root)
+    current_user: User = Depends(check_groups_write)
 ):
     """
     그룹을 삭제하고, 해당 그룹을 주그룹/부그룹으로 쓰던 회원 프로필과 앱 allow/deny 목록에서 자동 정리합니다.
@@ -462,12 +462,12 @@ def get_app_permission_list(
     return result
 
 
-@router.patch("/apps/{app_id}/permissions", response_model=AppPermissionItemRes, summary="앱 권한 랭킹 및 allow/deny 설정 변경 (root 전용)")
+@router.patch("/apps/{app_id}/permissions", response_model=AppPermissionItemRes, summary="앱 권한 랭킹 및 allow/deny 설정 변경")
 def update_app_permissions(
     app_id: str,
     req: AppPermissionsUpdateReq,
     db: Session = Depends(get_db),
-    root_user: User = Depends(check_root)
+    current_user: User = Depends(check_groups_write)
 ):
     """
     특정 앱의 읽기/쓰기 최소 랭킹(0~9) 및 allow/deny 그룹을 수정합니다. (오직 root만 수행 가능)
@@ -567,13 +567,13 @@ def get_all_instance_permissions(
     return result
 
 
-@router.patch("/instances/{instance_type}/{target_id}/permissions", response_model=InstancePermissionItemRes, summary="인스턴스 권한 랭킹 및 allow/deny 설정 변경 (root 전용)")
+@router.patch("/instances/{instance_type}/{target_id}/permissions", response_model=InstancePermissionItemRes, summary="인스턴스 권한 랭킹 및 allow/deny 설정 변경")
 def update_instance_permissions(
     instance_type: str,
     target_id: str,
     req: InstancePermissionUpdateReq,
     db: Session = Depends(get_db),
-    root_user: User = Depends(check_root)
+    current_user: User = Depends(check_groups_write)
 ):
     """
     특정 인스턴스(게시판, 페이지, 커스텀앱)의 4단계 권한(랭킹, allow, deny)을 수정합니다. (root 전용)
