@@ -42,15 +42,6 @@ from models.board import (
     post_tag,
 )
 
-# 📌 5. Q&A 질문/답변 레거시
-from models.question import (
-    Question,
-    Answer,
-    QuestionReaction,
-    QuestionImage,
-    question_read_user,
-)
-
 # 📌 6. 배차 및 노선 관리
 from models.dispatch import (
     RouteMaster,
@@ -102,12 +93,6 @@ __all__ = [
     "Comment",
     "PostRead",
     "post_tag",
-    # Question
-    "Question",
-    "Answer",
-    "QuestionReaction",
-    "QuestionImage",
-    "question_read_user",
     # Dispatch
     "RouteMaster",
     "RouteTimetable",

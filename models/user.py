@@ -55,8 +55,6 @@ class User(Base):
     phone = Column(String, nullable=True)
 
     # 🔗 문자열 지연 바인딩: 타 모델 파일을 직접 임포트하지 않아 순환 참조가 발생하지 않습니다.
-    questions = relationship("Question", back_populates="user")
-    answers = relationship("Answer", back_populates="user")
     dayoffs = relationship("DayOff", back_populates="user")
     profile = relationship("UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
     posts = relationship("Post", back_populates="user")
