@@ -5,6 +5,8 @@ from typing import List, Optional
 from database import get_db
 from domain.user.user_router import get_current_user
 from domain.media import media_service, media_config
+from core.deps import require_app_permission
+from core.permission import can_access_app
 from models import User, MediaAsset
 import os
 import shutil
@@ -18,6 +20,10 @@ router = APIRouter(
     prefix="/media",
     tags=["Media System"]
 )
+
+# 🏛️ AppRegistry 거버넌스 연동 미디어 관리 권한 가드
+check_media_admin = require_app_permission("admin_media", action="read")
+check_media_admin_write = require_app_permission("admin_media", action="write")
 
 class FolderCreateRequest(BaseModel):
     tier: str
@@ -132,11 +138,8 @@ async def media_secure_serve(
 @router.get("/admin/stats")
 async def media_admin_stats(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_media_admin)
 ):
-    if current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="Permission denied")
-    
     total_count = db.query(func.count(MediaAsset.id)).filter(MediaAsset.is_deleted == False).scalar()
     total_size = db.query(func.sum(MediaAsset.file_size)).filter(MediaAsset.is_deleted == False).scalar() or 0
     
@@ -162,10 +165,8 @@ async def media_admin_stats(
 async def media_admin_recent(
     limit: int = 12,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_media_admin)
 ):
-    if current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="Permission denied")
     
     recent = {}
     for tier in ["PUBLIC", "PROTECTED", "PRIVATE", "SYSTEM"]:
@@ -242,13 +243,13 @@ async def media_admin_list(
     upper_tier = tier.upper()
     target_sub_path = sub_path.strip("/")
 
-    # [v3.3 권한 정책]
-    # - Rank >= 4 (관리자/root): 전체 티어 및 전체 사용자 폴더 관제 가능
-    # - Rank 1~3 (일반 사용자):
+    # [v3.3 권한 정책: AppRegistry admin_media 연동]
+    # - 관리자(admin_media 열람 권한 보유자): 전체 티어 및 전체 사용자 폴더 관제 가능
+    # - 일반 사용자:
     #   1) PRIVATE 티어: 본인 폴더(USERS/{current_user.id})만 조회 가능 (미지정 시 자동 보정)
     #   2) SYSTEM 티어: 공용폴더(GLOBAL/OFFICE)는 Rank >= 2 열람 가능, 그 외 SYSTEM은 차단
     #   3) PROTECTED / PUBLIC 티어: Rank >= 2 탐색 가능
-    if current_user.rank() < 4:
+    if not can_access_app(current_user, "admin_media", db):
         if upper_tier == "PRIVATE":
             if not target_sub_path:
                 target_sub_path = f"USERS/{current_user.id}"
@@ -348,11 +349,8 @@ async def media_admin_create_folder(
 async def media_admin_backup(
     req: BulkActionRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_media_admin_write)
 ):
-    if current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="Permission denied")
-    
     if req.folder_paths:
         raise HTTPException(status_code=400, detail="폴더 백업은 현재 지원되지 않습니다. 파일을 선택해 주세요.")
 
@@ -372,7 +370,7 @@ async def media_admin_bulk_delete(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    is_admin = current_user.rank() >= 4
+    is_admin = can_access_app(current_user, "admin_media", db)
     submitted_count = 0
 
     # 1. 파일별 비동기 삭제 예약 (일반 유저는 본인 소유 파일만 삭제 가능)
@@ -431,11 +429,8 @@ async def media_admin_bulk_delete(
 async def media_admin_run_gc(
     req: GCRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_media_admin_write)
 ):
-    if current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="관리자 권한이 필요합니다.")
-    
     from domain.system.task_service import enqueue_task
     task = enqueue_task(
         db=db,

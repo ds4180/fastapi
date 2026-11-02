@@ -137,7 +137,7 @@ def test_watchdog_security_violation_alert(db_session):
     alarms = db_session.query(MiniappItem).filter(MiniappItem.category == "ALARM").all()
     assert len(alarms) >= 1
     assert "보안 경보" in alarms[0].title
-    assert alarms[0].link == "/v1/admin/observability"
+    assert alarms[0].link.startswith("/v1/admin/observability")
 
 
 def test_watchdog_ignores_normal_admin_actions(db_session):

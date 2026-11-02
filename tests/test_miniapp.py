@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from models.base import Base
 from models.user import User, UserProfile
-from models.miniapp import MiniappItem
+from models.miniapp import MiniappItem, MiniappRead
 from domain.v1.miniapp import miniapp_crud, miniapp_schema
 
 
@@ -17,9 +17,10 @@ from domain.v1.miniapp import miniapp_crud, miniapp_schema
 def db_session():
     """인메모리 SQLite 격리 테스트 세션"""
     engine = create_engine("sqlite:///:memory:")
-    # 필요한 테이블들 생성 (User 및 MiniappItem)
+    # 필요한 테이블들 생성 (User, MiniappItem, MiniappRead)
     User.__table__.create(engine)
     MiniappItem.__table__.create(engine)
+    MiniappRead.__table__.create(engine)
 
     Session = sessionmaker(bind=engine)
     session = Session()

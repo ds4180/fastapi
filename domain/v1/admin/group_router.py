@@ -30,6 +30,32 @@ check_target_groups_read = require_app_permission("admin_target_groups", action=
 check_target_groups_write = require_app_permission("admin_target_groups", action="write")
 
 
+@router.get("/candidates")
+def get_group_candidates(
+    db: Session = Depends(get_db),
+    admin=Depends(check_target_groups_read)
+):
+    """
+    [수동 타겟 그룹 생성용 사원 후보 목록 조회]
+    - admin_target_groups 거버넌스 랭킹/그룹 설정에 실시간 연동됩니다.
+    - 주민번호/계좌 등 민감 정보를 배제하고 사원 선택에 필요한 최소 정보(id, username, real_name)만 안전하게 반환합니다.
+    """
+    from models.user import User
+    users = db.query(User).all()
+    result = []
+    for u in users:
+        is_active = True
+        if hasattr(u, "profile") and u.profile:
+            is_active = getattr(u.profile, "is_active", True)
+        if is_active:
+            result.append({
+                "id": u.id,
+                "username": u.username,
+                "real_name": u.real_name or u.username
+            })
+    return result
+
+
 @router.get("")
 def get_all_groups(
     rd=Depends(get_redis),

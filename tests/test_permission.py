@@ -271,3 +271,64 @@ def test_extract_all_groups_from_spec():
     assert extract_all_groups_from_spec(None) == set()
     assert extract_all_groups_from_spec([]) == set()
     assert extract_all_groups_from_spec({}) == set()
+
+
+def test_admin_group_manage_realtime_rank_governance(db_session):
+    """
+    [사용자 핵심 아키텍처 원칙 검증: admin/group-manage 설정 데로 실시간 100% 작동]
+    - AppRegistry의 min_read_rank, min_write_rank 설정이 17종 관리자 앱에 실시간 반영되는지 검증.
+    - Level 4 관리자가 admin_target_groups(Rank 4) 접근 시 정상 통과하고,
+      타 앱(admin_user_manage, Rank 8) 의존 없이 candidate 조회가 완벽히 수행되는지 검증.
+    """
+    from core.deps import require_app_permission
+    from core.exceptions import AccessDeniedError
+
+    # 1. AppRegistry에 admin_target_groups(열람: 4, 실행: 4) 등록
+    target_group_app = AppRegistry(
+        app_id="admin_target_groups",
+        name="타겟 그룹 관리",
+        min_read_rank=4,
+        min_write_rank=4,
+        allow_groups=[],
+        deny_groups=[]
+    )
+    # AppRegistry에 admin_user_manage(열람: 8, 실행: 8) 등록
+    user_manage_app = AppRegistry(
+        app_id="admin_user_manage",
+        name="사용자 계정 관리",
+        min_read_rank=8,
+        min_write_rank=8,
+        allow_groups=[],
+        deny_groups=[]
+    )
+    db_session.add_all([target_group_app, user_manage_app])
+    db_session.commit()
+
+    guard_tg_read = require_app_permission("admin_target_groups", action="read")
+    guard_user_read = require_app_permission("admin_user_manage", action="read")
+
+    # Level 4 관리자 (lee)
+    lee_admin = _make_user("lee", rank=4)
+
+    # (1) Level 4 관리자는 admin_target_groups 열람 정상 통과
+    passed_lee = guard_tg_read(current_user=lee_admin, db=db_session)
+    assert passed_lee.username == "lee"
+
+    # (2) Level 4 관리자가 admin_user_manage에 직접 접근하면 403 차단
+    with pytest.raises(AccessDeniedError):
+        guard_user_read(current_user=lee_admin, db=db_session)
+
+    # (3) admin/group-manage에서 동적으로 min_read_rank를 3으로 완화 시 실시간 즉시 반영 검증
+    target_group_app.min_read_rank = 3
+    db_session.commit()
+
+    rank3_user = _make_user("staff_rank3", rank=3)
+    passed_r3 = guard_tg_read(current_user=rank3_user, db=db_session)
+    assert passed_r3.username == "staff_rank3"
+
+    # (4) 다시 min_read_rank를 6으로 상향 시 rank 4 관리자도 즉시 차단 (동적 거버넌스 보장)
+    target_group_app.min_read_rank = 6
+    db_session.commit()
+
+    with pytest.raises(AccessDeniedError):
+        guard_tg_read(current_user=lee_admin, db=db_session)

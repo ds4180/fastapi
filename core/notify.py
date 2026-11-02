@@ -140,6 +140,21 @@ def notify(
         db.add(item)
         created_items.append(item)
 
+    # --------------------------------------------------------------------------
+    # 2. 레거시 팝업/모달 호환성 (Level >= 4 이거나 Alert 등록 시)
+    # --------------------------------------------------------------------------
+    if level >= 4:
+        from models.alert import Alert
+        db_alert = Alert(
+            message=f"{f'[{title}] ' if title else ''}{message}",
+            level=level,
+            style="warning" if level == 4 else "error",
+            position="modal",
+            redirect_url=link,
+            user_id=sender_id or 1
+        )
+        db.add(db_alert)
+
     db.commit()
 
     # --------------------------------------------------------------------------

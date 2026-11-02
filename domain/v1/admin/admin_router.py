@@ -27,15 +27,24 @@ router = APIRouter(
 
 API_VERSION_PREFIX = "/v1"
 
-# 🏛️ AppRegistry 거버넌스 연동 시스템 앱별 전용 인가 가드
+# 🏛️ AppRegistry 거버넌스 연동 시스템 앱별 전용 인가 가드 (실시간 4단계 권한 통일)
 check_admin = check_rank(required_rank=4) # 대시보드 및 공통 관리자 폴백
 check_user_admin = require_app_permission("admin_user_manage")
 check_app_admin = require_app_permission("admin_apps")
 check_menu_admin = require_app_permission("admin_menu")
-check_board_admin = require_app_permission("admin_boards")
-check_service_admin = require_app_permission("admin_services")
-check_dayoff_admin = require_app_permission("admin_dayoff")
+check_board_admin = require_app_permission("admin_boards", action="read")
+check_board_admin_write = require_app_permission("admin_boards", action="write")
+check_service_admin = require_app_permission("admin_services", action="read")
+check_service_admin_write = require_app_permission("admin_services", action="write")
+check_dayoff_admin = require_app_permission("admin_dayoff", action="read")
+check_dayoff_admin_write = require_app_permission("admin_dayoff", action="write")
 check_config_admin = require_app_permission("admin_config")
+check_push_admin = require_app_permission("admin_pushs", action="read")
+check_push_admin_write = require_app_permission("admin_pushs", action="write")
+check_route_master_admin = require_app_permission("admin_route_master", action="read")
+check_route_master_admin_write = require_app_permission("admin_route_master", action="write")
+check_dispatch_admin = require_app_permission("admin_dispatch", action="read")
+check_dispatch_admin_write = require_app_permission("admin_dispatch", action="write")
 
 @router.get("/dashboard")
 def get_dashboard_summary(
@@ -488,7 +497,7 @@ def get_public_configs(db: Session = Depends(get_db)):
     return {c.key: c.value for c in configs}
 
 @router.post("/system/gc/run")
-def run_manual_gc(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def run_manual_gc(db: Session = Depends(get_db), admin: User = Depends(check_config_admin)):
     """[관리자 수동 즉시 실행] 데이터 보존 기간 초과 이력 및 Redis 메모리 가비지 컬렉션(GC) (STD-SYS-009)"""
     from redis_config import rd
     from domain.system.retention_service import run_data_retention_gc
@@ -497,11 +506,11 @@ def run_manual_gc(db: Session = Depends(get_db), admin: User = Depends(check_adm
 # --- Board Configuration Management (게시판 설정 관리) ---
 
 @router.get("/boards", response_model=List[admin_schema.BoardConfigAdminSchema])
-def get_all_boards(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def get_all_boards(db: Session = Depends(get_db), admin: User = Depends(check_board_admin)):
     return db.query(BoardConfig).order_by(BoardConfig.id).all()
 
 @router.post("/boards", response_model=admin_schema.BoardConfigAdminSchema)
-def create_board_config(board_in: admin_schema.BoardConfigCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def create_board_config(board_in: admin_schema.BoardConfigCreate, db: Session = Depends(get_db), admin: User = Depends(check_board_admin_write)):
     if db.query(BoardConfig).filter(BoardConfig.slug == board_in.slug).first():
         raise HTTPException(status_code=400, detail="이미 존재하는 슬러그입니다.")
     db_board = BoardConfig(**board_in.dict())
@@ -511,7 +520,7 @@ def create_board_config(board_in: admin_schema.BoardConfigCreate, db: Session = 
     return db_board
 
 @router.put("/boards/{board_id}", response_model=admin_schema.BoardConfigAdminSchema)
-def update_board_config(board_id: int, board_in: admin_schema.BoardConfigUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def update_board_config(board_id: int, board_in: admin_schema.BoardConfigUpdate, db: Session = Depends(get_db), admin: User = Depends(check_board_admin_write)):
     db_board = db.query(BoardConfig).filter(BoardConfig.id == board_id).first()
     if not db_board:
         raise HTTPException(status_code=404, detail="게시판 설정을 찾을 수 없습니다.")
@@ -522,7 +531,7 @@ def update_board_config(board_id: int, board_in: admin_schema.BoardConfigUpdate,
     return db_board
 
 @router.delete("/boards/{board_id}")
-def delete_board_config(board_id: int, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def delete_board_config(board_id: int, db: Session = Depends(get_db), admin: User = Depends(check_board_admin_write)):
     db_board = db.query(BoardConfig).filter(BoardConfig.id == board_id).first()
     if not db_board:
         raise HTTPException(status_code=404, detail="게시판 설정을 찾을 수 없습니다.")
@@ -533,11 +542,11 @@ def delete_board_config(board_id: int, db: Session = Depends(get_db), admin: Use
 # --- Selection Lists ---
 
 @router.get("/boards/list", response_model=List[admin_schema.BoardSimpleSchema])
-def list_boards_for_selection(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def list_boards_for_selection(db: Session = Depends(get_db), admin: User = Depends(check_board_admin)):
     return db.query(BoardConfig).filter(BoardConfig.is_active == True).order_by(BoardConfig.name).all()
 
 @router.get("/posts/list", response_model=List[admin_schema.PostSimpleAdminSchema])
-def list_posts_for_selection(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def list_posts_for_selection(db: Session = Depends(get_db), admin: User = Depends(check_board_admin)):
     return db.query(Post).order_by(Post.create_date.desc()).limit(100).all()
 
 from domain.push.push_service import send_push_to_all
@@ -547,7 +556,7 @@ from domain.push.push_service import send_push_to_all
 @router.get("/push/subscriptions")
 def list_push_subscriptions(
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_push_admin)
 ):
     """모든 푸시 구독 목록 조회 (관리자용 - 기기/브라우저 유형 및 소속 그룹 상세 포함)"""
     subs = db.query(models.PushSubscription).join(models.User, models.PushSubscription.user_id == models.User.id).all()
@@ -598,7 +607,7 @@ def list_push_subscriptions(
 def admin_send_push(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_push_admin_write)
 ):
     """관리자가 커스텀 메시지를 전체 푸시 발송"""
     title = payload.get("title", "공지사항")
@@ -617,7 +626,7 @@ def admin_send_push(
 def delete_push_subscription(
     sub_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_push_admin_write)
 ):
     """무효한 푸시 구독 정보 강제 삭제"""
     sub = db.query(models.PushSubscription).filter(models.PushSubscription.id == sub_id).first()
@@ -630,7 +639,7 @@ def delete_push_subscription(
 # --- DayOff Management (전체 휴무 관리) ---
 
 @router.get("/dayoffs")
-def admin_get_all_dayoffs(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def admin_get_all_dayoffs(db: Session = Depends(get_db), admin: User = Depends(check_dayoff_admin)):
     """모든 사용자의 휴무 신청 내역 조회 (관리자용 - 원본 데이터)"""
     dayoffs = db.query(DayOff).join(User).filter(DayOff.is_deleted == False).order_by(DayOff.date.desc()).all()
     
@@ -655,7 +664,7 @@ def admin_update_dayoff_status(
     dayoff_id: int, 
     status_update: dict = Body(...), 
     db: Session = Depends(get_db), 
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_dayoff_admin_write)
 ):
     """휴무 신청 상태 변경 (승인/반려 등)"""
     new_status = status_update.get("status")
@@ -678,11 +687,11 @@ def admin_update_dayoff_status(
 
 # 1. Service Registry (대분류)
 @router.get("/service-registries", response_model=List[admin_schema.ServiceRegistrySchema])
-def list_service_registries(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def list_service_registries(db: Session = Depends(get_db), admin: User = Depends(check_service_admin)):
     return db.query(ServiceRegistry).all()
 
 @router.post("/service-registries", response_model=admin_schema.ServiceRegistrySchema)
-def create_service_registry(data: admin_schema.ServiceRegistryCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def create_service_registry(data: admin_schema.ServiceRegistryCreate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = ServiceRegistry(**data.dict())
     db.add(db_obj)
     db.commit()
@@ -690,7 +699,7 @@ def create_service_registry(data: admin_schema.ServiceRegistryCreate, db: Sessio
     return db_obj
 
 @router.delete("/service-registries/{registry_id}")
-def delete_service_registry(registry_id: str, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def delete_service_registry(registry_id: str, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = db.query(ServiceRegistry).filter(ServiceRegistry.id == registry_id).first()
     if not db_obj: raise HTTPException(status_code=404)
     db.delete(db_obj)
@@ -699,11 +708,11 @@ def delete_service_registry(registry_id: str, db: Session = Depends(get_db), adm
 
 # 2. Service Engine (컴포넌트 버전)
 @router.get("/service-engines", response_model=List[admin_schema.ServiceEngineSchema])
-def list_service_engines(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def list_service_engines(db: Session = Depends(get_db), admin: User = Depends(check_service_admin)):
     return db.query(ServiceEngine).all()
 
 @router.post("/service-engines", response_model=admin_schema.ServiceEngineSchema)
-def create_service_engine(data: admin_schema.ServiceEngineCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def create_service_engine(data: admin_schema.ServiceEngineCreate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = ServiceEngine(**data.dict())
     db.add(db_obj)
     db.commit()
@@ -711,7 +720,7 @@ def create_service_engine(data: admin_schema.ServiceEngineCreate, db: Session = 
     return db_obj
 
 @router.delete("/service-engines/{engine_id}")
-def delete_service_engine(engine_id: str, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def delete_service_engine(engine_id: str, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = db.query(ServiceEngine).filter(ServiceEngine.id == engine_id).first()
     if not db_obj: raise HTTPException(status_code=404)
     db.delete(db_obj)
@@ -720,11 +729,11 @@ def delete_service_engine(engine_id: str, db: Session = Depends(get_db), admin: 
 
 # 3. Service App (원자적 인스턴스)
 @router.get("/service-apps", response_model=List[admin_schema.ServiceAppSchema])
-def list_service_apps(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def list_service_apps(db: Session = Depends(get_db), admin: User = Depends(check_service_admin)):
     return db.query(ServiceApp).all()
 
 @router.post("/service-apps", response_model=admin_schema.ServiceAppSchema)
-def create_service_app(data: admin_schema.ServiceAppCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def create_service_app(data: admin_schema.ServiceAppCreate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = ServiceApp(**data.dict())
     db.add(db_obj)
     db.commit()
@@ -732,7 +741,7 @@ def create_service_app(data: admin_schema.ServiceAppCreate, db: Session = Depend
     return db_obj
 
 @router.put("/service-apps/{app_id}", response_model=admin_schema.ServiceAppSchema)
-def update_service_app(app_id: int, data: admin_schema.ServiceAppUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def update_service_app(app_id: int, data: admin_schema.ServiceAppUpdate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = db.query(ServiceApp).filter(ServiceApp.id == app_id).first()
     if not db_obj: raise HTTPException(status_code=404)
     for k, v in data.dict(exclude_unset=True).items():
@@ -743,11 +752,11 @@ def update_service_app(app_id: int, data: admin_schema.ServiceAppUpdate, db: Ses
 
 # 4. Service Instance (번들)
 @router.get("/service-instances", response_model=List[admin_schema.ServiceInstanceSchema])
-def list_service_instances(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def list_service_instances(db: Session = Depends(get_db), admin: User = Depends(check_service_admin)):
     return db.query(ServiceInstance).all()
 
 @router.post("/service-instances", response_model=admin_schema.ServiceInstanceSchema)
-def create_service_instance(data: admin_schema.ServiceInstanceCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def create_service_instance(data: admin_schema.ServiceInstanceCreate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = ServiceInstance(**data.dict())
     db.add(db_obj)
     db.commit()
@@ -755,7 +764,7 @@ def create_service_instance(data: admin_schema.ServiceInstanceCreate, db: Sessio
     return db_obj
 
 @router.put("/service-instances/{instance_id}", response_model=admin_schema.ServiceInstanceSchema)
-def update_service_instance(instance_id: int, data: admin_schema.ServiceInstanceUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def update_service_instance(instance_id: int, data: admin_schema.ServiceInstanceUpdate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = db.query(ServiceInstance).filter(ServiceInstance.id == instance_id).first()
     if not db_obj: raise HTTPException(status_code=404)
     for k, v in data.dict(exclude_unset=True).items():
@@ -765,7 +774,7 @@ def update_service_instance(instance_id: int, data: admin_schema.ServiceInstance
     return db_obj
 
 @router.delete("/service-instances/{instance_id}")
-def delete_service_instance(instance_id: int, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def delete_service_instance(instance_id: int, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = db.query(ServiceInstance).filter(ServiceInstance.id == instance_id).first()
     if not db_obj: raise HTTPException(status_code=404)
     db.delete(db_obj)
@@ -780,7 +789,7 @@ def delete_service_instance(instance_id: int, db: Session = Depends(get_db), adm
 @router.get("/route-masters")
 def list_route_masters(
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_route_master_admin)
 ):
     """
     모든 노선 마스터 및 이에 소속된 버전별 시간표 상세 정보를 조회합니다.
@@ -836,7 +845,7 @@ def list_route_masters(
 def create_route_master(
     payload: admin_schema.RouteMasterCreate,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_route_master_admin_write)
 ):
     """
     새로운 노선 마스터 및 관련 상세 시간표를 일괄적으로 등록합니다.
@@ -887,7 +896,7 @@ def update_route_master(
     master_id: int,
     payload: admin_schema.RouteMasterUpdate,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_route_master_admin_write)
 ):
     """
     노선 마스터 및 관련 상세 시간표를 일괄적으로 수정(오버라이트)합니다.
@@ -951,7 +960,7 @@ def update_route_master(
 def delete_route_master(
     master_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_route_master_admin_write)
 ):
     """
     특정 노선 마스터와 종속된 모든 상세 시간표를 물리적으로 영구 삭제합니다.
@@ -1030,7 +1039,7 @@ def load_vehicles_metadata():
 def list_active_routes_for_date(
     target_date: date,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_dispatch_admin)
 ):
     """
     지정된 날짜(target_date) 기준으로 운행(활성) 중인 노선 마스터 목록을 조회합니다.
@@ -1065,7 +1074,7 @@ def get_daily_dispatch(
     target_date: date,
     route_master_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_dispatch_admin)
 ):
     """
     지정된 날짜와 노선 마스터 ID에 해당하는 배차 목록을 조회합니다.
@@ -1240,7 +1249,7 @@ def get_daily_dispatch(
 def save_daily_dispatch(
     payload: admin_schema.DispatchSavePayload,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_dispatch_admin_write)
 ):
     """
     일괄 배차 정보(금일 및 익일)를 생성하거나 업데이트(Upsert) 합니다.

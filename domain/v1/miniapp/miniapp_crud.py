@@ -4,13 +4,22 @@
 ============================================================================
 """
 
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, NamedTuple
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_, func, case
+from sqlalchemy import or_, and_, func, case, select
 from models.miniapp import MiniappItem, MiniappRead
 from models.user import User
 from domain.v1.miniapp.miniapp_schema import MiniappItemCreate, MiniappItemUpdate
+
+
+class MiniappUpdateResult(NamedTuple):
+    item: MiniappItem
+    status: str
+    confirmed_at: Optional[datetime]
+
+    def __getattr__(self, name):
+        return getattr(self.item, name)
 
 
 def get_user_miniapp_counts(db: Session, user_id: int) -> Dict[str, int]:
@@ -149,7 +158,7 @@ def get_user_miniapp_items(
         query = query.filter(computed_status_expr == status)
 
     rows = query.order_by(MiniappItem.created_at.desc()).offset(skip).limit(limit).all()
-    return rows
+    return [MiniappUpdateResult(r[0], r[1], r[2]) for r in rows]
 
 
 def create_miniapp_item(db: Session, sender: User, item_in: MiniappItemCreate) -> MiniappItem:
@@ -193,14 +202,14 @@ def update_miniapp_item(
     item_id: int,
     user_id: int,
     item_update: MiniappItemUpdate
-) -> Optional[Tuple[MiniappItem, str, Optional[datetime]]]:
+) -> Optional[MiniappUpdateResult]:
     """
     미니앱 아이템 상태 또는 내용 변경 (방안 B 1:N 확인 서명 격리 반영):
     - 전사 공지(receiver_id IS NULL)인 경우:
       원본 MiniappItem은 수정하지 않고, MiniappRead 테이블에 현재 사원의 확인 서명(status, confirmed_at)을 UPSERT 기록합니다.
     - 개인 아이템인 경우:
       기존대로 MiniappItem.status를 직접 변경하고 extra_payload['confirmed_at']을 기록합니다.
-    - 반환: (MiniappItem, 사원별_status, confirmed_at)
+    - 반환: MiniappUpdateResult(item, status, confirmed_at) -> 튜플 언패킹 및 속성 접근 100% 호환
     """
     item = db.query(MiniappItem).filter(MiniappItem.id == item_id).first()
     if not item:
@@ -229,8 +238,8 @@ def update_miniapp_item(
 
             db.commit()
             db.refresh(read_rec)
-            return (item, read_rec.status, read_rec.confirmed_at)
-        return (item, "PENDING", None)
+            return MiniappUpdateResult(item, read_rec.status, read_rec.confirmed_at)
+        return MiniappUpdateResult(item, "PENDING", None)
 
     # 2. 👤 1:1 수신자 또는 작성자 권한 검증
     if item.receiver_id != user_id and item.sender_id != user_id:
@@ -263,7 +272,7 @@ def update_miniapp_item(
 
     db.commit()
     db.refresh(item)
-    return (item, item.status, confirmed_at)
+    return MiniappUpdateResult(item, item.status, confirmed_at)
 
 
 def delete_miniapp_item(db: Session, item_id: int, user: User) -> bool:

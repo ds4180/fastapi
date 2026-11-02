@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from domain.page import page_schema, page_crud
 from domain.user.user_router import get_current_user, get_current_user_optional, check_rank
+from core.deps import require_app_permission
 from core.permission import can_access_page
 from models import User
 from typing import List, Optional
@@ -13,15 +14,16 @@ router = APIRouter(
     tags=["page"]
 )
 
-# 관리자 권한 체크 (Rank 4 이상)
-check_admin = check_rank(required_rank=4)
+# 🏛️ AppRegistry 거버넌스 연동 실시간 권한 가드
+check_page_admin = require_app_permission("admin_pages", action="read")
+check_page_admin_write = require_app_permission("admin_pages", action="write")
 
 # --- [관리자용 API] ---
 
 @router.get("/admin/list", response_model=List[page_schema.PageSimpleResponse])
 def admin_list_pages(
     db: Session = Depends(get_db),
-    current_admin: User = Depends(check_admin)
+    current_admin: User = Depends(check_page_admin)
 ):
     """관리자용 전체 페이지 목록"""
     return page_crud.get_page_list(db)
@@ -30,7 +32,7 @@ def admin_list_pages(
 def admin_create_page(
     page_in: page_schema.PageCreate,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(check_admin)
+    current_admin: User = Depends(check_page_admin_write)
 ):
     """신규 페이지 생성 (슬러그 중복 체크 포함)"""
     existing = page_crud.get_page_by_slug(db, page_in.slug)
@@ -42,7 +44,7 @@ def admin_create_page(
 def admin_update_page(
     page_in: page_schema.PageUpdate,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(check_admin)
+    current_admin: User = Depends(check_page_admin_write)
 ):
     """기존 페이지 수정"""
     db_page = page_crud.get_page_by_id(db, page_in.id)
@@ -61,7 +63,7 @@ def admin_update_page(
 def admin_delete_page(
     page_id: int,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(check_admin)
+    current_admin: User = Depends(check_page_admin_write)
 ):
     """페이지 삭제"""
     db_page = page_crud.get_page_by_id(db, page_id)

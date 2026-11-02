@@ -15,7 +15,7 @@ from sqlalchemy import func
 
 from database import get_db
 from models import User, UserProfile, Group, AppRegistry, BoardConfig, Page
-from core.deps import get_current_user, check_rank, check_root
+from core.deps import get_current_user, check_root, require_app_permission
 from domain.v1.admin.auth_group_schema import (
     GroupCreateReq,
     GroupUpdateReq,
@@ -31,6 +31,10 @@ from domain.v1.admin.auth_group_schema import (
 )
 
 router = APIRouter(prefix="/v1/admin/auth-groups", tags=["Admin Auth Groups"])
+
+# 🏛️ AppRegistry 거버넌스 연동 (admin_groups)
+check_groups_read = require_app_permission("admin_groups", action="read")
+check_groups_write = require_app_permission("admin_groups", action="write")
 
 
 def remove_group_from_spec(spec: Any, target_code: str) -> tuple[Any, bool]:
@@ -94,7 +98,7 @@ def extract_all_groups_from_spec(spec: Any) -> set[str]:
 def get_group_master_list(
     group_type: Optional[str] = Query(None, description="PRIMARY | SECONDARY 필터"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(1))
+    current_user: User = Depends(check_groups_read)
 ):
     """
     등록된 모든 주그룹 및 부그룹 목록을 반환합니다.
@@ -304,7 +308,7 @@ def delete_group_master(
 def get_user_group_list(
     query: Optional[str] = Query(None, description="이름/아이디/이메일 검색"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(1))
+    current_user: User = Depends(check_groups_read)
 ):
     """
     모든 회원의 기본 정보, 권한 등급, 주그룹(1개), 부그룹(N개) 현황을 조회합니다.
@@ -338,7 +342,7 @@ def update_user_primary_group(
     user_id: int,
     req: UserPrimaryGroupReq,
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(4)) # 관리자 이상
+    current_user: User = Depends(check_groups_write)
 ):
     """
     특정 회원의 주그룹(1순위 본소속)을 설정하거나 해제합니다.
@@ -365,7 +369,7 @@ def add_user_secondary_group(
     user_id: int,
     req: UserSecondaryGroupReq,
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(4))
+    current_user: User = Depends(check_groups_write)
 ):
     """
     특정 회원에게 부그룹(직무/특권/제재)을 추가합니다.
@@ -392,7 +396,7 @@ def remove_user_secondary_group(
     user_id: int,
     code: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(4))
+    current_user: User = Depends(check_groups_write)
 ):
     """
     특정 회원의 부그룹 목록에서 특정 그룹을 제거합니다.
@@ -414,7 +418,7 @@ def update_user_groups_batch(
     user_id: int,
     req: UserGroupBatchReq,
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(4))
+    current_user: User = Depends(check_groups_write)
 ):
     """
     사용자의 주그룹과 부그룹을 일괄 변경합니다.
@@ -436,7 +440,7 @@ def update_user_groups_batch(
 @router.get("/apps", response_model=List[AppPermissionItemRes], summary="등록된 앱 전체 권한 설정 현황 조회")
 def get_app_permission_list(
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(1))
+    current_user: User = Depends(check_groups_read)
 ):
     """
     등록된 모든 앱의 읽기/쓰기 최소 랭킹(0~9) 및 allow/deny 그룹 목록을 조회합니다.
@@ -504,7 +508,7 @@ def update_app_permissions(
 @router.get("/instances", response_model=List[InstancePermissionItemRes], summary="전체 인스턴스 권한 설정 현황 목록 조회")
 def get_all_instance_permissions(
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(1))
+    current_user: User = Depends(check_groups_read)
 ):
     """
     모든 게시판 인스턴스(BoardConfig), 페이지 인스턴스(Page), 커스텀 단일 앱(AppRegistry)을

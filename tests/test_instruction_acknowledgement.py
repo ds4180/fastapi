@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from models.base import Base
 from models.user import User, UserProfile
 from models.alert import Alert
-from models.miniapp import MiniappItem
+from models.miniapp import MiniappItem, MiniappRead
 from core.notify import notify
 from domain.v1.miniapp.miniapp_crud import update_miniapp_item
 from domain.v1.miniapp.miniapp_schema import MiniappItemUpdate
@@ -27,6 +27,7 @@ def db_session():
     UserProfile.__table__.create(engine)
     Alert.__table__.create(engine)
     MiniappItem.__table__.create(engine)
+    MiniappRead.__table__.create(engine)
 
     Session = sessionmaker(bind=engine)
     session = Session()
