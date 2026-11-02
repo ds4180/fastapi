@@ -24,15 +24,16 @@ def get_user_miniapp_counts(db: Session, user_id: int) -> Dict[str, int]:
     - ALARM       : 대기 중인 알람 (status != 'COMPLETED')
     - TOTAL       : 위 5대 미결 항목의 총합 (상단 헤더 🔴 뱃지용)
     """
-    # 📌 현재 사원이 이미 확인(읽음) 서명한 전사 공지/지시 item_id 서브쿼리
+    # 📌 현재 사원이 이미 확인(읽음) 또는 삭제한 전사 공지/지시 item_id 서브쿼리
     read_item_ids_subquery = db.query(MiniappRead.item_id).filter(
         MiniappRead.user_id == user_id,
-        MiniappRead.status.in_(["READ", "CONFIRMED", "COMPLETED"])
+        MiniappRead.status.in_(["READ", "CONFIRMED", "COMPLETED", "DELETED"])
     ).subquery()
 
-    # 1. 알림 및 공지 (NOTIFICATION, NOTICE, URGENT_NOTICE 포괄)
+    # 1. 알림 및 공지 (NOTIFICATION, NOTICE, URGENT_NOTICE 포괄, DELETED 제외)
     noti_count = db.query(func.count(MiniappItem.id)).filter(
         MiniappItem.category.in_(["NOTIFICATION", "NOTICE", "URGENT_NOTICE"]),
+        MiniappItem.status != "DELETED",
         or_(
             and_(MiniappItem.receiver_id == user_id, MiniappItem.status == "PENDING"),
             and_(
@@ -43,9 +44,10 @@ def get_user_miniapp_counts(db: Session, user_id: int) -> Dict[str, int]:
         )
     ).scalar() or 0
 
-    # 2. 지시사항 (INSTRUCTION)
+    # 2. 지시사항 (INSTRUCTION, DELETED 제외)
     inst_count = db.query(func.count(MiniappItem.id)).filter(
         MiniappItem.category == "INSTRUCTION",
+        MiniappItem.status != "DELETED",
         or_(
             and_(MiniappItem.receiver_id == user_id, MiniappItem.status.notin_(["CONFIRMED", "COMPLETED"])),
             and_(
@@ -56,25 +58,25 @@ def get_user_miniapp_counts(db: Session, user_id: int) -> Dict[str, int]:
         )
     ).scalar() or 0
 
-    # 3. 메시징 (MESSAGE)
+    # 3. 메시징 (MESSAGE, DELETED 제외)
     msg_count = db.query(func.count(MiniappItem.id)).filter(
         MiniappItem.category == "MESSAGE",
         MiniappItem.receiver_id == user_id,
         MiniappItem.status == "PENDING"
     ).scalar() or 0
 
-    # 4. 메모 (MEMO)
+    # 4. 메모 (MEMO, DELETED 제외)
     memo_count = db.query(func.count(MiniappItem.id)).filter(
         MiniappItem.category == "MEMO",
         MiniappItem.sender_id == user_id,
-        MiniappItem.status != "COMPLETED"
+        MiniappItem.status.notin_(["COMPLETED", "DELETED"])
     ).scalar() or 0
 
-    # 5. 알람 (ALARM)
+    # 5. 알람 (ALARM, DELETED 제외)
     alarm_count = db.query(func.count(MiniappItem.id)).filter(
         MiniappItem.category == "ALARM",
         MiniappItem.sender_id == user_id,
-        MiniappItem.status != "COMPLETED"
+        MiniappItem.status.notin_(["COMPLETED", "DELETED"])
     ).scalar() or 0
 
     total = noti_count + inst_count + msg_count + memo_count + alarm_count
@@ -128,6 +130,8 @@ def get_user_miniapp_items(
             MiniappRead.user_id == user_id
         )
     ).filter(
+        MiniappItem.status != "DELETED",  # 🛡️ 관리자/작성자가 논리 삭제한 원본 제외
+        computed_status_expr != "DELETED",  # 🛡️ 사원이 본인 피드에서 삭제(숨김)한 아이템 제외
         or_(
             MiniappItem.receiver_id == user_id,
             MiniappItem.receiver_id.is_(None),
@@ -264,24 +268,72 @@ def update_miniapp_item(
 
 def delete_miniapp_item(db: Session, item_id: int, user: User) -> bool:
     """
-    미니앱 아이템 삭제:
-    - 일반 사원: 작성자 본인(sender_id == user.id) 또는 수신자 본인(receiver_id == user.id)만 삭제 가능
-    - 관리자(is_admin, rank >= 8, is_superuser): 전사 공지(sender_id/receiver_id is None) 및 시스템 알림 강제 삭제 가능
+    미니앱 아이템 Soft Delete (논리 삭제 표준 준수):
+    - 절대 물리 삭제(db.delete)를 수행하지 않고 이력과 무결성을 영구 보존합니다.
+    - 관리자가 이미 삭제해서 DB에 없거나 조회가 되지 않는 경우에도 에러 없이 자연스럽게 제외(True)합니다.
+    - 1. 관리자(rank >= 8): 원본 MiniappItem.status = 'DELETED' 처리 (전사 피드 비노출)
+    - 2. 일반 사원:
+         - 본인 작성 메모/알람, 본인 수신 메시지: MiniappItem.status = 'DELETED' 처리
+         - 전사 공지(receiver_id IS NULL): 원본은 유지하고 사원별 MiniappRead.status = 'DELETED' 기록 (해당 사원 피드에서만 제외)
     """
     item = db.query(MiniappItem).filter(MiniappItem.id == item_id).first()
+    # 🛡️ 이미 물리적으로 삭제되었거나 존재하지 않는 경우에도 성공 처리(피드에서 조용히 소거)
     if not item:
-        return False
+        return True
 
-    is_admin = (
-        getattr(user, "is_admin", False) or 
-        (getattr(user, "rank", 0) >= 8) or 
-        getattr(user, "is_superuser", False)
-    )
+    user_rank = user.rank() if callable(getattr(user, "rank", None)) else getattr(user, "rank", 0)
+    is_admin = int(user_rank or 0) >= 8
 
-    # 관리자가 아닌 일반 사원인 경우 권한 검증
-    if not is_admin and item.sender_id != user.id and item.receiver_id != user.id:
-        return False
+    from sqlalchemy.orm.attributes import flag_modified
+    now_iso = datetime.now().isoformat()
 
-    db.delete(item)
-    db.commit()
-    return True
+    # 1. 👑 관리자 권한 삭제: 원본 soft delete (모든 일반 피드에서 비노출)
+    if is_admin:
+        item.status = "DELETED"
+        payload = dict(item.extra_payload or {})
+        payload["deleted_at"] = now_iso
+        payload["deleted_by"] = user.id
+        payload["delete_type"] = "ADMIN_SOFT_DELETE"
+        item.extra_payload = payload
+        flag_modified(item, "extra_payload")
+        db.commit()
+        return True
+
+    # 2. 👤 일반 사원 삭제:
+    # 2-1. 본인이 작성자이거나 수신자인 1:1 아이템 (메모, 알람, 메시지) -> 원본 status를 DELETED로 변경
+    if item.sender_id == user.id or item.receiver_id == user.id:
+        item.status = "DELETED"
+        payload = dict(item.extra_payload or {})
+        payload["deleted_at"] = now_iso
+        payload["deleted_by"] = user.id
+        payload["delete_type"] = "USER_SOFT_DELETE"
+        item.extra_payload = payload
+        flag_modified(item, "extra_payload")
+        db.commit()
+        return True
+
+    # 2-2. 전사 공지/지시사항(receiver_id IS NULL)인 경우 -> 사원별 MiniappRead에 'DELETED' 기록
+    if item.receiver_id is None:
+        read_rec = db.query(MiniappRead).filter(
+            MiniappRead.item_id == item_id,
+            MiniappRead.user_id == user.id
+        ).first()
+
+        now_dt = datetime.now()
+        if not read_rec:
+            read_rec = MiniappRead(
+                item_id=item_id,
+                user_id=user.id,
+                status="DELETED",
+                confirmed_at=now_dt
+            )
+            db.add(read_rec)
+        else:
+            read_rec.status = "DELETED"
+            read_rec.confirmed_at = now_dt
+
+        db.commit()
+        return True
+
+    # 2-3. 타인의 1:1 아이템인 경우 삭제 불가
+    return False
