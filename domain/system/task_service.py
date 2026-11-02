@@ -152,6 +152,16 @@ def bootstrap_default_cron_tasks(db: Session) -> int:
             "cron_expression": "0 4 * * *", # 매일 새벽 04:00
             "tags": ["core", "media", "gc", "cron"],
             "desc": "미디어 임시 파일 및 삭제 자산 매일 새벽 04:00 정기 가비지 컬렉션"
+        },
+        {
+            "task_type": "CHECK_MINIAPP_ALARMS",
+            "unique_key": "cron:check_miniapp_alarms",
+            "payload": {},
+            "priority": 1, # 높은 우선순위 (실시간 알람)
+            "repeat_interval": 60, # 1분마다 (60초)
+            "cron_expression": None,
+            "tags": ["core", "miniapp", "alarm", "cron"],
+            "desc": "미니앱 알람(리마인더) 1분 주기 감시 및 백그라운드 Web Push / WebSocket 실시간 발송"
         }
     ]
 

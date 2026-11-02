@@ -257,6 +257,79 @@ async def handle_data_retention_gc(task: SystemTask, db: Session):
     task.progress_pct = 100
     return report
 
+@register_handler("CHECK_MINIAPP_ALARMS")
+async def handle_check_miniapp_alarms(task: SystemTask, db: Session):
+    """
+    [자율신경계 알람 스케줄러] 미니앱 예약 알람 1분 주기 감시 및 백그라운드 Web Push / WebSocket 실시간 발송
+    - target_time <= NOW() 이고 status == 'PENDING'인 ALARM 조회
+    - 대상 사원 브라우저로 백그라운드 Web Push 발송 (브라우저 창을 닫아도 모바일/PC OS 팝업 수신)
+    - 실시간 WebSocket 미니앱 갱신 신호 브로드캐스트 (접속 중인 화면 즉시 동기화)
+    - 중복 울림 방지를 위해 extra_payload['triggered_at'] 기록
+    """
+    from models.miniapp import MiniappItem
+    from domain.push.push_service import send_push_to_user
+    from domain.ws.ws_service import manager
+    from sqlalchemy.orm.attributes import flag_modified
+
+    now = datetime.now()
+
+    # 📌 target_time이 도래했으나 아직 울리지 않은 PENDING 상태의 ALARM 조회
+    pending_alarms = db.query(MiniappItem).filter(
+        MiniappItem.category == "ALARM",
+        MiniappItem.status == "PENDING",
+        MiniappItem.target_time.is_not(None),
+        MiniappItem.target_time <= now
+    ).all()
+
+    triggered_count = 0
+    for alarm in pending_alarms:
+        ep = dict(alarm.extra_payload or {})
+        # 이미 울린 알람은 건너뜀 (중복 발송 방지)
+        if ep.get("triggered_at"):
+            continue
+
+        target_user_id = alarm.receiver_id or alarm.sender_id
+        if not target_user_id:
+            continue
+
+        alarm_title = alarm.title or "리마인더 알람"
+        if not alarm_title.startswith("⏰"):
+            alarm_title = f"⏰ [리마인더] {alarm_title}"
+
+        # 1. 대상 사원에게 백그라운드 Web Push 발송 (브라우저 창 닫아도 OS 팝업 수신!)
+        try:
+            send_push_to_user(
+                user_id=target_user_id,
+                title=alarm_title,
+                body=alarm.content,
+                url=alarm.link or "/v1/pages/miniapps?tab=alarm",
+                db=db
+            )
+        except Exception as pe:
+            logger.warning(f"⚠️ [알람 푸시 실패] user={target_user_id}: {pe}")
+
+        # 2. 울림 완료 타임스탬프 기록 (중복 발송 방지)
+        ep["triggered_at"] = now.isoformat()
+        alarm.extra_payload = ep
+        flag_modified(alarm, "extra_payload")
+        triggered_count += 1
+
+    if triggered_count > 0:
+        db.commit()
+        # 3. 실시간 WebSocket 갱신 브로드캐스트 (접속 중인 화면 뱃지/목록 즉시 갱신)
+        try:
+            await manager.broadcast({
+                "type": "MINIAPP_UPDATE",
+                "category": "ALARM",
+                "triggered_count": triggered_count
+            })
+        except Exception as we:
+            logger.warning(f"⚠️ [알람 웹소켓 브로드캐스트 실패]: {we}")
+
+    logger.info(f"⏰ 미니앱 알람 정기 감시 완료: {triggered_count}건 발송 처리됨 (기준시각: {now.strftime('%H:%M:%S')})")
+    task.progress_pct = 100
+    return {"status": "finished", "triggered_count": triggered_count, "checked_at": now.isoformat()}
+
 # --- [핵심 엔진] 단일 태스크 처리기 & 워커 루프 ---
 
 async def process_next_task(db: Session, worker_id: str) -> bool:

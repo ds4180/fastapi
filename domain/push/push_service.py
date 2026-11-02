@@ -109,3 +109,47 @@ def send_push_to_all(title: str, body: str, url: str = "/", db: Session = None):
     finally:
         if own_session:
             db.close()
+
+
+def send_push_to_user(user_id: int, title: str, body: str, url: str = "/", db: Session = None):
+    """
+    [특정 사용자 타겟 Web Push 발송]
+    - 특정 사원(user_id)이 등록한 모든 브라우저 엔드포인트로 JSON 푸시를 발송합니다.
+    """
+    own_session = False
+    if db is None:
+        db = SessionLocal()
+        own_session = True
+
+    try:
+        subscriptions = db.query(PushSubscription).filter(PushSubscription.user_id == user_id).all()
+        if not subscriptions:
+            return {"sent": 0, "reason": "no_subscriptions"}
+
+        payload = json.dumps({
+            "title": title,
+            "body": body,
+            "url": url,
+            "icon": "/favicon.png",
+            "badge": "/favicon.png"
+        })
+
+        sent = 0
+        for sub in subscriptions:
+            try:
+                webpush(
+                    subscription_info={
+                        "endpoint": sub.endpoint,
+                        "keys": {"p256dh": sub.p256dh, "auth": sub.auth}
+                    },
+                    data=payload,
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims=VAPID_CLAIMS
+                )
+                sent += 1
+            except Exception as e:
+                print(f"Push failed for user {user_id} endpoint {sub.endpoint}: {e}")
+        return {"sent": sent}
+    finally:
+        if own_session:
+            db.close()

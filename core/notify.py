@@ -169,12 +169,18 @@ def notify(
         logger.warning(f"⚠️ [core.notify] WebSocket 브로드캐스트 실패 (무시됨): {e}")
 
     # --------------------------------------------------------------------------
-    # 4. 백그라운드 Web Push 발송 (Level >= 3 중요 공지 이상)
+    # 4. 백그라운드 Web Push 발송
+    # - 관리자 알림(Alert): extra_payload의 send_web_push 플래그(사용자 체크박스)를 절대적으로 준수
+    # - send_web_push가 False이거나 미지정인 경우, 레벨(L3~L5)과 무관하게 Web Push를 자동 발송하지 않음
     # --------------------------------------------------------------------------
-    if level >= 3:
+    should_send_push = False
+    if "send_web_push" in payload:
+        should_send_push = bool(payload["send_web_push"])
+
+    if should_send_push:
         try:
             from domain.push.push_service import send_push_to_all
-            push_title = title or ("🚨 [긴급 공지]" if level >= 4 else "📢 [업무 알림]")
+            push_title = title or ("🚨 [긴급 공지]" if level >= 4 else "📢 [사내 알림]")
             if background_tasks:
                 background_tasks.add_task(
                     send_push_to_all,

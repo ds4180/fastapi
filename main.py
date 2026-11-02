@@ -26,6 +26,10 @@ async def lifespan(app: FastAPI):
     # 0. 자율신경계 필수 정기 태스크 및 시스템 앱 자동 시드 (Bootstrap)
     try:
         from database import SessionLocal
+        from models.miniapp import MiniappRead
+        # 📌 [방안 B] 미니앱 1:N 확인 서명 테이블 자동 보증 (테이블 부재 시 자동 생성)
+        MiniappRead.__table__.create(bind=engine, checkfirst=True)
+
         from domain.system.task_service import bootstrap_default_cron_tasks
         from domain.system.app_service import bootstrap_system_apps
         from core.audit import register_security_audit_hook
@@ -41,6 +45,15 @@ async def lifespan(app: FastAPI):
             app_seed = bootstrap_system_apps(db)
             if app_seed["created"] > 0:
                 print(f"✨ 시스템 앱 {app_seed['created']}건이 성공적으로 등록되었습니다.")
+            
+            # 🧹 [과거 레거시 정화] 관제 분리 원칙에 따라 피드 내 과거 보안 경보 레코드 안전 삭제
+            from models.miniapp import MiniappItem
+            cleaned_alarms = db.query(MiniappItem).filter(
+                MiniappItem.title.like("%보안 경보%")
+            ).delete(synchronize_session=False)
+            if cleaned_alarms > 0:
+                db.commit()
+                print(f"🧹 피드 내 레거시 보안 경보 레코드 {cleaned_alarms}건이 영구 정화되었습니다.")
     except Exception as e:
         print(f"⚠️ 시스템 부트스트랩 오류: {e}")
 
@@ -280,7 +293,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
                 "status": 500,
                 "message": "서버 내부 처리 중 예기치 못한 장애가 발생했습니다.",
                 "request_id": req_id,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now().isoformat(),
             },
             # 🌟 프론트엔드 레거시 파서(err.detail) 하위 호환성을 위해 최상위 detail 제공
             "detail": "서버 내부 처리 중 예기치 못한 장애가 발생했습니다.",

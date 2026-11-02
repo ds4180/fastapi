@@ -69,7 +69,7 @@ from models.push import PushSubscription
 from models.audit import AuditLog, SENSITIVE_FIELDS
 
 # 📌 9. 전사 통합 미니앱 마이크로 텍스트 엔진
-from models.miniapp import MiniappItem
+from models.miniapp import MiniappItem, MiniappRead
 
 # 외부 노출 심볼 목록 (명시적 공개)
 __all__ = [
@@ -121,4 +121,5 @@ __all__ = [
     "AuditLog",
     "SENSITIVE_FIELDS",
     "MiniappItem",
+    "MiniappRead",
 ]

@@ -10,7 +10,7 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, BigInteger, Integer, String, Text, DateTime, ForeignKey, Index, JSON
+from sqlalchemy import Column, BigInteger, Integer, String, Text, DateTime, ForeignKey, Index, JSON, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from models.base import Base, TimestampMixin
@@ -62,6 +62,32 @@ class MiniappItem(Base, TimestampMixin):
     # 👥 관계 매핑
     sender = relationship("User", foreign_keys=[sender_id], backref="sent_miniapps")
     receiver = relationship("User", foreign_keys=[receiver_id], backref="received_miniapps")
+    reads = relationship("MiniappRead", back_populates="item", cascade="all, delete-orphan")
+
+
+class MiniappRead(Base, TimestampMixin):
+    """
+    [미니앱 전사/다중 공지 개별 수신 확인 서명 테이블 (miniapp_reads)]
+    
+    💡 방안 B 아키텍처:
+    - 전사 공지(receiver_id IS NULL)는 miniapp_items에 단 1건만 존재합니다.
+    - 사원들이 각자 [확인 완료] 또는 [지시 확인]을 누르면 이 테이블에 1인당 1건의 확인 서명이 기록됩니다.
+    - 이를 통해 원본 공지 데이터를 훼손하지 않고, 사원별 확인/미확인 상태를 완벽히 격리합니다.
+    """
+    __tablename__ = "miniapp_reads"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    item_id = Column(BigInteger().with_variant(Integer, "sqlite"), ForeignKey("miniapp_items.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    confirmed_at = Column(DateTime, default=datetime.now, nullable=False)
+    status = Column(String(20), default="READ", nullable=False)  # 'READ', 'CONFIRMED', 'COMPLETED'
+
+    item = relationship("MiniappItem", back_populates="reads")
+    user = relationship("User", backref="miniapp_read_records")
+
+    __table_args__ = (
+        UniqueConstraint("item_id", "user_id", name="uq_miniapp_read_user"),
+    )
 
 
 # 🔍 사용자별 미확인/미결 건수 조회를 위한 복합 인덱스

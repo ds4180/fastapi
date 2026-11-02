@@ -124,18 +124,22 @@ async def create_alert(
     db.refresh(db_alert)
 
     # 📱 [전역 통합 알림 단일화 core.notify 호출]
-    cat = alert_create.category or ("INSTRUCTION" if alert_create.position == "modal" else "NOTIFICATION")
+    cat = alert_create.category or ("INSTRUCTION" if alert_create.position == "modal" else "NOTICE")
+    category_label = "🚨 중요 공지" if cat == "URGENT_NOTICE" else ("📋 지시사항" if cat == "INSTRUCTION" else "📢 사내 공지")
+    
     target_uids = []
     if alert_create.target_users and alert_create.target_users.strip():
         for uid_s in alert_create.target_users.split(","):
             if uid_s.strip().isdigit():
                 target_uids.append(int(uid_s.strip()))
 
+    send_push_flag = bool(getattr(alert_create, "send_web_push", False))
+
     from core.notify import safe_notify
     safe_notify(
         db=db,
         category=cat,
-        title=f"[{cat}] 사내 공지/지시",
+        title=f"[{category_label}] {alert_create.message[:25]}..." if len(alert_create.message) > 25 else f"[{category_label}] {alert_create.message}",
         message=alert_create.message,
         sender=user,
         target_user_ids=target_uids if target_uids else None,
@@ -143,7 +147,11 @@ async def create_alert(
         level=alert_create.level,
         link=alert_create.redirect_url,
         background_tasks=background_tasks,
-        extra_payload={"alert_id": db_alert.id, "target_group": alert_create.target_group}
+        extra_payload={
+            "alert_id": db_alert.id,
+            "target_group": alert_create.target_group,
+            "send_web_push": send_push_flag
+        }
     )
 
     # 🔔 실시간 웹소켓 갱신 신호 브로드캐스트 (기존 레거시 팝업/토스트 화면 동기화)
@@ -198,47 +206,83 @@ def update_alert(db: Session, db_alert: Alert, alert_update: AlertUpdate) -> Ale
 
 def get_alert_acknowledgements(db: Session, alert_id: int) -> dict:
     """
-    [지시사항 양방향 수신 확인 현황 집계]
-    특정 Alert ID와 연결된 모든 MiniappItem을 조회하여 수신 확인 통계를 산출합니다.
+    [지시사항/공지 양방향 수신 확인 현황 집계 (방안 B 1:N 수신 확인 모델 연동)]
+    특정 Alert ID와 연결된 MiniappItem 및 MiniappRead 서명을 조회하여 수신 확인 통계를 산출합니다.
+    - 전사 공지(receiver_id IS NULL): MiniappRead 확인 서명 기록을 바탕으로 전체 사원 대비 확인/미확인 집계
+    - 그룹/개인 공지(receiver_id IS NOT NULL): 개별 할당된 MiniappItem의 status를 기반으로 집계
     """
-    from models.miniapp import MiniappItem
+    from models.miniapp import MiniappItem, MiniappRead
+    from models.alert import Alert
+
+    db_alert = db.query(Alert).filter(Alert.id == alert_id).first()
 
     # extra_payload에 alert_id가 저장된 미니앱 아이템 조회
-    all_items = db.query(MiniappItem).filter(
-        MiniappItem.receiver_id.is_not(None)
-    ).all()
+    all_items = db.query(MiniappItem).all()
+    alert_items = [
+        item for item in all_items
+        if (item.extra_payload or {}).get("alert_id") == alert_id
+    ]
 
-    alert_items = []
-    for item in all_items:
-        ep = item.extra_payload or {}
-        if ep.get("alert_id") == alert_id:
-            alert_items.append(item)
-
-    total_count = len(alert_items)
     confirmed_users = []
     pending_users = []
 
-    receiver_ids = [item.receiver_id for item in alert_items]
-    users_by_id = {}
-    if receiver_ids:
-        users = db.query(User).filter(User.id.in_(receiver_ids)).all()
-        users_by_id = {u.id: u for u in users}
+    # 1. 전사 공지(receiver_id is None)가 포함된 경우 (방안 B: MiniappRead 집계)
+    broadcast_item = next((item for item in alert_items if item.receiver_id is None), None)
 
-    for item in alert_items:
-        u = users_by_id.get(item.receiver_id)
-        u_info = {
-            "user_id": item.receiver_id,
-            "username": getattr(u, "username", f"user_{item.receiver_id}") if u else f"user_{item.receiver_id}",
-            "real_name": (getattr(u, "real_name", None) or getattr(u, "username", "사원")) if u else "사원",
-            "phone": getattr(u, "phone", None) if u else None,
-            "status": item.status,
-            "confirmed_at": (item.extra_payload or {}).get("confirmed_at")
-        }
+    if broadcast_item:
+        # 전사 활성 사원 목록 조회
+        all_users = db.query(User).filter(User.is_active == True).order_by(User.id.asc()).all()
+        if not all_users:
+            all_users = db.query(User).order_by(User.id.asc()).all()
 
-        if item.status in ("CONFIRMED", "COMPLETED"):
-            confirmed_users.append(u_info)
-        else:
-            pending_users.append(u_info)
+        # MiniappRead 서명 목록 조회
+        reads = db.query(MiniappRead).filter(
+            MiniappRead.item_id == broadcast_item.id,
+            MiniappRead.status.in_(["CONFIRMED", "COMPLETED", "READ"])
+        ).all()
+        reads_by_user = {r.user_id: r for r in reads}
+
+        for u in all_users:
+            read_rec = reads_by_user.get(u.id)
+            u_info = {
+                "user_id": u.id,
+                "username": getattr(u, "username", f"user_{u.id}"),
+                "real_name": getattr(u, "real_name", None) or getattr(u, "username", "사원"),
+                "phone": getattr(u, "phone", None),
+                "status": read_rec.status if read_rec else "PENDING",
+                "confirmed_at": read_rec.confirmed_at.isoformat() if read_rec and read_rec.confirmed_at else None
+            }
+            if read_rec:
+                confirmed_users.append(u_info)
+            else:
+                pending_users.append(u_info)
+
+        total_count = len(all_users)
+
+    # 2. 그룹 또는 특정 개인 지정 공지인 경우 (개별 MiniappItem 집계)
+    else:
+        total_count = len(alert_items)
+        receiver_ids = [item.receiver_id for item in alert_items if item.receiver_id is not None]
+        users_by_id = {}
+        if receiver_ids:
+            users = db.query(User).filter(User.id.in_(receiver_ids)).all()
+            users_by_id = {u.id: u for u in users}
+
+        for item in alert_items:
+            u = users_by_id.get(item.receiver_id)
+            u_info = {
+                "user_id": item.receiver_id,
+                "username": getattr(u, "username", f"user_{item.receiver_id}") if u else f"user_{item.receiver_id}",
+                "real_name": (getattr(u, "real_name", None) or getattr(u, "username", "사원")) if u else "사원",
+                "phone": getattr(u, "phone", None) if u else None,
+                "status": item.status,
+                "confirmed_at": (item.extra_payload or {}).get("confirmed_at")
+            }
+
+            if item.status in ("CONFIRMED", "COMPLETED", "READ"):
+                confirmed_users.append(u_info)
+            else:
+                pending_users.append(u_info)
 
     confirmed_count = len(confirmed_users)
     pending_count = len(pending_users)

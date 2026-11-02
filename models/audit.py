@@ -80,8 +80,8 @@ class AuditLog(Base):
     # 💻 접속 클라이언트 IP (IPv4 / IPv6)
     ip_address = Column(String(45), nullable=True)
 
-    # ⏱️ 발생 시각 (초/밀리초 타임스탬프)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    # ⏱️ 발생 시각 (KST 로컬 타임스탬프 단일화)
+    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
 
     # 🚀 고속 페이징 조회를 위한 복합 인덱스
     __table_args__ = (

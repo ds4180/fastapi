@@ -42,10 +42,11 @@ def get_miniapp_items(
     current_user: User = Depends(get_current_user)
 ):
     """
-    [미니앱 단일 액션 피드 목록 조회]
+    [미니앱 단일 액션 피드 목록 조회 (SQL 1:N 확인 서명 격리 반영)]
     로그인한 사원에게 할당된 알림, 지시사항, 메시지, 개인 메모를 최신순으로 반환합니다.
+    전사 공지(receiver_id IS NULL)는 MiniappRead 확인 서명 여부에 따라 사원별 status가 동적으로 결정됩니다.
     """
-    items = miniapp_crud.get_user_miniapp_items(
+    items_with_status = miniapp_crud.get_user_miniapp_items(
         db=db,
         user_id=current_user.id,
         category=category,
@@ -54,13 +55,17 @@ def get_miniapp_items(
         limit=limit
     )
 
-    # 발신자 이름 주입
+    # 사원별 격리된 상태 및 발신자 이름 주입
     res_list = []
-    for item in items:
+    for item, computed_status, confirmed_at in items_with_status:
         sender_name = None
         if item.sender:
             sender_name = getattr(item.sender, "name", None) or getattr(item.sender, "username", None)
-        
+
+        extra_payload = dict(item.extra_payload or {})
+        if confirmed_at and "confirmed_at" not in extra_payload:
+            extra_payload["confirmed_at"] = confirmed_at.isoformat() if hasattr(confirmed_at, "isoformat") else str(confirmed_at)
+
         item_dict = {
             "id": item.id,
             "sender_id": item.sender_id,
@@ -69,10 +74,10 @@ def get_miniapp_items(
             "category": item.category,
             "title": item.title,
             "content": item.content,
-            "status": item.status,
+            "status": computed_status,  # 🌟 사원별 계산된 격리 상태 반영!
             "target_time": item.target_time,
             "link": item.link,
-            "extra_payload": item.extra_payload or {},
+            "extra_payload": extra_payload,
             "created_at": item.created_at,
             "updated_at": item.updated_at,
         }
@@ -121,22 +126,29 @@ def update_miniapp_item(
 ):
     """
     [미니앱 상태 변경 (지시사항 완료, 메모 완료, 읽음 처리)]
+    - 전사 공지(receiver_id IS NULL)인 경우 MiniappRead 테이블에 현재 사원의 확인 서명을 기록하고 사원별 status를 반환합니다.
     """
-    item = miniapp_crud.update_miniapp_item(
+    res = miniapp_crud.update_miniapp_item(
         db=db,
         item_id=item_id,
         user_id=current_user.id,
         item_update=item_update
     )
-    if not item:
+    if not res:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="아이템을 찾을 수 없거나 수정 권한이 없습니다."
         )
 
+    item, computed_status, confirmed_at = res
+
     sender_name = None
     if item.sender:
         sender_name = getattr(item.sender, "name", None) or getattr(item.sender, "username", None)
+
+    extra_payload = dict(item.extra_payload or {})
+    if confirmed_at and "confirmed_at" not in extra_payload:
+        extra_payload["confirmed_at"] = confirmed_at.isoformat() if hasattr(confirmed_at, "isoformat") else str(confirmed_at)
 
     return miniapp_schema.MiniappItemResponse(
         id=item.id,
@@ -146,10 +158,10 @@ def update_miniapp_item(
         category=item.category,
         title=item.title,
         content=item.content,
-        status=item.status,
+        status=computed_status,
         target_time=item.target_time,
         link=item.link,
-        extra_payload=item.extra_payload or {},
+        extra_payload=extra_payload,
         created_at=item.created_at,
         updated_at=item.updated_at
     )
@@ -162,9 +174,9 @@ def delete_miniapp_item(
     current_user: User = Depends(get_current_user)
 ):
     """
-    [미니앱 아이템 삭제 (메모 삭제 등)]
+    [미니앱 아이템 삭제 (메모 삭제, 관리자 공지 강제 삭제)]
     """
-    success = miniapp_crud.delete_miniapp_item(db=db, item_id=item_id, user_id=current_user.id)
+    success = miniapp_crud.delete_miniapp_item(db=db, item_id=item_id, user=current_user)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
