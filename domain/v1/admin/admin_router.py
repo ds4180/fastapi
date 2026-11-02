@@ -102,6 +102,21 @@ def get_dashboard_summary(
     post_count = db.query(Post).count()
     app_count = db.query(AppRegistry).count()
 
+    # 6. 실시간 시스템/비즈니스 앱 권한 메타데이터 (AppRegistry 실시간 연동)
+    all_registered_apps = db.query(AppRegistry).all()
+    apps_meta = [
+        {
+            "app_id": a.app_id,
+            "name": a.name,
+            "min_read_rank": a.min_read_rank if a.min_read_rank is not None else 4,
+            "min_write_rank": a.min_write_rank if a.min_write_rank is not None else 4,
+            "allow_groups": a.allow_groups or [],
+            "deny_groups": a.deny_groups or [],
+            "is_active": a.is_active
+        }
+        for a in all_registered_apps
+    ]
+
     return {
         "admin_name": admin.real_name or admin.username,
         "task_engine": {
@@ -133,7 +148,9 @@ def get_dashboard_summary(
         "user_count": user_count,
         "board_count": board_count,
         "post_count": post_count,
-        "app_count": app_count
+        "app_count": app_count,
+        # 실시간 앱 권한 명부
+        "system_apps": apps_meta
     }
 
 # --- User Management (유저 관리 - admin_user_manage 거버넌스 연동) ---
