@@ -45,22 +45,22 @@ def _make_user(username: str, rank: int, primary_group=None, secondary_groups=No
 
 def test_system_apps_bootstrap_idempotency(db_session):
     """
-    [검증 1] 시스템 앱 17종 최초 부트스트랩 및 멱등성(재실행 시 중복 방지) 검증
+    [검증 1] 시스템 앱 18종 최초 부트스트랩 및 멱등성(재실행 시 중복 방지) 검증
     """
-    # 1회차: 17개 전수 생성
+    # 1회차: 18개 전수 생성
     result1 = bootstrap_system_apps(db_session)
-    assert result1["created"] == 17
+    assert result1["created"] == 18
     assert result1["skipped"] == 0
-    assert result1["total"] == 17
+    assert result1["total"] == 18
 
     # DB 적재 확인
     count = db_session.query(AppRegistry).filter(AppRegistry.app_id.like("admin_%")).count()
-    assert count == 17
+    assert count == 18
 
-    # 2회차: 중복 실행 시 모두 건너뜀 (created=0, skipped=17)
+    # 2회차: 중복 실행 시 모두 건너뜀 (created=0, skipped=18)
     result2 = bootstrap_system_apps(db_session)
     assert result2["created"] == 0
-    assert result2["skipped"] == 17
+    assert result2["skipped"] == 18
 
 
 def test_granular_permission_delegation_to_operations_group(db_session):

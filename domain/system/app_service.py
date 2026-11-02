@@ -15,8 +15,20 @@ from models.system import AppRegistry
 
 logger = logging.getLogger("app_service")
 
-# 🏛️ 시스템 앱 17종 전수 정의 (app_id는 모두 admin_ 접두사 사용)
+# 🏛️ 시스템 앱 18종 전수 정의 (app_id는 모두 admin_ 접두사 사용)
 DEFAULT_SYSTEM_APPS = [
+    {
+        "app_id": "admin_dashboard",
+        "name": "관리자 관제센터 대시보드",
+        "title": "관리자 메인 종합 관제탑",
+        "description": "시스템 자율신경계 태스크, 관제 통계 및 전사 앱 내비게이션 대시보드",
+        "frontend_route": "/v1/admin",
+        "icon_default": "mdi:view-dashboard-outline",
+        "min_read_rank": 4,
+        "min_write_rank": 4,
+        "allow_groups": [],
+        "deny_groups": [],
+    },
     {
         "app_id": "admin_alerts",
         "name": "알림 관리",

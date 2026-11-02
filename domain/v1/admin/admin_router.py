@@ -28,7 +28,7 @@ router = APIRouter(
 API_VERSION_PREFIX = "/v1"
 
 # 🏛️ AppRegistry 거버넌스 연동 시스템 앱별 전용 인가 가드 (실시간 4단계 권한 통일)
-check_admin = check_rank(required_rank=4) # 대시보드 및 공통 관리자 폴백
+check_admin = require_app_permission("admin_dashboard", action="read") # 대시보드 관제센터 전용 거버넌스 가드
 check_user_admin = require_app_permission("admin_user_manage")
 check_app_admin = require_app_permission("admin_apps")
 check_menu_admin = require_app_permission("admin_menu")
