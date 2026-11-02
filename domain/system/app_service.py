@@ -15,13 +15,13 @@ from models.system import AppRegistry
 
 logger = logging.getLogger("app_service")
 
-# 🏛️ 시스템 앱 18종 전수 정의 (app_id는 모두 admin_ 접두사 사용)
+# 🏛️ 시스템 앱 18종 전수 정의 (app_id는 모두 admin_ 접두사 사용, /admin/+page.svelte 공식 명칭과 완전 동기화)
 DEFAULT_SYSTEM_APPS = [
     {
         "app_id": "admin_dashboard",
-        "name": "관리자 관제센터 대시보드",
-        "title": "관리자 메인 종합 관제탑",
-        "description": "시스템 자율신경계 태스크, 관제 통계 및 전사 앱 내비게이션 대시보드",
+        "name": "매니져 페이지",
+        "title": "매니져 페이지",
+        "description": "시스템 전체 현황 통계, 시스템 코어 및 비즈니스 앱 통합 관제탑",
         "frontend_route": "/v1/admin",
         "icon_default": "mdi:view-dashboard-outline",
         "min_read_rank": 4,
@@ -31,11 +31,11 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_alerts",
-        "name": "알림 관리",
-        "title": "전사 알림 및 발송 관제",
-        "description": "전사 공지 알림 발송, 알림 템플릿 관리 및 실시간 발송 이력 모니터링",
+        "name": "알림·지시 관리",
+        "title": "알림·지시 관리",
+        "description": "전역/경로별 상단 공지 배너 및 중앙 모달 알림 생성·배포 (운영 위임 가능)",
         "frontend_route": "/v1/admin/alerts",
-        "icon_default": "mdi:bell-ring-outline",
+        "icon_default": "mdi:bell-cog-outline",
         "min_read_rank": 4,
         "min_write_rank": 4,
         "allow_groups": [],
@@ -43,11 +43,11 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_media",
-        "name": "미디어 관제",
-        "title": "파일 자산 및 스토리지 관제",
-        "description": "업로드된 미디어 자산 현황, 용량 모니터링 및 파일 무결성 관리",
+        "name": "파일·사진 관리",
+        "title": "파일·사진 관리",
+        "description": "전체 업로드 파일 자산 모니터링 및 스토리지 용량 관리 (운영 위임 가능)",
         "frontend_route": "/v1/admin/media",
-        "icon_default": "mdi:folder-multiple-image",
+        "icon_default": "mdi:database-cog-outline",
         "min_read_rank": 4,
         "min_write_rank": 4,
         "allow_groups": [],
@@ -55,11 +55,11 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_target_groups",
-        "name": "메시징 타겟 그룹",
-        "title": "동적·정적 메시징 타겟 관리",
-        "description": "오늘 근무자, 휴무자, 노선별 운전원 등 실시간 메시징 타겟 그룹 조회 및 갱신",
+        "name": "임시 그룹 관리",
+        "title": "임시 그룹 관리",
+        "description": "알림·메시지 발송을 위한 기사 노선별/직급별 동적 그룹 필터링 및 연산",
         "frontend_route": "/v1/admin/target-groups",
-        "icon_default": "mdi:account-group-outline",
+        "icon_default": "mdi:bullhorn-outline",
         "min_read_rank": 4,
         "min_write_rank": 4,
         "allow_groups": [],
@@ -67,9 +67,9 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_pushs",
-        "name": "푸시 발송 관리",
-        "title": "모바일 웹 푸시 발송",
-        "description": "Web Push 구독자 대상 긴급 메시지 및 프로모션 푸시 발송",
+        "name": "푸시·구독 관리",
+        "title": "푸시·구독 관리",
+        "description": "모바일/PC Web Push 활성 구독 기기 현황 모니터링, 무효 구독 정리 및 전사 푸시 발송",
         "frontend_route": "/v1/admin/pushs",
         "icon_default": "mdi:cellphone-message",
         "min_read_rank": 4,
@@ -79,11 +79,11 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_dispatch",
-        "name": "배차 운영 관리",
-        "title": "일일 노선 배차표 관제",
-        "description": "버스 노선별 일일 배차표 편성, 기사 배정 및 운행 확정 관리",
+        "name": "차량 배차 관리",
+        "title": "차량 배차 관리",
+        "description": "실시간 노선별 차량 투입, 기사 배정 및 일일 운행 시간표 조율",
         "frontend_route": "/v1/admin/dispatch",
-        "icon_default": "mdi:bus-clock",
+        "icon_default": "mdi:bus-multiple",
         "min_read_rank": 4,
         "min_write_rank": 4,
         "allow_groups": [],
@@ -92,10 +92,10 @@ DEFAULT_SYSTEM_APPS = [
     {
         "app_id": "admin_route_master",
         "name": "노선 마스터 관리",
-        "title": "운행 노선 및 정류장 마스터",
-        "description": "시내/시외 버스 노선, 정류장 경유지 및 정기 운행 시간표 관리",
+        "title": "노선 마스터 관리",
+        "description": "정규 및 임시 노선의 기준 버전 도면 및 회차 시간표 통합 관리 (배차 앱 연동)",
         "frontend_route": "/v1/admin/route_master",
-        "icon_default": "mdi:map-marker-path",
+        "icon_default": "mdi:bus-clock",
         "min_read_rank": 4,
         "min_write_rank": 4,
         "allow_groups": [],
@@ -103,11 +103,11 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_dayoff",
-        "name": "근태·휴무 관리",
-        "title": "기사 연차 및 휴무 승인 관제",
-        "description": "운전원 근태 및 연차/휴무 신청 접수, 승인·반려 및 캘린더 관리",
+        "name": "휴무(결근계) 관리",
+        "title": "휴무(결근계) 관리",
+        "description": "직원 및 승무원의 연차/휴무 신청 내역 승인·반려 관제",
         "frontend_route": "/v1/admin/dayoff",
-        "icon_default": "mdi:calendar-account-outline",
+        "icon_default": "mdi:calendar-check-outline",
         "min_read_rank": 4,
         "min_write_rank": 4,
         "allow_groups": [],
@@ -115,9 +115,9 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_boards",
-        "name": "게시판 마스터 관리",
-        "title": "전사 게시판 인스턴스 설정",
-        "description": "사내 게시판 생성, 슬러그 지정 및 게시판별 읽기/쓰기 랭크 설정",
+        "name": "게시판 인스턴스 관리",
+        "title": "게시판 인스턴스 관리",
+        "description": "추상화 다중 게시판(공지, 자유 등) 슬러그 생성 및 레이아웃 정책 설정",
         "frontend_route": "/v1/admin/boards",
         "icon_default": "mdi:clipboard-text-outline",
         "min_read_rank": 4,
@@ -127,9 +127,9 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_pages",
-        "name": "페이지 빌더 관리",
-        "title": "정적/동적 안내 페이지 빌더",
-        "description": "공지성 고정 페이지, 회사 소개, 이용약관 등 정적 페이지 관리",
+        "name": "페이지 엔진 관리",
+        "title": "페이지 엔진 관리",
+        "description": "DB 기반 고정 콘텐츠 다중 페이지 인스턴스 생성 및 게시 기간 제어",
         "frontend_route": "/v1/admin/pages",
         "icon_default": "mdi:file-document-edit-outline",
         "min_read_rank": 4,
@@ -139,11 +139,11 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_observability",
-        "name": "통합 관제 & 감사로그",
-        "title": "보안 침해 및 실시간 세션 관제",
-        "description": "실시간 사용자 세션 추적, 악성 세션 강제 킥아웃 및 보안/에러 감사로그 분석",
+        "name": "접속 기록·감사 로그",
+        "title": "접속 기록·감사 로그",
+        "description": "실시간 세션 추적·강제추방, 4대 감사로그(접근/도메인Diff/장애/보안) 전사 관제",
         "frontend_route": "/v1/admin/observability",
-        "icon_default": "mdi:shield-alert-outline",
+        "icon_default": "mdi:shield-check-outline",
         "min_read_rank": 8,
         "min_write_rank": 8,
         "allow_groups": [],
@@ -151,11 +151,11 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_user_manage",
-        "name": "사용자·직급 관리",
-        "title": "계정 승강 및 직급/그룹 지정",
-        "description": "신규 사원 계정 발급, 권한 랭크 승강(Lv.0~9) 및 주/부그룹 편성",
+        "name": "사용자 랭크 관리",
+        "title": "사용자 랭크 관리",
+        "description": "회원 권한 등급(rank_level 0~9) 조정 및 주그룹/부그룹 소속 관리",
         "frontend_route": "/v1/admin/user-manage",
-        "icon_default": "mdi:account-cog-outline",
+        "icon_default": "mdi:account-group-outline",
         "min_read_rank": 8,
         "min_write_rank": 8,
         "allow_groups": [],
@@ -163,9 +163,9 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_group_manage",
-        "name": "조직·권한 통제소",
-        "title": "주/부그룹 마스터 및 인스턴스 권한 배분",
-        "description": "조직 주/부그룹 코드 관리, 비즈니스 인스턴스 및 시스템 앱 권한 배분 관제",
+        "name": "그룹·권한 관리",
+        "title": "그룹·권한 관리",
+        "description": "주/부그룹 마스터 및 인스턴스/시스템 앱 독립 권한 배분 관제탑",
         "frontend_route": "/v1/admin/group-manage",
         "icon_default": "mdi:shield-account-outline",
         "min_read_rank": 9,
@@ -175,9 +175,9 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_tasks",
-        "name": "태스크 & 크론 워커",
-        "title": "자율신경계 비동기 태스크 스케줄러",
-        "description": "백그라운드 비동기 태스크 큐 및 자율 주기 Cron 스케줄러 상태 모니터링/제어",
+        "name": "예약 작업 관리",
+        "title": "예약 작업 관리",
+        "description": "비동기 백그라운드 작업 큐 상태 모니터링 및 자율신경계 스케줄러 제어",
         "frontend_route": "/v1/admin/tasks",
         "icon_default": "mdi:robot-industrial",
         "min_read_rank": 8,
@@ -187,9 +187,9 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_config",
-        "name": "시스템 환경설정",
-        "title": "전역 시스템 설정 및 Watchdog 경보",
-        "description": "시스템 캐시/세션 보존 주기(GC) 및 실시간 이상 징후 자동 경보(Watchdog) 기준 설정",
+        "name": "환경설정",
+        "title": "환경설정",
+        "description": "글로벌 환경 변수, 데이터 보존 주기(GC) 및 Watchdog 이상 경보 제어",
         "frontend_route": "/v1/admin/config",
         "icon_default": "mdi:tune-vertical",
         "min_read_rank": 8,
@@ -199,11 +199,11 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_apps",
-        "name": "앱 레지스트리 관리",
-        "title": "플러그인 및 앱 등록 마스터",
-        "description": "플러그인 및 신규 애플리케이션 등록, 메타데이터 스키마 관리",
+        "name": "앱 설치 등록",
+        "title": "앱 설치 등록",
+        "description": "INSTANCE / CUSTOM / SYSTEM 앱 엔진 등록 및 메타데이터·권한 관리",
         "frontend_route": "/v1/admin/apps",
-        "icon_default": "mdi:apps-box",
+        "icon_default": "mdi:apps",
         "min_read_rank": 9,
         "min_write_rank": 9,
         "allow_groups": [],
@@ -211,9 +211,9 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_menu",
-        "name": "메뉴 트리 관리",
-        "title": "내비게이션 메뉴 구조 관리",
-        "description": "사이드바 및 글로벌 내비게이션 메뉴 트리 구조 및 노출 권한 관리",
+        "name": "메뉴 설정",
+        "title": "메뉴 설정",
+        "description": "시스템 전체 내비게이션 트리 및 앱 연결·접근 권한 구조 편집",
         "frontend_route": "/v1/admin/menu",
         "icon_default": "mdi:menu-open",
         "min_read_rank": 8,
@@ -223,9 +223,9 @@ DEFAULT_SYSTEM_APPS = [
     },
     {
         "app_id": "admin_services",
-        "name": "마이크로서비스 엔진",
-        "title": "레고형 마이크로서비스 엔진 레지스트리",
-        "description": "댓글, 첨부파일 등 마이크로서비스 엔진 조립 및 서비스 인스턴스 제어",
+        "name": "서비스 마스터 (Add-on)",
+        "title": "서비스 마스터 (Add-on)",
+        "description": "INSTANCE 및 CUSTOM 앱에 애드온(Add-on) 결합하는 레고형 서비스 번들 관리",
         "frontend_route": "/v1/admin/services",
         "icon_default": "mdi:toy-brick-outline",
         "min_read_rank": 9,
@@ -239,16 +239,37 @@ DEFAULT_SYSTEM_APPS = [
 def bootstrap_system_apps(db: Session) -> dict:
     """
     [시스템 앱 자율 부트스트랩 엔진]
-    - DB에 없는 17종 시스템 앱(`admin_*`)을 멱등(Idempotent)하게 자동 등록합니다.
-    - 기존에 등록된 앱은 건너뛰어, 관리자가 설정한 커스텀 권한(allow/deny_groups, 랭크)을 보존합니다.
+    - DB에 없는 18종 시스템 앱(`admin_*`)을 멱등(Idempotent)하게 자동 등록합니다.
+    - 기존에 등록된 앱의 아이콘 및 공식 명칭(title, name, description)을 안전하게 동기화합니다.
     """
     created_count = 0
+    updated_count = 0
     skipped_count = 0
 
     for app_meta in DEFAULT_SYSTEM_APPS:
         existing = db.query(AppRegistry).filter(AppRegistry.app_id == app_meta["app_id"]).first()
         if existing:
-            skipped_count += 1
+            updated = False
+            # 기본 아이콘이 변경된 경우 안전하게 동기화 보정
+            if app_meta.get("icon_default") and existing.icon_default != app_meta["icon_default"]:
+                existing.icon_default = app_meta["icon_default"]
+                updated = True
+            # 제목(title) 또는 명칭(name)이 변경된 경우 동기화 보정
+            if app_meta.get("title") and existing.title != app_meta["title"]:
+                existing.title = app_meta["title"]
+                updated = True
+            if app_meta.get("name") and existing.name != app_meta["name"]:
+                existing.name = app_meta["name"]
+                updated = True
+            if app_meta.get("description") and existing.description != app_meta["description"]:
+                existing.description = app_meta["description"]
+                updated = True
+
+            if updated:
+                db.commit()
+                updated_count += 1
+            else:
+                skipped_count += 1
             continue
 
         new_app = AppRegistry(
@@ -268,14 +289,15 @@ def bootstrap_system_apps(db: Session) -> dict:
         db.add(new_app)
         created_count += 1
 
-    if created_count > 0:
+    if created_count > 0 or updated_count > 0:
         db.commit()
-        logger.info(f"✨ [AppService] 시스템 앱 {created_count}개 자동 등록 완료 (기존 {skipped_count}개 보존)")
+        logger.info(f"✨ [AppService] 시스템 앱 {created_count}개 생성, {updated_count}개 타이틀 동기화 완료 (기존 {skipped_count}개 유지)")
     else:
         logger.info(f"🛡️ [AppService] 시스템 앱 {len(DEFAULT_SYSTEM_APPS)}개 모두 최신 상태 유지 (변경 없음)")
 
     return {
         "created": created_count,
+        "updated": updated_count,
         "skipped": skipped_count,
         "total": len(DEFAULT_SYSTEM_APPS)
     }

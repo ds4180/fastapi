@@ -200,13 +200,36 @@ def update_user_rank(
 @router.get("/apps", response_model=List[admin_schema.AppRegistrySchema])
 def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_app_admin)):
     """시스템에 등록된 모든 App 엔진 목록 조회 (관리자용)"""
-    # 레거시 'STATIC' 값을 표준 'CUSTOM'으로 자동 정규화 동기화
+    from domain.system.app_service import DEFAULT_SYSTEM_APPS
+
+    # 1. 레거시 'STATIC' 값을 표준 'CUSTOM'으로 자동 정규화 동기화
     legacy_apps = db.query(AppRegistry).filter(AppRegistry.app_type == "STATIC").all()
     if legacy_apps:
         for app in legacy_apps:
             app.app_type = "CUSTOM"
         db.commit()
-    return db.query(AppRegistry).order_by(AppRegistry.app_id).all()
+
+    # 2. 시스템 앱의 공식 명칭(title, name, icon) 실시간 동기화 보정
+    sys_map = {a["app_id"]: a for a in DEFAULT_SYSTEM_APPS}
+    all_apps = db.query(AppRegistry).order_by(AppRegistry.app_id).all()
+    needs_commit = False
+    for app in all_apps:
+        meta = sys_map.get(app.app_id)
+        if meta:
+            if meta.get("title") and app.title != meta["title"]:
+                app.title = meta["title"]
+                needs_commit = True
+            if meta.get("name") and app.name != meta["name"]:
+                app.name = meta["name"]
+                needs_commit = True
+            if meta.get("icon_default") and app.icon_default != meta["icon_default"]:
+                app.icon_default = meta["icon_default"]
+                needs_commit = True
+    if needs_commit:
+        db.commit()
+        all_apps = db.query(AppRegistry).order_by(AppRegistry.app_id).all()
+
+    return all_apps
 
 @router.get("/apps/{app_id}", response_model=admin_schema.AppRegistrySchema)
 def get_app_detail(app_id: str, db: Session = Depends(get_db)):
@@ -312,13 +335,21 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
         elif app_type == "APP":
             app_type = "INSTANCE"
 
-        # 1) SYSTEM 앱이거나 관리자 화면 모드(-1)인 경우 -> 무조건 /v1/admin/{app_id}
+        # 1) SYSTEM 앱이거나 관리자 화면 모드(-1)인 경우 -> AppRegistry frontend_route 최우선 적용
         if menu.link_type == "SYSTEM" or app_type == "SYSTEM" or instance_id == "-1":
-            return f"{API_VERSION_PREFIX}/admin/{menu.app_id}"
+            if db_app and db_app.frontend_route:
+                return db_app.frontend_route
+            clean_app_id = menu.app_id.replace("admin_", "")
+            if clean_app_id in ["dashboard", ""]:
+                return f"{API_VERSION_PREFIX}/admin"
+            return f"{API_VERSION_PREFIX}/admin/{clean_app_id}"
             
         # 2) CUSTOM 앱인 경우 (추상화 인스턴스 제외 단일 앱) -> /v1/custom/{app_id}
         if menu.link_type == "CUSTOM" or app_type == "CUSTOM":
-            return f"{API_VERSION_PREFIX}/custom/{menu.app_id}"
+            if db_app and db_app.frontend_route:
+                return db_app.frontend_route
+            clean_app_id = menu.app_id.replace("custom_", "")
+            return f"{API_VERSION_PREFIX}/custom/{clean_app_id}"
 
         # 3) INSTANCE 앱인 경우 (기본 추상화 다중 인스턴스 앱) -> /v1/app/{app_id}/{slug}
         prefix = f"{API_VERSION_PREFIX}/app"
@@ -421,6 +452,16 @@ def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_men
         for lm in legacy_menus:
             lm.link_type = "INSTANCE"
         db.commit()
+
+    # SYSTEM 메뉴 또는 잘못된 admin_admin_* 주소 자가치유 보정
+    broken_menus = db.query(Menu).filter(
+        (Menu.link_type == "SYSTEM") | (Menu.external_url.like("%/admin/admin_%"))
+    ).all()
+    if broken_menus:
+        for bm in broken_menus:
+            bm.external_url = resolve_menu_url(bm, db)
+        db.commit()
+
     root_menus = db.query(Menu).options(joinedload(Menu.sub_menus)).filter(Menu.parent_id == None).order_by(Menu.order).all()
     return filter_menu_tree(root_menus, admin, db, bypass_auth=True)
 
@@ -443,6 +484,12 @@ def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db),
     db.add(db_menu)
     db.commit()
     db.refresh(db_menu)
+
+    # 링크 타입이 엔진 기반인 경우 정규화된 URL 동기화 저장
+    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP"]:
+        db_menu.external_url = resolve_menu_url(db_menu, db)
+        db.commit()
+        db.refresh(db_menu)
     
     # 응답 시 slug가 원래 요청에 있었다면 slug로 복구
     result = admin_schema.MenuSchema.model_validate(db_menu)
@@ -473,6 +520,12 @@ def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = De
         setattr(db_menu, key, value)
     db.commit()
     db.refresh(db_menu)
+
+    # 링크 타입이 엔진 기반인 경우 정규화된 URL 동기화 저장
+    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP"]:
+        db_menu.external_url = resolve_menu_url(db_menu, db)
+        db.commit()
+        db.refresh(db_menu)
     
     result = admin_schema.MenuSchema.model_validate(db_menu)
     if isinstance(original_instance_id, str):
