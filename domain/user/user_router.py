@@ -42,6 +42,7 @@ from core.deps import (
     check_rank,
     check_root,
     check_permission,
+    require_app_permission,
 )
 
 # 📌 외부 라우터들의 하위 호환성을 위해 Re-export 등록
@@ -53,6 +54,7 @@ __all__ = [
     "check_rank",
     "check_root",
     "check_permission",
+    "require_app_permission",
 ]
 
 router = APIRouter(prefix="/users", tags=["Users"])

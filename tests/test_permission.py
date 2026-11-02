@@ -14,8 +14,25 @@
 4. 앱의 읽기/쓰기 랭킹과 사용자 랭킹(0~9) 비교 (>, <, ==, >=, <=)
 """
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from models.base import Base
 from models import User, UserProfile, AppRegistry
 from core.permission import evaluate_permission, can_access_app, compare_rank, extract_groups_for_action
+
+
+@pytest.fixture
+def db_session():
+    """인메모리 SQLite 격리 테스트 DB 세션"""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def _make_user(username: str, rank: int, primary_group=None, secondary_groups=None) -> User:
@@ -198,3 +215,59 @@ def test_step2_action_dict_mode_deny():
 
     # 쓰기는 deny_groups["write"]에 수습기사가 있으므로 랭킹(2 >= 2)과 무관하게 즉시 차단!
     assert evaluate_permission(user=apprentice, action="write", **app_perms) is False
+
+
+def test_require_app_permission_guard(db_session):
+    """
+    [신규 1단계 가드 검증: require_app_permission]
+    - 랭크 8 이상 요구 앱('admin_tasks')에 랭크 2 사원이 접근하면 AccessDeniedError 발생
+    - 랭크 9(root) 또는 랭크 8 관리자는 정상 통과
+    """
+    import pytest
+    from core.deps import require_app_permission
+    from core.exceptions import AccessDeniedError
+
+    # 가상 DB에 앱 등록
+    app = AppRegistry(
+        app_id="test_admin_tasks",
+        name="태스크 관리",
+        min_read_rank=8,
+        min_write_rank=8,
+        allow_groups=[],
+        deny_groups=[]
+    )
+    db_session.add(app)
+    db_session.commit()
+
+    guard_read = require_app_permission("test_admin_tasks", action="read")
+
+    # 1. 랭크 2 사원 접근 시 AccessDeniedError 발생
+    low_rank_user = _make_user("staff_low", rank=2)
+    with pytest.raises(AccessDeniedError):
+        guard_read(current_user=low_rank_user, db=db_session)
+
+    # 2. 랭크 8 관리자 접근 시 정상 통과
+    admin_user = _make_user("admin_high", rank=8)
+    passed_user = guard_read(current_user=admin_user, db=db_session)
+    assert passed_user.username == "admin_high"
+
+
+def test_extract_all_groups_from_spec():
+    """
+    [JSONB 듀얼 그룹 추출기 검증]
+    - 리스트 및 딕셔너리 규격에서 'read', 'write' 키가 아닌 실제 그룹명만 정확히 추출하는지 검증
+    """
+    from domain.v1.admin.auth_group_router import extract_all_groups_from_spec
+
+    # 1. 단순 리스트 모드
+    spec_list = ["운수팀", "배차담당"]
+    assert extract_all_groups_from_spec(spec_list) == {"운수팀", "배차담당"}
+
+    # 2. 딕셔너리 모드
+    spec_dict = {"read": ["운수1팀", "운수2팀"], "write": ["배차담당"], "all": ["기획실"]}
+    assert extract_all_groups_from_spec(spec_dict) == {"운수1팀", "운수2팀", "배차담당", "기획실"}
+
+    # 3. 빈 값 및 None 모드
+    assert extract_all_groups_from_spec(None) == set()
+    assert extract_all_groups_from_spec([]) == set()
+    assert extract_all_groups_from_spec({}) == set()

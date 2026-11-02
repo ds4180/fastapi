@@ -6,7 +6,13 @@ from models import (
     DayOff, Page, ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance,
     RouteMaster, RouteTimetable, SystemTask, AuditLog, UserSession, MiniappItem
 )
-from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker, check_rank
+from core.deps import (
+    get_current_user,
+    get_current_user_optional,
+    RankChecker,
+    check_rank,
+    require_app_permission,
+)
 from core.permission import can_access_app, evaluate_permission
 from domain.v1.admin import admin_schema
 from typing import List, Optional, Any
@@ -21,8 +27,15 @@ router = APIRouter(
 
 API_VERSION_PREFIX = "/v1"
 
-# 편리한 최고 관리자 체크 의존성 (Rank 4 기준)
-check_admin = check_rank(required_rank=4)
+# 🏛️ AppRegistry 거버넌스 연동 시스템 앱별 전용 인가 가드
+check_admin = check_rank(required_rank=4) # 대시보드 및 공통 관리자 폴백
+check_user_admin = require_app_permission("admin_user_manage")
+check_app_admin = require_app_permission("admin_apps")
+check_menu_admin = require_app_permission("admin_menu")
+check_board_admin = require_app_permission("admin_boards")
+check_service_admin = require_app_permission("admin_services")
+check_dayoff_admin = require_app_permission("admin_dayoff")
+check_config_admin = require_app_permission("admin_config")
 
 @router.get("/dashboard")
 def get_dashboard_summary(
@@ -114,12 +127,12 @@ def get_dashboard_summary(
         "app_count": app_count
     }
 
-# --- User Management (유저 관리) ---
+# --- User Management (유저 관리 - admin_user_manage 거버넌스 연동) ---
 
 @router.get("/users", response_model=List[admin_schema.UserAdminSchema])
 def list_users(
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_user_admin)
 ):
     """전체 유저 목록 조회 (관리자용)"""
     return db.query(User).options(joinedload(User.profile)).all()
@@ -128,7 +141,7 @@ def list_users(
 def get_user_detail(
     user_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_user_admin)
 ):
     """유저 상세 정보 조회"""
     user = db.query(User).options(joinedload(User.profile)).filter(User.id == user_id).first()
@@ -141,7 +154,7 @@ def update_user_rank(
     user_id: int,
     rank_in: admin_schema.UserRankUpdate,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_user_admin)
 ):
     """유저의 Rank 등급 및 승인 상태 수정"""
     user = db.query(User).filter(User.id == user_id).first()
@@ -156,10 +169,10 @@ def update_user_rank(
     db.commit()
     return {"message": "success", "username": user.username, "new_rank": rank_in.rank_level}
 
-# --- [v1.5] App Registry 관리 API (시스템 확장성 핵심) ---
+# --- [v1.5] App Registry 관리 API (admin_apps 거버넌스 연동) ---
 
 @router.get("/apps", response_model=List[admin_schema.AppRegistrySchema])
-def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_app_admin)):
     """시스템에 등록된 모든 App 엔진 목록 조회 (관리자용)"""
     # 레거시 'STATIC' 값을 표준 'CUSTOM'으로 자동 정규화 동기화
     legacy_apps = db.query(AppRegistry).filter(AppRegistry.app_type == "STATIC").all()
@@ -185,7 +198,7 @@ def get_app_detail(app_id: str, db: Session = Depends(get_db)):
 def create_app_registry(
     app_in: admin_schema.AppRegistryCreate, 
     db: Session = Depends(get_db), 
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_app_admin)
 ):
     """신규 App 엔진 및 메타데이터 등록"""
     # 중복 ID 체크
@@ -208,7 +221,7 @@ def update_app_registry(
     app_id: str, 
     app_in: admin_schema.AppRegistryUpdate, 
     db: Session = Depends(get_db), 
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_app_admin)
 ):
     """App 엔진 메타데이터 수정 (권한, 경로, 관리자 권한 위임 등)"""
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
@@ -227,7 +240,7 @@ def update_app_registry(
     return db_app
 
 @router.delete("/apps/{app_id}")
-def delete_app(app_id: str, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def delete_app(app_id: str, db: Session = Depends(get_db), admin: User = Depends(check_app_admin)):
     """앱 등록 제거 (SYSTEM 앱은 삭제 불가)"""
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not db_app:
@@ -375,8 +388,8 @@ def get_public_menus(
     return filtered_menus
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])
-def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
-    """관리자용 전체 메뉴 트리 (Slug 변환 및 레거시 APP -> INSTANCE 자동 동기화 포함)"""
+def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_menu_admin)):
+    """관리자용 전체 메뉴 트리 (admin_menu 거버넌스 연동)"""
     legacy_menus = db.query(Menu).filter(Menu.link_type == "APP").all()
     if legacy_menus:
         for lm in legacy_menus:
@@ -386,7 +399,7 @@ def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_adm
     return filter_menu_tree(root_menus, admin, db, bypass_auth=True)
 
 @router.post("/menu", response_model=admin_schema.MenuSchema)
-def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin)):
     data = menu_in.dict()
     if data.get("link_type") == "APP":
         data["link_type"] = "INSTANCE"
@@ -413,7 +426,7 @@ def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db),
     return result
 
 @router.put("/menu/{menu_id}", response_model=admin_schema.MenuSchema)
-def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin)):
     db_menu = db.query(Menu).filter(Menu.id == menu_id).first()
     if not db_menu: raise HTTPException(status_code=404)
     
@@ -442,21 +455,21 @@ def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = De
     return result
 
 @router.delete("/menu/{menu_id}")
-def delete_menu(menu_id: int, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def delete_menu(menu_id: int, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin)):
     db_menu = db.query(Menu).filter(Menu.id == menu_id).first()
     if not db_menu: raise HTTPException(status_code=404)
     db.delete(db_menu)
     db.commit()
     return {"message": "success"}
 
-# --- System Configuration ---
+# --- System Configuration (admin_config 거버넌스 연동) ---
 
 @router.get("/config", response_model=List[admin_schema.SystemConfigSchema])
-def get_all_configs(db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def get_all_configs(db: Session = Depends(get_db), admin: User = Depends(check_config_admin)):
     return db.query(SystemConfig).all()
 
 @router.put("/config/{key}", response_model=admin_schema.SystemConfigSchema)
-def update_config(key: str, payload: admin_schema.SystemConfigUpdate, db: Session = Depends(get_db), admin: User = Depends(check_admin)):
+def update_config(key: str, payload: admin_schema.SystemConfigUpdate, db: Session = Depends(get_db), admin: User = Depends(check_config_admin)):
     config = db.query(SystemConfig).filter(SystemConfig.key == key).first()
     if not config:
         config = SystemConfig(key=key, value=payload.value, description=payload.description)

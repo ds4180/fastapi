@@ -36,6 +36,23 @@ SENSITIVE_FIELDS = {
 
 logger = logging.getLogger("core.audit")
 
+# ----------------------------------------------------------------------------
+# 🏛️ 보안 감사 이벤트 훅 레지스트리 (Observer Pattern - 느슨한 결합)
+# ----------------------------------------------------------------------------
+# 코어 계층이 상위 도메인 앱(Watchdog 등)을 직접 역참조하지 않도록
+# 콜백 훅을 등록받아 안전하게 실행합니다.
+SECURITY_AUDIT_HOOKS: list = []
+
+
+def register_security_audit_hook(callback) -> None:
+    """
+    [보안 감사 훅 등록기]
+    SECURITY 타입의 감사로그가 발생할 때 실행할 도메인 리스너 콜백을 등록합니다.
+    """
+    if callback not in SECURITY_AUDIT_HOOKS:
+        SECURITY_AUDIT_HOOKS.append(callback)
+        logger.info(f"🏛️ [Audit] 보안 감사 이벤트 훅 등록 완료: {callback.__name__}")
+
 
 def get_user_summary(user: Optional[User]) -> str:
     """
@@ -45,20 +62,26 @@ def get_user_summary(user: Optional[User]) -> str:
     if not user:
         return "GUEST (비로그인)"
 
-    # 표시 이름 결정 (real_name > display_name > username)
-    profile = getattr(user, "profile", None)
-    display_name = getattr(user, "real_name", None) or (
-        getattr(profile, "display_name", None) if profile else None
-    ) or getattr(user, "username", "Unknown")
+    try:
+        # 표시 이름 결정 (real_name > display_name > username)
+        profile = getattr(user, "profile", None)
+        display_name = getattr(user, "real_name", None) or (
+            getattr(profile, "display_name", None) if profile else None
+        ) or getattr(user, "username", "Unknown")
 
-    # 랭크 레벨 결정 (0~9)
-    rank = user.rank() if callable(getattr(user, "rank", None)) else getattr(user, "rank", 0)
+        # 랭크 레벨 결정 (0~9)
+        rank = user.rank() if callable(getattr(user, "rank", None)) else getattr(user, "rank", 0)
 
-    # 주 소속 부서/팀
-    primary_group = getattr(profile, "primary_group", None) if profile else None
-    group_str = primary_group if primary_group else "소속없음"
+        # 주 소속 부서/팀
+        primary_group = getattr(profile, "primary_group", None) if profile else None
+        group_str = primary_group if primary_group else "소속없음"
 
-    return f"{display_name} ({group_str}/Lv.{rank})"
+        return f"{display_name} ({group_str}/Lv.{rank})"
+    except Exception:
+        # 🛡️ 세션 분리(Detached) 등으로 지연 로딩 실패 시에도 안전한 기본 폴백 반환
+        uname = getattr(user, "username", "User")
+        uid = getattr(user, "id", "?")
+        return f"{uname}#{uid} (스냅샷 로드 제한)"
 
 
 def sanitize_diff(diff_payload: Optional[list]) -> list:
@@ -140,11 +163,12 @@ def log_audit(
         db.commit()
         db.refresh(audit_record)
         if log_type.upper() == "SECURITY":
-            try:
-                from domain.system.watchdog_service import check_and_alert_security_violation
-                check_and_alert_security_violation(db, audit_record)
-            except Exception as we:
-                logger.warning(f"⚠️ Watchdog 보안 경보 발송 실패: {we}")
+            # 🌟 옵저버 훅들을 순회 호출하여 코어-도메인 역참조를 원천 차단
+            for hook in SECURITY_AUDIT_HOOKS:
+                try:
+                    hook(db, audit_record)
+                except Exception as he:
+                    logger.warning(f"⚠️ Audit 보안 리스너 훅 실행 실패 ({getattr(hook, '__name__', 'hook')}): {he}")
 
     return audit_record
 

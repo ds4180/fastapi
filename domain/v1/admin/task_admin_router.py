@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from database import get_db
 from models import SystemTask, User
-from domain.user.user_router import check_rank
+from core.deps import require_app_permission
 from datetime import datetime
 from typing import List, Optional
 from .admin_schema import SystemTaskCreate
@@ -13,13 +13,14 @@ router = APIRouter(
     tags=["admin_tasks"]
 )
 
-# 최고 관리자(Rank 4)만 접근 가능하도록 설정
-check_admin = check_rank(required_rank=4)
+# 🏛️ AppRegistry 4단계 거버넌스 연동 (읽기: min_read_rank=8, 쓰기: min_write_rank=8)
+check_task_read = require_app_permission("admin_tasks", action="read")
+check_task_write = require_app_permission("admin_tasks", action="write")
 
 @router.get("/types")
 def list_task_types(
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_task_read)
 ):
     """[관리자용] 현재 시스템에 등록된 모든 태스크 유형과 가이드를 조회합니다."""
     from domain.system.task_worker import TASK_HANDLERS
@@ -43,7 +44,7 @@ def list_tasks(
     limit: int = 20,
     offset: int = 0,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_task_read)
 ):
     """
     [관리자용] 모든 비동기 태스크 목록을 조회합니다.
@@ -76,7 +77,7 @@ def list_tasks(
 def create_task(
     task_in: SystemTaskCreate,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_task_write)
 ):
     """[관리자용] 새로운 비동기 태스크를 수동으로 등록합니다."""
     new_task = SystemTask(
@@ -92,7 +93,7 @@ def create_task(
 def get_task_detail(
     task_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_task_read)
 ):
     """특정 태스크의 상세 정보(에러 로그 포함)를 조회합니다."""
     task = db.query(SystemTask).filter(SystemTask.id == task_id).first()
@@ -104,7 +105,7 @@ def get_task_detail(
 def retry_task(
     task_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_task_write)
 ):
     """
     실패한 태스크를 강제로 다시 실행 대기(PENDING) 상태로 만듭니다.
@@ -126,7 +127,7 @@ def retry_task(
 def cancel_task(
     task_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_admin)
+    admin: User = Depends(check_task_write)
 ):
     """실행 대기 중인 태스크를 취소 처리합니다."""
     task = db.query(SystemTask).filter(SystemTask.id == task_id).first()

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models import AppRegistry, ServiceInstance, BoardConfig, Post, Page
 from domain.v1.admin.service_service import resolve_service_instance
-from domain.user.user_router import get_current_user_optional
+from core.deps import get_current_user_optional
 from core.permission import can_access_app, can_access_board, can_access_page
 from core.exceptions import CoreException, AccessDeniedError, ResourceNotFoundError
 from typing import Optional, Any, Dict

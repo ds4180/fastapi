@@ -43,6 +43,11 @@ class CoreException(HTTPException):
         self.resource_id = resource_id
         self.timestamp = datetime.now().isoformat()
 
+    @property
+    def code(self) -> str:
+        """하위 호환성을 위한 error_code 별칭 프로퍼티 (AttributeError 원천 차단)"""
+        return self.error_code
+
     def to_dict(self) -> Dict[str, Any]:
         """프론트엔드 표준 통신 규격에 맞춘 에러 딕셔너리 반환"""
         error_data = {

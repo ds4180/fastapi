@@ -8,7 +8,8 @@
 에러 및 보안 침해 로그를 단일 관제탑 화면에 제공하는 코어 API 라우터입니다.
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+import logging
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -16,8 +17,9 @@ from sqlalchemy import func, or_
 
 from database import get_db
 from models import User, UserSession, AuditLog
-from core.deps import check_rank
+from core.deps import require_app_permission
 from core.audit import safe_log_audit
+from core.config import settings
 from redis_config import rd
 from domain.user import user_crud
 from domain.v1.admin.observability_schema import (
@@ -27,34 +29,61 @@ from domain.v1.admin.observability_schema import (
     LiveSessionItemRes,
 )
 
+logger = logging.getLogger("admin.observability")
 router = APIRouter(prefix="/v1/admin/observability", tags=["Admin Observability"])
+
+# 🏛️ AppRegistry 4단계 거버넌스 연동 (admin_observability)
+check_obs_read = require_app_permission("admin_observability", action="read")
+check_obs_write = require_app_permission("admin_observability", action="write")
 
 
 # ==========================================================================
-# 🌐 1. 실시간 활성 세션 관제 (기존 /v1/admin/sessions 흡수·통합 & Redis 자기치유)
+# 🌐 1. 실시간 활성 세션 관제 (core/session.py 자가치유 정책 100% 일원화)
 # ==========================================================================
 
 def sync_expired_sessions(db: Session) -> int:
     """
-    Redis 실시간 생존 확인 및 자기치유(Self-healing):
-    TTL 만료로 Redis에서 소멸된 유령 세션을 EXPIRED 상태로 전환하고 유효 활성 세션 수를 반환합니다.
+    [세션 자가치유 및 만료 동기화 엔진 (core/session.py 정책 통일)]
+    
+    💡 원칙:
+    1. DB를 단일 진실 공급원(SSOT)으로 삼습니다.
+    2. 자연 만료 기간(SESSION_EXPIRE_DAYS)을 초과한 DB 세션만 EXPIRED 상태로 전환합니다.
+    3. 유효 기간 내인데 Redis에서 휘발된 정상 세션은 오히려 Redis 키를 자가치유(Self-Healing) 복원하여
+       사용자의 세션이 관제탑 조회로 인해 강제 종료되는 대형 사고를 원천 방어합니다.
     """
     active_sessions = (
         db.query(UserSession)
         .filter(UserSession.status == "ACTIVE")
         .all()
     )
-    modified = False
     valid_count = 0
+    now = datetime.now()
+    expire_delta = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    modified = False
+
     for s in active_sessions:
-        redis_key = f"session:{s.user_id}:{s.device_category}"
-        is_alive = rd.sismember(redis_key, s.session_key)
-        if not is_alive:
+        # [1단계] DB 기준 실제 만료일 초과 여부 검사
+        if s.last_activity and (now - s.last_activity) > expire_delta:
             s.status = "EXPIRED"
-            s.logout_at = datetime.now()
+            s.logout_at = now
             modified = True
-        else:
-            valid_count += 1
+            continue
+
+        # [2단계] 유효 세션: Redis 생존 확인 및 자가치유(Self-Healing)
+        redis_key = f"session:{s.user_id}:{s.device_category}"
+        try:
+            if not rd.sismember(redis_key, s.session_key):
+                # Redis가 재부팅되어 키가 없더라도 DB가 유효하므로 키를 안전하게 재등록
+                rd.sadd(redis_key, s.session_key)
+                rd.expire(redis_key, int(expire_delta.total_seconds()))
+                logger.info(f"✨ [Observability] 세션 자가치유 복원: UID={s.user_id}, Session={s.session_key[:8]}...")
+            else:
+                # 살아있는 세션 TTL 슬라이딩 연장
+                rd.expire(redis_key, int(expire_delta.total_seconds()))
+        except Exception as re:
+            logger.warning(f"⚠️ [Observability] Redis 일시 통신 오류, DB 세션 유지: {re}")
+
+        valid_count += 1
 
     if modified:
         db.commit()
@@ -69,14 +98,14 @@ def sync_expired_sessions(db: Session) -> int:
 )
 def get_live_sessions(
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(4))
+    current_user: User = Depends(check_obs_read)
 ):
     """
-    관리자 전용(Rank 4 이상):
+    관리자 전용(admin_observability 앱 권한 필요):
     현재 시스템에 로그인되어 활동 중인 모든 기기/세션 목록을 실시간 조회하며,
-    Redis 생존 여부를 대조하여 만료된 세션은 EXPIRED로 즉시 자기치유 동기화합니다.
+    Redis 생존 여부를 대조하여 자가치유(Self-Healing) 복원 및 만료 세션을 정리합니다.
     """
-    # 1. Redis 실시간 동기화 (유령 세션 EXPIRED 처리)
+    # 1. Redis 실시간 동기화 & 자가치유 (유령 세션만 EXPIRED 처리)
     sync_expired_sessions(db)
 
     # 2. 실제 살아있는 ACTIVE 세션만 로드
@@ -115,7 +144,7 @@ def get_live_sessions(
 def kick_session(
     target_session_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(4))
+    current_user: User = Depends(check_obs_write)
 ):
     """
     관리자 전용(Rank 4 이상):
@@ -182,12 +211,19 @@ def _get_summary_stats(db: Session) -> ObservabilitySummaryRes:
         AuditLog.created_at >= today_start
     ).scalar() or 0
 
+    today_error_alert = today_errors + today_security
+
     return ObservabilitySummaryRes(
         active_sessions_count=active_sessions,
         today_logins_count=today_logins,
         today_changes_count=today_changes,
         today_errors_count=today_errors,
         today_security_count=today_security,
+        # 🌟 프론트엔드(+page.svelte) 상단 요약 카드 호환
+        active_sessions=active_sessions,
+        today_access_count=today_logins,
+        today_change_count=today_changes,
+        today_error_alert_count=today_error_alert,
     )
 
 
@@ -198,9 +234,9 @@ def _get_summary_stats(db: Session) -> ObservabilitySummaryRes:
 )
 def get_observability_summary(
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(4))
+    current_user: User = Depends(check_obs_read)
 ):
-    """관리자 전용: 상단 대시보드 배지용 실시간 요약 통계를 반환합니다."""
+    """관리자 전용(admin_observability 앱 권한 필요): 상단 대시보드 배지용 실시간 요약 통계를 반환합니다."""
     return _get_summary_stats(db)
 
 
@@ -217,8 +253,10 @@ def get_audit_logs(
     query: Optional[str] = Query(None, description="제목, 내용, 사용자 스냅샷 검색어"),
     page: int = Query(1, ge=1, description="페이지 번호"),
     page_size: int = Query(20, ge=1, le=100, description="페이지당 건수 (최대 100)"),
+    skip: Optional[int] = Query(None, description="레거시 skip 파라미터 호환"),
+    limit: Optional[int] = Query(None, description="레거시 limit 파라미터 호환"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(check_rank(4))
+    current_user: User = Depends(check_obs_read)
 ):
     """
     관리자 전용(Rank 4 이상):
@@ -245,10 +283,15 @@ def get_audit_logs(
         )
 
     total = q.count()
+
+    # 페이징 계산: skip/limit 우선, 없으면 page/page_size 적용
+    eff_offset = skip if skip is not None else ((page - 1) * page_size)
+    eff_limit = limit if limit is not None else page_size
+
     items = (
         q.order_by(AuditLog.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        .offset(eff_offset)
+        .limit(eff_limit)
         .all()
     )
 
@@ -258,6 +301,6 @@ def get_audit_logs(
         items=items,
         total=total,
         page=page,
-        page_size=page_size,
+        page_size=eff_limit,
         summary=summary,
     )

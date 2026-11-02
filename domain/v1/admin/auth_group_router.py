@@ -59,6 +59,33 @@ def remove_group_from_spec(spec: Any, target_code: str) -> tuple[Any, bool]:
     return spec, False
 
 
+def extract_all_groups_from_spec(spec: Any) -> set[str]:
+    """
+    [JSONB 듀얼 모드 안전 그룹 추출기]
+    allow_groups 또는 deny_groups (단순 리스트 or JSONB 딕셔너리)에서 실제 그룹 코드 목록만 안전하게 추출합니다.
+    - 리스트 모드: ["운수팀", "배차담당"] -> {"운수팀", "배차담당"}
+    - 딕셔너리 모드: {"read": ["운수팀"], "write": ["배차담당"], "all": ["기획실"]} -> {"운수팀", "배차담당", "기획실"}
+    - 🌟 파이썬 dict 순회 시 'read', 'write' 키가 그룹 코드로 둔갑하는 버그를 원천 차단합니다.
+    """
+    if not spec:
+        return set()
+    if isinstance(spec, (list, set, tuple)):
+        return {str(g) for g in spec if g}
+    if isinstance(spec, dict):
+        result = set()
+        for val in spec.values():
+            if isinstance(val, (list, set, tuple)):
+                for g in val:
+                    if g:
+                        result.add(str(g))
+            elif isinstance(val, str) and val:
+                result.add(val)
+        return result
+    if isinstance(spec, str) and spec:
+        return {spec}
+    return set()
+
+
 # ==========================================================================
 # 📂 1. 그룹 뷰 (Group View) API
 # ==========================================================================
@@ -89,14 +116,14 @@ def get_group_master_list(
             for sec in p.secondary_groups:
                 secondary_counts[sec] = secondary_counts.get(sec, 0) + 1
 
-    # 앱 레지스트리 전체 조회 (메모리 집계)
+    # 앱 레지스트리 전체 조회 (메모리 집계 - JSONB 듀얼 규격 안전 처리)
     apps = db.query(AppRegistry.name, AppRegistry.allow_groups, AppRegistry.deny_groups).all()
     allow_map = {}
     deny_map = {}
     for a in apps:
-        for g in (a.allow_groups or []):
+        for g in extract_all_groups_from_spec(a.allow_groups):
             allow_map.setdefault(g, []).append(a.name)
-        for g in (a.deny_groups or []):
+        for g in extract_all_groups_from_spec(a.deny_groups):
             deny_map.setdefault(g, []).append(a.name)
 
     result = []

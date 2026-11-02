@@ -99,7 +99,6 @@ def notify(
     :param extra_payload: 추가 메타데이터 dict
     """
     from models.miniapp import MiniappItem
-    from models.alert import Alert
 
     sender_id = getattr(sender, "id", None) if sender else None
     resolved_uids = resolve_target_user_ids(db, target_user_ids, target_groups)
@@ -140,20 +139,6 @@ def notify(
         )
         db.add(item)
         created_items.append(item)
-
-    # --------------------------------------------------------------------------
-    # 2. 레거시 팝업/모달 호환성 (Level >= 4 이거나 Alert 등록 시)
-    # --------------------------------------------------------------------------
-    if level >= 4:
-        db_alert = Alert(
-            message=f"{f'[{title}] ' if title else ''}{message}",
-            level=level,
-            style="warning" if level == 4 else "error",
-            position="modal",
-            redirect_url=link,
-            user_id=sender_id or 1
-        )
-        db.add(db_alert)
 
     db.commit()
 

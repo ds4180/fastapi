@@ -28,6 +28,12 @@ async def lifespan(app: FastAPI):
         from database import SessionLocal
         from domain.system.task_service import bootstrap_default_cron_tasks
         from domain.system.app_service import bootstrap_system_apps
+        from core.audit import register_security_audit_hook
+        from domain.system.watchdog_service import check_and_alert_security_violation
+
+        # 🛡️ 코어 보안 감사로그 - Watchdog 리스너 훅 등록
+        register_security_audit_hook(check_and_alert_security_violation)
+
         with SessionLocal() as db:
             seeded = bootstrap_default_cron_tasks(db)
             if seeded > 0:
@@ -87,6 +93,7 @@ from core.session import validate_session
 from database import SessionLocal
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import traceback
 from datetime import datetime
 
@@ -95,63 +102,132 @@ from datetime import datetime
 async def core_exception_handler(request: Request, exc: CoreException):
     req_id = getattr(request.state, "request_id", None)
     ip = request.client.host if request.client else "unknown"
-
-    # 세션 쿠키에서 유저 식별 (감사로그 행위자 파악)
     session_id = request.cookies.get("session_id")
-    user = None
-    if session_id:
-        try:
-            with SessionLocal() as db:
-                user = validate_session(db, session_id)
-        except Exception:
-            pass
 
-    # 🚨 403 권한 침해 시 즉시 SECURITY 감사로그 적재
-    if exc.status_code == 403:
+    # 🚨 단일 DB 세션에서 유저 검증 및 403/500 감사로그를 원자적으로 처리 (Fail-Safe 격리)
+    try:
         with SessionLocal() as db:
-            safe_log_audit(
-                db=db,
-                app_id=exc.resource or "system",
-                log_type="SECURITY",
-                severity="WARN",
-                action="ACCESS_DENIED",
-                title=f"403 권한 침해 차단: {request.method} {request.url.path}",
-                user=user,
-                resource_type=exc.resource,
-                message=exc.message,
-                ip_address=ip,
-                metadata={
-                    "request_id": req_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "error_code": exc.code,
-                }
-            )
-    elif exc.status_code >= 500:
-        with SessionLocal() as db:
-            safe_log_audit(
-                db=db,
-                app_id=exc.resource or "system",
-                log_type="ERROR",
-                severity="ERROR",
-                action="CORE_EXCEPTION",
-                title=f"500 코어 서버 장애: {request.method} {request.url.path}",
-                user=user,
-                resource_type=exc.resource,
-                message=exc.message,
-                ip_address=ip,
-                metadata={
-                    "request_id": req_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "error_code": exc.code,
-                }
-            )
+            user = None
+            if session_id:
+                try:
+                    user = validate_session(db, session_id)
+                except Exception:
+                    pass
+
+            error_code_val = getattr(exc, "error_code", getattr(exc, "code", "UNKNOWN_ERROR"))
+
+            if exc.status_code == 403:
+                safe_log_audit(
+                    db=db,
+                    app_id=exc.resource or "system",
+                    log_type="SECURITY",
+                    severity="WARN",
+                    action="ACCESS_DENIED",
+                    title=f"403 권한 침해 차단: {request.method} {request.url.path}",
+                    user=user,
+                    resource_type=exc.resource,
+                    message=exc.message,
+                    ip_address=ip,
+                    metadata={
+                        "request_id": req_id,
+                        "method": request.method,
+                        "path": request.url.path,
+                        "error_code": error_code_val,
+                    }
+                )
+            elif exc.status_code >= 500:
+                safe_log_audit(
+                    db=db,
+                    app_id=exc.resource or "system",
+                    log_type="ERROR",
+                    severity="ERROR",
+                    action="CORE_EXCEPTION",
+                    title=f"500 코어 서버 장애: {request.method} {request.url.path}",
+                    user=user,
+                    resource_type=exc.resource,
+                    message=exc.message,
+                    ip_address=ip,
+                    metadata={
+                        "request_id": req_id,
+                        "method": request.method,
+                        "path": request.url.path,
+                        "error_code": error_code_val,
+                    }
+                )
+    except Exception as log_err:
+        # 감사로그 로깅 도중 예외가 발생하더라도 원래 예외 응답(403 등)은 500으로 마스킹되지 않고 반드시 정상 반환
+        pass
 
     resp = exc.to_response()
     if req_id:
         resp.headers["X-Request-ID"] = req_id
     return resp
+
+
+# 📌 [전역 예외 핸들러 2] Starlette/FastAPI HTTPException 표준 포획 (403 감사로그 100% 누락 방어)
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    req_id = getattr(request.state, "request_id", None)
+    ip = request.client.host if request.client else "unknown"
+    session_id = request.cookies.get("session_id")
+
+    with SessionLocal() as db:
+        user = None
+        if session_id:
+            try:
+                user = validate_session(db, session_id)
+            except Exception:
+                pass
+
+        # 🚨 403 권한 거부 시 무조건 SECURITY 감사로그 자동 박제
+        if exc.status_code == 403:
+            safe_log_audit(
+                db=db,
+                app_id="system",
+                log_type="SECURITY",
+                severity="WARN",
+                action="ACCESS_DENIED",
+                title=f"403 권한 침해 차단: {request.method} {request.url.path}",
+                user=user,
+                resource_type="system",
+                message=str(exc.detail),
+                ip_address=ip,
+                metadata={
+                    "request_id": req_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": 403,
+                }
+            )
+        elif exc.status_code >= 500:
+            safe_log_audit(
+                db=db,
+                app_id="system",
+                log_type="ERROR",
+                severity="ERROR",
+                action="HTTP_ERROR",
+                title=f"500 서버 장애: {request.method} {request.url.path}",
+                user=user,
+                resource_type="system",
+                message=str(exc.detail),
+                ip_address=ip,
+                metadata={
+                    "request_id": req_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": exc.status_code,
+                }
+            )
+
+    headers = getattr(exc, "headers", None) or {}
+    if req_id:
+        headers["X-Request-ID"] = req_id
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "error": {"code": f"HTTP_{exc.status_code}", "message": str(exc.detail)}},
+        headers=headers
+    )
 
 
 # 📌 [전역 예외 핸들러 2] 처리되지 않은 미처리 500 서버 장애 자동 캡처 (스택 트레이스 영구 보존)
@@ -162,32 +238,34 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     stack_trace = traceback.format_exc()
 
     session_id = request.cookies.get("session_id")
-    user = None
-    if session_id:
-        try:
-            with SessionLocal() as db:
-                user = validate_session(db, session_id)
-        except Exception:
-            pass
+    try:
+        with SessionLocal() as db:
+            user = None
+            if session_id:
+                try:
+                    user = validate_session(db, session_id)
+                except Exception:
+                    pass
 
-    with SessionLocal() as db:
-        safe_log_audit(
-            db=db,
-            app_id="system",
-            log_type="ERROR",
-            severity="CRITICAL",
-            action="UNHANDLED_EXCEPTION",
-            title=f"500 미처리 서버 장애: {request.method} {request.url.path}",
-            user=user,
-            message=f"{str(exc)}\n\n[스택 트레이스]:\n{stack_trace}",
-            ip_address=ip,
-            metadata={
-                "request_id": req_id,
-                "method": request.method,
-                "path": request.url.path,
-                "exception_type": exc.__class__.__name__,
-            }
-        )
+            safe_log_audit(
+                db=db,
+                app_id="system",
+                log_type="ERROR",
+                severity="CRITICAL",
+                action="UNHANDLED_EXCEPTION",
+                title=f"500 미처리 서버 장애: {request.method} {request.url.path}",
+                user=user,
+                message=f"{str(exc)}\n\n[스택 트레이스]:\n{stack_trace}",
+                ip_address=ip,
+                metadata={
+                    "request_id": req_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "exception_type": exc.__class__.__name__,
+                }
+            )
+    except Exception as log_err:
+        pass
 
     headers = {}
     if req_id:
@@ -203,7 +281,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
                 "message": "서버 내부 처리 중 예기치 못한 장애가 발생했습니다.",
                 "request_id": req_id,
                 "timestamp": datetime.utcnow().isoformat(),
-            }
+            },
+            # 🌟 프론트엔드 레거시 파서(err.detail) 하위 호환성을 위해 최상위 detail 제공
+            "detail": "서버 내부 처리 중 예기치 못한 장애가 발생했습니다.",
         },
         headers=headers
     )

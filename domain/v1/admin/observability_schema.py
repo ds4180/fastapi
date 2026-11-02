@@ -25,8 +25,8 @@ class AuditLogItemRes(BaseModel):
     resource_id: Optional[str] = None
     title: str
     message: Optional[str] = None
-    diff_payload: List[Dict[str, Any]] = Field(default_factory=list)
-    metadata_payload: Dict[str, Any] = Field(default_factory=dict)
+    diff_payload: Optional[List[Any]] = Field(default_factory=list)
+    metadata_payload: Optional[Dict[str, Any]] = Field(default_factory=dict)
     ip_address: Optional[str] = None
     created_at: datetime
 
@@ -41,6 +41,12 @@ class ObservabilitySummaryRes(BaseModel):
     today_changes_count: int = 0
     today_errors_count: int = 0
     today_security_count: int = 0
+
+    # 🌟 프론트엔드(+page.svelte) 상단 요약 카드 호환 필드
+    active_sessions: int = 0
+    today_access_count: int = 0
+    today_change_count: int = 0
+    today_error_alert_count: int = 0
 
 
 class AuditLogListRes(BaseModel):

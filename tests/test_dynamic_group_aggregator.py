@@ -158,3 +158,47 @@ def test_dynamic_group_aggregation(db_session):
     meta_obj = json.loads(meta_hash["today_working"])
     assert meta_obj["name"] == "today_working"
     assert meta_obj["type"] == "dynamic"
+
+
+def test_system_group_service_direct_import_and_operations():
+    """
+    [신규 비즈니스 서비스 계층 분리 검증]
+    - domain.system.group_service 직접 호출 시 정상 작동 및 집합 연산 검증
+    """
+    from domain.system.group_service import (
+        combine_redis_groups,
+        create_manual_redis_group,
+        get_all_redis_groups,
+        delete_redis_group,
+        KEY_DATA,
+        KEY_META
+    )
+
+    redis_sets = {}
+    redis_hashes = {}
+
+    mock_rd = MagicMock()
+    mock_rd.delete.side_effect = lambda k: redis_sets.pop(k, None)
+    mock_rd.sadd.side_effect = lambda k, *vals: redis_sets.setdefault(k, set()).update(vals)
+    def _mock_hset(hk, f, v):
+        if hk not in redis_hashes:
+            redis_hashes[hk] = {}
+        redis_hashes[hk][f] = v
+
+    mock_rd.hset.side_effect = _mock_hset
+    mock_rd.scard.side_effect = lambda k: len(redis_sets.get(k, set()))
+    mock_rd.hgetall.side_effect = lambda hk: redis_hashes.get(hk, {})
+
+    # 1. 수동 그룹 생성
+    create_manual_redis_group("vip_drivers", [101, 102], mock_rd)
+    assert redis_sets[f"{KEY_DATA}vip_drivers"] == {"101", "102"}
+
+    # 2. 그룹 목록 조회
+    groups = get_all_redis_groups(mock_rd)
+    assert len(groups) == 1
+    assert groups[0]["name"] == "vip_drivers"
+    assert groups[0]["count"] == 2
+
+    # 3. 그룹 삭제
+    delete_redis_group("vip_drivers", mock_rd)
+    mock_rd.hdel.assert_called_with(KEY_META, "vip_drivers")

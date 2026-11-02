@@ -149,8 +149,8 @@ def check_and_alert_security_violation(db: Session, audit_log: AuditLog) -> bool
         title="🛡️ [보안 경보] 비인가 접근 및 권한 침해 시도 감지",
         message=f"인가되지 않은 관리자 리소스 접근 시도가 감지되었습니다. (행위: {audit_log.action}, 대상: {audit_log.app_id})",
         target_groups=["admin"],
-        level=4,
-        link="/v1/admin/observability"
+        level=2,
+        link="/v1/admin/observability?tab=SECURITY"
     )
     return True
 
@@ -214,3 +214,13 @@ def run_watchdog_inspection(db: Session) -> Dict[str, Any]:
         "instruction_delay_alert_triggered": res_inst,
         "status": "HEALTHY" if not (res_task or res_inst) else "ALERTED"
     }
+
+
+# ----------------------------------------------------------------------------
+# 🏛️ 코어 보안 감사로그 발생 시 Watchdog 리스너 자동 등록 (Observer Hook)
+# ----------------------------------------------------------------------------
+try:
+    from core.audit import register_security_audit_hook
+    register_security_audit_hook(check_and_alert_security_violation)
+except Exception:
+    pass

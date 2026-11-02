@@ -227,7 +227,7 @@ async def handle_dynamic_group_refresh(task: SystemTask, db: Session):
     [자율신경계 스케줄러] 휴무자, 근무자, 노선별 배차 실 비즈니스 동적 그룹 자동 연산 갱신
     """
     from redis_config import redis_client
-    from domain.v1.admin.group_router import calculate_and_refresh_dynamic_groups
+    from domain.system.group_service import calculate_and_refresh_dynamic_groups
     
     logger.info("👥 동적 타겟 그룹 실시간 자동 연산을 시작합니다...")
     results = calculate_and_refresh_dynamic_groups(db, redis_client)
@@ -325,38 +325,46 @@ async def process_next_task(db: Session, worker_id: str) -> bool:
                     scheduled_at=next_time,
                     cron_expression=task.cron_expression,
                     repeat_interval=task.repeat_interval,
+                    unique_key=task.unique_key, # 🌟 고유 키 보존으로 서버 재부팅 시 무한 중복 증식 원천 차단!
                     parent_id=task.id,
                     created_by=task.created_by,
                     tags=task.tags,
                     max_retries=task.max_retries,
                     timeout_sec=task.timeout_sec
                 )
-                logger.info(f"🔄 반복 태스크 차기 발행 완료: ID={task.id} -> 차기 예약={next_time}")
+                logger.info(f"🔄 반복 태스크 차기 발행 완료: ID={task.id} -> 차기 예약={next_time} (Key: {task.unique_key})")
+
+        db.commit()
+        return True
 
     except Exception as e:
+        task_id = task.id
         db.rollback()
-        task.retry_count += 1
-        task.error_log = traceback.format_exc()
-        if task.retry_count >= task.max_retries:
-            task.status = "FAILED"
-            task.completed_at = datetime.now()
-            logger.error(f"❌ 작업 영구 실패 (최대 재시도 초과): {task.id}")
-            db.commit()
-            try:
-                from domain.system.watchdog_service import check_and_alert_task_failure
-                check_and_alert_task_failure(db, failed_task_id=task.id)
-            except Exception as we:
-                logger.warning(f"⚠️ Watchdog 경보 트리거 오류: {we}")
-            return True
-        else:
-            # 지수 백오프 적용 (1차: 10초, 2차: 40초, 3차: 80초, 최대 300초)
-            delay_sec = min(300, (2 ** task.retry_count) * 10)
-            task.scheduled_at = datetime.now() + timedelta(seconds=delay_sec)
-            task.status = "PENDING"
-            logger.warning(f"⚠️ 작업 재시도 예약 (시도 {task.retry_count}/{task.max_retries}, {delay_sec}초 후): ID={task.id}")
+        # 🌟 세션 롤백 후 깨끗한 상태에서 태스크를 새로 조회(reload)하여 detached 에러 및 상태 유실 방어
+        failed_task = db.query(SystemTask).filter(SystemTask.id == task_id).first()
+        if failed_task:
+            failed_task.retry_count += 1
+            failed_task.error_log = traceback.format_exc()
+            if failed_task.retry_count >= failed_task.max_retries:
+                failed_task.status = "FAILED"
+                failed_task.completed_at = datetime.now()
+                logger.error(f"❌ 작업 영구 실패 (최대 재시도 초과): {failed_task.id}")
+                db.commit()
+                try:
+                    from domain.system.watchdog_service import check_and_alert_task_failure
+                    check_and_alert_task_failure(db, failed_task_id=failed_task.id)
+                except Exception as we:
+                    logger.warning(f"⚠️ Watchdog 경보 트리거 오류: {we}")
+                return True
+            else:
+                # 지수 백오프 적용 (1차: 10초, 2차: 40초, 3차: 80초, 최대 300초)
+                delay_sec = min(300, (2 ** failed_task.retry_count) * 10)
+                failed_task.scheduled_at = datetime.now() + timedelta(seconds=delay_sec)
+                failed_task.status = "PENDING"
+                logger.warning(f"⚠️ 작업 재시도 예약 (시도 {failed_task.retry_count}/{failed_task.max_retries}, {delay_sec}초 후): ID={failed_task.id}")
+                db.commit()
 
-    db.commit()
-    return True
+        return True
 
 
 async def run_task_worker():

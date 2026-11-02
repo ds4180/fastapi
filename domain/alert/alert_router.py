@@ -20,7 +20,7 @@ from typing import Optional
 
 from database import get_db
 from domain.alert import alert_schema, alert_crud
-from core.deps import get_current_user, get_current_user_optional, RankChecker
+from core.deps import get_current_user, get_current_user_optional, require_app_permission
 from models import User
 
 router = APIRouter(
@@ -28,14 +28,15 @@ router = APIRouter(
     tags=["Alert"]
 )
 
-# 🔒 관리자 권한 의존성 정의 (Rank 8 이상 관리자 및 Rank 9 root 마스터만 접근 가능)
-admin_rank_required = RankChecker(required_rank=8)
+# 🔒 관리자 권한 의존성 정의 (AppRegistry 실시간 4단계 인가 가드와 완전 연동)
+check_alerts_read = require_app_permission("admin_alerts", action="read")
+check_alerts_write = require_app_permission("admin_alerts", action="write")
 
 
 @router.get("/list", response_model=list[alert_schema.Alert])
 def alert_list(
     db: Session = Depends(get_db),
-    admin_user: User = Depends(admin_rank_required)
+    admin_user: User = Depends(check_alerts_read)
 ):
     """
     모든 알림 목록 조회 (관리자 전용)
@@ -61,7 +62,7 @@ async def alert_create(
     _alert_create: alert_schema.AlertCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    admin_user: User = Depends(admin_rank_required)
+    admin_user: User = Depends(check_alerts_write)
 ):
     """
     새로운 알림 생성 (관리자 전용)
@@ -80,7 +81,7 @@ async def alert_create(
 def alert_delete(
     alert_id: int, 
     db: Session = Depends(get_db),
-    admin_user: User = Depends(admin_rank_required)
+    admin_user: User = Depends(check_alerts_write)
 ):
     """
     알림 삭제 (관리자 전용)
@@ -97,7 +98,7 @@ async def alert_update(
     alert_id: int, 
     _alert_update: alert_schema.AlertUpdate,
     db: Session = Depends(get_db),
-    admin_user: User = Depends(admin_rank_required)
+    admin_user: User = Depends(check_alerts_write)
 ):
     """
     알림 수정 (관리자 전용)
@@ -113,7 +114,7 @@ async def alert_update(
 async def alert_toggle(
     alert_id: int, 
     db: Session = Depends(get_db),
-    admin_user: User = Depends(admin_rank_required)
+    admin_user: User = Depends(check_alerts_write)
 ):
     """
     알림 활성/비활성 상태 전환 (관리자 전용)
@@ -129,7 +130,7 @@ async def alert_toggle(
 def alert_acknowledgements(
     alert_id: int,
     db: Session = Depends(get_db),
-    admin_user: User = Depends(admin_rank_required)
+    admin_user: User = Depends(check_alerts_read)
 ):
     """
     [관리자 전용] 특정 알림/지시사항의 사원별 수신 확인 현황 및 통계 조회

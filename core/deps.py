@@ -14,17 +14,24 @@ FastAPI의 `Depends(...)`에서 사용되는 시스템 전역 핵심 의존성(D
 """
 
 from typing import Optional, Iterable
-from fastapi import Depends, HTTPException, Cookie, Request
+from fastapi import Depends, Cookie, Request
 from starlette import status
 from sqlalchemy.orm import Session
 from database import get_db
-from models import User
+from models import User, AppRegistry
 from core.session import validate_session
 from core.permission import (
     ROOT_RANK,
     get_user_rank,
     compare_rank,
     evaluate_permission,
+    can_access_app,
+)
+from core.exceptions import (
+    AuthenticationRequiredError,
+    SessionExpiredError,
+    AccessDeniedError,
+    ResourceNotFoundError,
 )
 
 
@@ -36,20 +43,17 @@ def get_current_user(
     """
     [필수 인증 의존성]
     로그인한 사용자만 접근 가능한 API에 사용합니다.
-    - 세션 쿠키가 없거나 유효하지 않으면 401 Unauthorized 예외를 발생시킵니다.
+    - 세션 쿠키가 없으면 401 AuthenticationRequiredError 를 발생시킵니다.
+    - 세션이 만료/추방되었으면 401 SessionExpiredError 를 발생시킵니다.
     - 세션이 정상이면 슬라이딩 윈도우(만료 연장)를 적용하고 User 객체를 반환합니다.
     """
     if not session_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="로그인이 필요합니다."
-        )
+        raise AuthenticationRequiredError(message="로그인이 필요합니다.")
 
     user = validate_session(db, session_id)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="세션이 만료되었거나 다른 기기에서 로그인하여 접속이 종료되었습니다."
+        raise SessionExpiredError(
+            message="세션이 만료되었거나 다른 기기에서 로그인하여 접속이 종료되었습니다."
         )
 
     return user
@@ -90,9 +94,9 @@ class RankChecker:
     def __call__(self, current_user: User = Depends(get_current_user)) -> User:
         user_rank = get_user_rank(current_user)
         if user_rank != ROOT_RANK and not compare_rank(user_rank, self.required_rank, self.op):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"권한이 부족합니다. (필요 랭킹 조건: {self.op} {self.required_rank})"
+            raise AccessDeniedError(
+                message=f"권한이 부족합니다. (필요 랭킹 조건: {self.op} {self.required_rank})",
+                resource="system",
             )
         return current_user
 
@@ -106,9 +110,9 @@ def check_rank(required_rank: int, op: str = ">="):
     def _check(current_user: User = Depends(get_current_user)) -> User:
         user_rank = get_user_rank(current_user)
         if user_rank != ROOT_RANK and not compare_rank(user_rank, required_rank, op):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"권한이 부족합니다. (필요 랭킹 조건: {op} {required_rank})"
+            raise AccessDeniedError(
+                message=f"권한이 부족합니다. (필요 랭킹 조건: {op} {required_rank})",
+                resource="system",
             )
         return current_user
     return _check
@@ -148,9 +152,47 @@ def check_permission(
             op=op,
         )
         if not allowed:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="접근 권한이 없습니다. (그룹 제한 또는 권한 랭킹 부족)"
+            raise AccessDeniedError(
+                message="접근 권한이 없습니다. (그룹 제한 또는 권한 랭킹 부족)",
+                resource="app",
             )
         return current_user
     return _check
+
+
+def require_app_permission(app_id: str, action: str = "read"):
+    """
+    [AppRegistry 4단계 거버넌스 실시간 연동 인가 가드]
+    
+    💡 역할:
+    하드코딩된 check_rank(4) 대신, DB의 AppRegistry 메타데이터(allow_groups, deny_groups,
+    min_read_rank, min_write_rank)를 실시간으로 조회하여 사용자의 권한을 4단계로 검증합니다.
+    
+    🌟 동작 방식:
+    1. root(랭크 9): 무조건 모든 시스템 앱 통과
+    2. deny_groups: 사용자의 주/부그룹이 차단 그룹에 속하면 즉시 403 차단
+    3. allow_groups: 사용자의 주/부그룹이 허용 그룹에 속하면 즉시 통과 (랭크 무관)
+    4. 랭킹 비교: action('read' vs 'write')에 따라 사용자의 랭크 대소 비교
+    5. 권한 거부 시 AccessDeniedError 발생 ➔ main.py에서 SecurityAuditLog 자동 박제
+    """
+    def _guard(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+    ) -> User:
+        app_meta = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
+        if not app_meta:
+            raise ResourceNotFoundError(
+                message=f"등록되지 않은 시스템 앱입니다: '{app_id}'",
+                resource="app",
+                resource_id=app_id
+            )
+
+        if not can_access_app(user=current_user, app_obj=app_meta, action=action):
+            app_title = getattr(app_meta, "title", None) or getattr(app_meta, "name", app_id)
+            raise AccessDeniedError(
+                message=f"'{app_title}' 시스템 앱 접근 권한이 없습니다.",
+                resource=app_id,
+                resource_id=current_user.id
+            )
+        return current_user
+    return _guard
