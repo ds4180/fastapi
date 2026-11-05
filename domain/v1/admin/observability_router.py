@@ -98,43 +98,54 @@ def sync_expired_sessions(db: Session) -> int:
 @router.get(
     "/sessions",
     response_model=List[LiveSessionItemRes],
-    summary="실시간 활성 세션 목록 조회"
+    summary="실시간 활성 세션 및 접속 이력 목록 조회"
 )
 def get_live_sessions(
+    include_history: bool = Query(False, description="과거 만료/종료된 세션 접속 이력까지 전체 포함 여부"),
+    limit: int = Query(100, description="최대 조회 건수"),
     db: Session = Depends(get_db),
     current_user: User = Depends(check_obs_read)
 ):
     """
     관리자 전용(admin_observability 앱 권한 필요):
-    현재 시스템에 로그인되어 활동 중인 모든 기기/세션 목록을 실시간 조회하며,
-    Redis 생존 여부를 대조하여 자가치유(Self-Healing) 복원 및 만료 세션을 정리합니다.
+    현재 시스템에 로그인되어 활동 중인 실시간 세션(ACTIVE)을 조회합니다.
+    include_history=True 일 경우 과거 로그아웃/만료/추방된 세션 접속 기록(EXPIRED, KICKED_OUT)까지 함께 조회합니다.
     """
     # 1. Redis 실시간 동기화 & 자가치유 (유령 세션만 EXPIRED 처리)
     sync_expired_sessions(db)
 
-    # 2. 실제 살아있는 ACTIVE 세션만 로드
-    sessions = (
+    # 2. 세션 쿼리 (include_history 여부에 따라 분기)
+    query = (
         db.query(UserSession)
         .join(User, UserSession.user_id == User.id)
-        .filter(UserSession.status == "ACTIVE")
-        .order_by(UserSession.last_activity.desc())
-        .all()
     )
+
+    if not include_history:
+        query = query.filter(UserSession.status == "ACTIVE")
+
+    sessions = query.order_by(UserSession.last_activity.desc()).limit(limit).all()
 
     items = []
     for s in sessions:
         user_name = s.user.username if s.user else "Unknown"
+        real_name = s.user.real_name if s.user and s.user.real_name else ""
+        profile = s.user.profile if s.user else None
+        p_grp = profile.primary_group if profile and profile.primary_group else None
+
         items.append(
             LiveSessionItemRes(
                 id=s.id,
                 session_key=s.session_key,
                 user_id=s.user_id,
                 username=user_name,
+                real_name=real_name,
+                primary_group=p_grp,
                 device_category=s.device_category,
                 status=s.status,
                 device_name=s.device_name,
                 ip_address=s.ip_address,
                 login_at=s.login_at,
+                logout_at=s.logout_at,
                 last_activity=s.last_activity,
             )
         )

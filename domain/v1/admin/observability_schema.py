@@ -59,16 +59,19 @@ class AuditLogListRes(BaseModel):
 
 
 class LiveSessionItemRes(BaseModel):
-    """실시간 활성 세션 항목 응답 (기존 v1/admin/sessions 호환)"""
+    """실시간 활성 세션 및 과거 접속 이력 항목 응답"""
     id: int
     session_key: str
     user_id: int
     username: str
+    real_name: Optional[str] = None
+    primary_group: Optional[str] = None
     device_category: str
     status: str
     device_name: Optional[str] = None
     ip_address: Optional[str] = None
     login_at: Optional[datetime] = None
+    logout_at: Optional[datetime] = None
     last_activity: Optional[datetime] = None
 
     class Config:
