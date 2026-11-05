@@ -10,8 +10,12 @@
 
 from datetime import datetime, date, timedelta
 import logging
+import csv
+import io
+import os
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse, FileResponse, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 
@@ -303,4 +307,170 @@ def get_audit_logs(
         page=page,
         page_size=eff_limit,
         summary=summary,
+    )
+
+
+# ==========================================================================
+# 📥 3. 전사 감사로그 CSV 내보내기 & 시스템 원시 로그 다운로드
+# ==========================================================================
+
+@router.get(
+    "/logs/export",
+    summary="전사 감사로그 CSV 내보내기 다운로드"
+)
+def export_audit_logs_csv(
+    app_id: Optional[str] = Query(None, description="앱 식별자 필터"),
+    log_type: Optional[str] = Query(None, description="'ACCESS' | 'CHANGE' | 'ERROR' | 'SECURITY'"),
+    severity: Optional[str] = Query(None, description="'INFO' | 'WARN' | 'ERROR' | 'CRITICAL'"),
+    user_id: Optional[int] = Query(None, description="특정 사용자 user_id 필터"),
+    query: Optional[str] = Query(None, description="검색어"),
+    limit: int = Query(5000, ge=1, le=20000, description="내보낼 최대 건수"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_obs_read)
+):
+    """
+    관리자 전용(admin_observability 읽기 이상):
+    현재 필터 조건에 부합하는 감사로그를 엑셀 호환 UTF-8 BOM CSV 포맷으로 스트리밍 다운로드합니다.
+    """
+    q = db.query(AuditLog)
+
+    if app_id:
+        q = q.filter(AuditLog.app_id == app_id)
+    if log_type:
+        q = q.filter(AuditLog.log_type == log_type.upper())
+    if severity:
+        q = q.filter(AuditLog.severity == severity.upper())
+    if user_id:
+        q = q.filter(AuditLog.user_id == user_id)
+    if query:
+        search_pattern = f"%{query.strip()}%"
+        q = q.filter(
+            or_(
+                AuditLog.title.ilike(search_pattern),
+                AuditLog.message.ilike(search_pattern),
+                AuditLog.user_summary.ilike(search_pattern),
+            )
+        )
+
+    logs = q.order_by(AuditLog.created_at.desc()).limit(limit).all()
+
+    # 엑셀 한글 깨짐 방지 UTF-8 BOM (\ufeff)
+    output = io.StringIO()
+    output.write("\ufeff")
+    writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+
+    # 헤더 작성
+    writer.writerow([
+        "ID",
+        "발생일시",
+        "앱 식별자",
+        "로그 유형",
+        "심각도",
+        "행위(Action)",
+        "작업 수행자",
+        "IP 주소",
+        "제목",
+        "상세 메시지",
+        "리소스 유형",
+        "리소스 ID"
+    ])
+
+    for item in logs:
+        writer.writerow([
+            item.id,
+            item.created_at.strftime("%Y-%m-%d %H:%M:%S") if item.created_at else "",
+            item.app_id or "",
+            item.log_type or "",
+            item.severity or "",
+            item.action or "",
+            item.user_summary or (f"User #{item.user_id}" if item.user_id else "SYSTEM"),
+            item.ip_address or "",
+            item.title or "",
+            item.message or "",
+            item.resource_type or "",
+            item.resource_id or ""
+        ])
+
+    csv_data = output.getvalue()
+    output.close()
+
+    # 📜 [보안 감사로그]: 감사로그 CSV 내보내기 행위 자동 기록
+    safe_log_audit(
+        db=db,
+        app_id="observability",
+        log_type="SECURITY",
+        severity="INFO",
+        action="LOG_EXPORT_CSV",
+        title=f"관리자({current_user.username})에 의한 감사로그 CSV 다운로드",
+        user=current_user,
+        resource_type="audit_log",
+        message=f"감사로그 {len(logs)}건을 CSV로 내보내기 다운로드했습니다. (필터: app_id={app_id}, type={log_type}, query={query})",
+        metadata={"count": len(logs), "app_id": app_id, "log_type": log_type, "query": query}
+    )
+
+    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    type_suffix = log_type.lower() if log_type else "all"
+    filename = f"audit_logs_{type_suffix}_{now_str}.csv"
+
+    return StreamingResponse(
+        io.BytesIO(csv_data.encode("utf-8")),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@router.get(
+    "/system-logs/download",
+    summary="서버 원시 시스템 콘솔 로그(.log) 다운로드"
+)
+def download_system_console_log(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_obs_read)
+):
+    """
+    관리자 전용(admin_observability 읽기 이상):
+    Uvicorn/FastAPI 런타임 콘솔 표준 출력이 누적된 system.log 파일을 다운로드합니다.
+    """
+    # test/logs/system.log 절대 경로 산출 (3단계 상위 logs 디렉토리)
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    log_file_path = os.path.join(base_dir, "logs", "system.log")
+
+    if not os.path.exists(log_file_path):
+        os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+        with open(log_file_path, "w", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] [system] System log file initialized.\n")
+
+    # 📜 [보안 감사로그]: 시스템 콘솔 로그 다운로드 기록
+    safe_log_audit(
+        db=db,
+        app_id="observability",
+        log_type="SECURITY",
+        severity="WARN",
+        action="SYSTEM_LOG_DOWNLOAD",
+        title=f"관리자({current_user.username})에 의한 시스템 콘솔 로그 파일 다운로드",
+        user=current_user,
+        resource_type="system_log",
+        message="서버 런타임 원시 콘솔 로그 파일(system.log) 다운로드를 수행했습니다."
+    )
+
+    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"system_console_{now_str}.log"
+
+    # 🔒 [동시 쓰기 레이스 컨디션 방어]:
+    # 실시간으로 계속 추가되는 로그 파일과의 Content-Length 불일치(502 Bad Gateway)를 원천 차단하기 위해
+    # 현재 시점의 안전한 바이트 스냅샷을 메모리로 읽어 정확한 바이트 크기로 응답합니다.
+    try:
+        with open(log_file_path, "rb") as f:
+            file_bytes = f.read()
+    except Exception as e:
+        logger.error(f"로그 파일 읽기 오류: {e}")
+        file_bytes = f"로그 파일을 읽는 중 오류가 발생했습니다: {str(e)}".encode("utf-8")
+
+    return Response(
+        content=file_bytes,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(file_bytes))
+        }
     )

@@ -1,8 +1,36 @@
 import os
 import asyncio
+import logging
+from logging.handlers import RotatingFileHandler
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
+
+# 🖥️ 시스템 콘솔 원시 로그(Raw System Log) 영구 보존용 파일 핸들러 설정 (최대 10MB, 백업 5개)
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+SYSTEM_LOG_PATH = os.path.join(LOG_DIR, "system.log")
+
+system_file_handler = RotatingFileHandler(
+    SYSTEM_LOG_PATH,
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8"
+)
+system_file_formatter = logging.Formatter(
+    fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+system_file_handler.setFormatter(system_file_formatter)
+
+# 루트 로거 및 uvicorn 로거에 바인딩
+root_logger = logging.getLogger()
+if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
+    root_logger.addHandler(system_file_handler)
+    logging.getLogger("uvicorn").addHandler(system_file_handler)
+    logging.getLogger("uvicorn.access").addHandler(system_file_handler)
+    logging.getLogger("uvicorn.error").addHandler(system_file_handler)
+    logging.getLogger("fastapi").addHandler(system_file_handler)
 
 from domain.user import user_router
 from domain.fileupload import fileupload_router
