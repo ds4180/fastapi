@@ -17,6 +17,7 @@ from models import Alert, User
 from domain.alert.alert_schema import AlertCreate, AlertUpdate
 from domain.ws.ws_service import manager
 from domain.push.push_service import send_push_to_all
+from core.audit import safe_log_audit
 
 
 def get_alert_list(db: Session) -> List[Alert]:
@@ -157,15 +158,49 @@ async def create_alert(
     # 🔔 실시간 웹소켓 갱신 신호 브로드캐스트 (기존 레거시 팝업/토스트 화면 동기화)
     background_tasks.add_task(manager.broadcast, {"type": "new_alert"})
 
+    # 📜 [보안 감사로그]: 새 알림/지시사항 생성 기록
+    safe_log_audit(
+        db=db,
+        app_id="alerts",
+        log_type="CHANGE",
+        severity="INFO" if db_alert.level < 4 else "WARN",
+        action="ALERT_CREATED",
+        title=f"관리자({user.username})에 의한 새 공지·지시 발행 (#{db_alert.id})",
+        user=user,
+        resource_type="alert",
+        resource_id=str(db_alert.id),
+        message=f"[{db_alert.category}] 레벨 {db_alert.level}, 대상그룹: {db_alert.target_group or '전사'} - {db_alert.message[:40]}",
+        metadata={"alert_id": db_alert.id, "level": db_alert.level, "category": db_alert.category, "target_group": db_alert.target_group}
+    )
+
     return db_alert
 
 
-def delete_alert(db: Session, db_alert: Alert):
+def delete_alert(db: Session, db_alert: Alert, admin_user: Optional[User] = None):
     """
-    알림 삭제
+    알림 삭제 (감사로그 연동)
     """
+    alert_id = db_alert.id
+    msg_snippet = db_alert.message[:30] if db_alert.message else ""
+    cat = db_alert.category or "NOTICE"
+
     db.delete(db_alert)
     db.commit()
+
+    if admin_user:
+        safe_log_audit(
+            db=db,
+            app_id="alerts",
+            log_type="SECURITY",
+            severity="WARN",
+            action="ALERT_DELETED",
+            title=f"관리자({admin_user.username})에 의한 알림 #{alert_id} 삭제",
+            user=admin_user,
+            resource_type="alert",
+            resource_id=str(alert_id),
+            message=f"삭제된 공지/지시: [{cat}] {msg_snippet}",
+            metadata={"alert_id": alert_id, "category": cat}
+        )
 
 
 def get_alert(db: Session, alert_id: int) -> Optional[Alert]:
@@ -175,14 +210,30 @@ def get_alert(db: Session, alert_id: int) -> Optional[Alert]:
     return db.query(Alert).filter(Alert.id == alert_id).first()
 
 
-async def toggle_alert(db: Session, db_alert: Alert) -> Alert:
+async def toggle_alert(db: Session, db_alert: Alert, admin_user: Optional[User] = None) -> Alert:
     """
-    알림 활성/비활성 상태 전환
+    알림 활성/비활성 상태 전환 (감사로그 연동)
     - 상태 변경 후 실시간 웹소켓으로 클라이언트 화면 동기화
     """
+    old_status = db_alert.is_active
     db_alert.is_active = not db_alert.is_active
     db.commit()
     db.refresh(db_alert)
+
+    if admin_user:
+        safe_log_audit(
+            db=db,
+            app_id="alerts",
+            log_type="CHANGE",
+            severity="INFO",
+            action="ALERT_TOGGLED",
+            title=f"관리자({admin_user.username})에 의한 알림 #{db_alert.id} 활성상태 변경 ({old_status} -> {db_alert.is_active})",
+            user=admin_user,
+            resource_type="alert",
+            resource_id=str(db_alert.id),
+            message=f"알림 #{db_alert.id} 상태: {'활성화됨' if db_alert.is_active else '비활성화됨'}",
+            metadata={"alert_id": db_alert.id, "is_active": db_alert.is_active}
+        )
 
     # 활성 상태가 변경되었으므로 클라이언트에 즉시 갱신 신호 발송
     try:
@@ -193,14 +244,36 @@ async def toggle_alert(db: Session, db_alert: Alert) -> Alert:
     return db_alert
 
 
-def update_alert(db: Session, db_alert: Alert, alert_update: AlertUpdate) -> Alert:
+def update_alert(db: Session, db_alert: Alert, alert_update: AlertUpdate, admin_user: Optional[User] = None) -> Alert:
     """
-    알림 수정
+    알림 수정 (감사로그 연동)
     """
-    for key, value in alert_update.model_dump(exclude_unset=True).items():
-        setattr(db_alert, key, value)
+    diff_payload = []
+    update_data = alert_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        old_val = getattr(db_alert, key, None)
+        if str(old_val) != str(value):
+            diff_payload.append({"field": key, "from": str(old_val), "to": str(value)})
+            setattr(db_alert, key, value)
     db.commit()
     db.refresh(db_alert)
+
+    if diff_payload and admin_user:
+        safe_log_audit(
+            db=db,
+            app_id="alerts",
+            log_type="CHANGE",
+            severity="INFO",
+            action="ALERT_UPDATED",
+            title=f"관리자({admin_user.username})에 의한 알림 #{db_alert.id} 내용 수정",
+            user=admin_user,
+            resource_type="alert",
+            resource_id=str(db_alert.id),
+            message=f"알림 #{db_alert.id}의 {len(diff_payload)}개 필드가 수정되었습니다.",
+            diff_payload=diff_payload,
+            metadata={"alert_id": db_alert.id, "changes": [d["field"] for d in diff_payload]}
+        )
+
     return db_alert
 
 

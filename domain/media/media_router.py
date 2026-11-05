@@ -6,8 +6,9 @@ from database import get_db
 from domain.user.user_router import get_current_user
 from domain.media import media_service, media_config
 from core.deps import require_app_permission
-from core.permission import can_access_app
-from models import User, MediaAsset
+from core.permission import ROOT_RANK, get_user_rank, can_access_app
+from core.audit import safe_log_audit
+from models import User, MediaAsset, AppRegistry
 import os
 import shutil
 import io
@@ -24,6 +25,19 @@ router = APIRouter(
 # 🏛️ AppRegistry 거버넌스 연동 미디어 관리 권한 가드
 check_media_admin = require_app_permission("media", action="read")
 check_media_admin_write = require_app_permission("media", action="write")
+
+
+def check_is_media_admin(user: User, db: Session, action: str = "read") -> bool:
+    """사용자가 media 시스템 앱 관리자 권한을 보유하고 있는지 4단계 거버넌스로 검증"""
+    if get_user_rank(user) == ROOT_RANK:
+        return True
+    app_meta = db.query(AppRegistry).filter(AppRegistry.app_id == "media").first()
+    if not app_meta:
+        # 하위 호환 폴백 (legacy admin_media)
+        app_meta = db.query(AppRegistry).filter(AppRegistry.app_id == "admin_media").first()
+    if not app_meta:
+        return user.rank() >= 4
+    return can_access_app(user, app_meta, action=action)
 
 class FolderCreateRequest(BaseModel):
     tier: str
@@ -230,6 +244,18 @@ async def media_publish(
         access_level=target_tier,
         sub_path=req.sub_path
     )
+    safe_log_audit(
+        db=db,
+        app_id="media",
+        log_type="CHANGE",
+        action="PUBLISH",
+        title="미디어 자산 서비스 배포 (Publish)",
+        user=current_user,
+        severity="INFO",
+        resource_type="media_asset",
+        resource_id=str(req.asset_ids),
+        message=f"개인 자산 {len(published)}건을 [{target_tier}] 영역으로 배포 복사했습니다."
+    )
     return published
 
 @router.get("/admin/list")
@@ -237,19 +263,21 @@ async def media_admin_list(
     tier: str = "PUBLIC",
     sub_path: str = "",
     recursive: bool = True,
+    show_hidden: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     upper_tier = tier.upper()
     target_sub_path = sub_path.strip("/")
+    is_admin = check_is_media_admin(current_user, db, action="read")
 
-    # [v3.3 권한 정책: AppRegistry admin_media 연동]
-    # - 관리자(admin_media 열람 권한 보유자): 전체 티어 및 전체 사용자 폴더 관제 가능
+    # [v3.3 권한 정책: AppRegistry media 거버넌스 연동]
+    # - 관리자(media 열람 권한 보유자): 전체 티어 및 전체 사용자 폴더 관제 가능
     # - 일반 사용자:
     #   1) PRIVATE 티어: 본인 폴더(USERS/{current_user.id})만 조회 가능 (미지정 시 자동 보정)
     #   2) SYSTEM 티어: 공용폴더(GLOBAL/OFFICE)는 Rank >= 2 열람 가능, 그 외 SYSTEM은 차단
     #   3) PROTECTED / PUBLIC 티어: Rank >= 2 탐색 가능
-    if not can_access_app(current_user, "admin_media", db):
+    if not is_admin:
         if upper_tier == "PRIVATE":
             if not target_sub_path:
                 target_sub_path = f"USERS/{current_user.id}"
@@ -272,17 +300,24 @@ async def media_admin_list(
         media_service.safe_makedirs(target_dir)
         
     folders = []
+    # 숨김/격리 파일 열람: 관리자이면서 show_hidden=True인 경우에만 허용
+    allow_hidden = is_admin and show_hidden
     try:
         with os.scandir(target_dir) as entries:
             for entry in entries:
-                # 숨김 폴더('.' 시작) 및 THUMB 폴더는 탐색기 폴더 목록에서 비노출 (하위 호환을 위해 구 DEL_ 접두어도 제외)
-                if entry.is_dir() and not entry.name.startswith('.'):
-                    if entry.name not in [media_config.THUMB_FOLDER_NAME, 'tmp'] and not entry.name.startswith('DEL_'):
-                        folders.append({
-                            "name": entry.name,
-                            "type": "folder",
-                            "path": os.path.join(target_sub_path, entry.name).strip("/")
-                        })
+                if entry.is_dir():
+                    # THUMB 폴더 및 tmp는 탐색기에서 항상 제외
+                    if entry.name in [media_config.THUMB_FOLDER_NAME, 'tmp']:
+                        continue
+                    is_dot_or_del = entry.name.startswith('.') or entry.name.startswith('DEL_')
+                    if not allow_hidden and is_dot_or_del:
+                        continue
+                    folders.append({
+                        "name": entry.name,
+                        "type": "folder",
+                        "is_hidden": is_dot_or_del,
+                        "path": os.path.join(target_sub_path, entry.name).strip("/")
+                    })
     except Exception as e:
         print(f"Error scanning: {e}")
 
@@ -293,11 +328,13 @@ async def media_admin_list(
     
     base_filter = [
         MediaAsset.access_level == upper_tier,
-        MediaAsset.is_deleted == False,
-        # 숨김 파일('.' 시작) 및 숨김 폴더('/.' 포함) 내부 파일은 목록에서 비노출
-        not_(MediaAsset.original_name.like(".%")),
-        not_(MediaAsset.file_path.like("%/.%"))
     ]
+    if not allow_hidden:
+        base_filter.extend([
+            MediaAsset.is_deleted == False,
+            not_(MediaAsset.original_name.like(".%")),
+            not_(MediaAsset.file_path.like("%/.%"))
+        ])
     
     if recursive:
         base_filter.append(MediaAsset.file_path.like(f"{search_prefix}%"))
@@ -312,6 +349,7 @@ async def media_admin_list(
     return {
         "tier": tier,
         "current_path": target_sub_path,
+        "show_hidden": allow_hidden,
         "folders": sorted(folders, key=lambda x: x['name']),
         "files": all_files 
     }
@@ -319,6 +357,7 @@ async def media_admin_list(
 @router.post("/admin/folder/create")
 async def media_admin_create_folder(
     req: FolderCreateRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     upper_tier = req.tier.upper()
@@ -329,7 +368,8 @@ async def media_admin_create_folder(
         raise HTTPException(status_code=400, detail="유효하지 않은 폴더 이름입니다.")
 
     # [v3.3 권한 정책] 일반 사용자는 본인 개인 폴더(PRIVATE/USERS/{id}) 하위에서만 폴더 생성 가능
-    if current_user.rank() < 4:
+    is_admin = check_is_media_admin(current_user, db, action="write")
+    if not is_admin:
         if not clean_sub_path and upper_tier == "PRIVATE":
             clean_sub_path = f"USERS/{current_user.id}"
         if not _is_own_private_path(current_user, upper_tier, clean_sub_path):
@@ -343,7 +383,20 @@ async def media_admin_create_folder(
         raise HTTPException(status_code=400, detail="Folder already exists")
     
     media_service.safe_makedirs(new_dir)
-    return {"message": "Folder created", "path": os.path.join(clean_sub_path, clean_folder_name).strip("/")}
+    folder_full_path = os.path.join(clean_sub_path, clean_folder_name).strip("/")
+    safe_log_audit(
+        db=db,
+        app_id="media",
+        log_type="CHANGE",
+        action="CREATE_FOLDER",
+        title="미디어 폴더 생성",
+        user=current_user,
+        severity="INFO",
+        resource_type="folder",
+        resource_id=folder_full_path,
+        message=f"[{upper_tier}] /{folder_full_path} 폴더를 생성했습니다."
+    )
+    return {"message": "Folder created", "path": folder_full_path}
 
 @router.post("/admin/backup")
 async def media_admin_backup(
@@ -362,6 +415,18 @@ async def media_admin_backup(
         priority=3
     )
     db.commit()
+    safe_log_audit(
+        db=db,
+        app_id="media",
+        log_type="ACCESS",
+        action="BACKUP",
+        title="미디어 자산 백업 예약",
+        user=current_user,
+        severity="INFO",
+        resource_type="media_asset",
+        resource_id=str(req.asset_ids),
+        message=f"미디어 자산 {len(req.asset_ids)}건 백업 태스크(ID: {task.id})를 예약했습니다."
+    )
     return {"message": "백업 작업이 예약되었습니다.", "task_id": task.id}
 
 @router.post("/admin/bulk-delete")
@@ -370,7 +435,7 @@ async def media_admin_bulk_delete(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    is_admin = can_access_app(current_user, "admin_media", db)
+    is_admin = check_is_media_admin(current_user, db, action="write")
     submitted_count = 0
 
     # 1. 파일별 비동기 삭제 예약 (일반 유저는 본인 소유 파일만 삭제 가능)
@@ -423,6 +488,19 @@ async def media_admin_bulk_delete(
             except Exception as e:
                 print(f"Folder isolate error: {e}")
 
+    safe_log_audit(
+        db=db,
+        app_id="media",
+        log_type="CHANGE",
+        action="DELETE",
+        title="미디어 자산/폴더 일괄 삭제(격리)",
+        user=current_user,
+        severity="WARN",
+        resource_type="media_asset",
+        resource_id=f"assets:{len(req.asset_ids)},folders:{len(req.folder_paths)}",
+        message=f"총 {submitted_count}건의 미디어 자산/폴더를 삭제(격리) 처리했습니다."
+    )
+
     return {"message": f"{submitted_count}건의 삭제 작업이 처리되었습니다."}
 
 @router.post("/admin/gc")
@@ -441,6 +519,18 @@ async def media_admin_run_gc(
         priority=9
     )
     db.commit()
+    safe_log_audit(
+        db=db,
+        app_id="media",
+        log_type="CHANGE",
+        action="GC",
+        title="미디어 스토리지 GC 실행 예약",
+        user=current_user,
+        severity="WARN",
+        resource_type="system_task",
+        resource_id=str(task.id),
+        message=f"미디어 시스템 가비지 컬렉션(GC) 작업을 예약했습니다. (Task ID: {task.id})"
+    )
     return {"message": "시스템 정리(GC) 작업이 예약되었습니다.", "task_id": task.id}
 
 @router.post("/delete/{asset_id}")
@@ -453,10 +543,26 @@ async def media_admin_delete(
     if not asset:
         raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 이미 삭제되었습니다.")
 
-    # [v3.3 권한 정책] 본인 소유 자산이거나 관리자(rank >= 4)인 경우 삭제(격리) 허용
-    if asset.user_id != current_user.id and current_user.rank() < 4:
+    is_admin = check_is_media_admin(current_user, db, action="write")
+    # [v3.3 권한 정책] 본인 소유 자산이거나 관리자인 경우 삭제(격리) 허용
+    if asset.user_id != current_user.id and not is_admin:
         raise HTTPException(status_code=403, detail="본인의 파일만 삭제할 수 있습니다.")
     
+    asset_name = asset.original_name
     success = media_service.delete_asset(db, asset_id)
-    if not success: raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 삭제에 실패했습니다.")
+    if not success:
+        raise HTTPException(status_code=404, detail="자산을 찾을 수 없거나 삭제에 실패했습니다.")
+
+    safe_log_audit(
+        db=db,
+        app_id="media",
+        log_type="CHANGE",
+        action="DELETE",
+        title="미디어 자산 단일 삭제(격리)",
+        user=current_user,
+        severity="WARN",
+        resource_type="media_asset",
+        resource_id=str(asset_id),
+        message=f"미디어 자산 [{asset_id}] {asset_name}을(를) 삭제(격리) 처리했습니다."
+    )
     return {"message": "Successfully deleted"}

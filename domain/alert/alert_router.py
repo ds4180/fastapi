@@ -90,7 +90,7 @@ def alert_delete(
     if not db_alert:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="알림을 찾을 수 없습니다.")
     
-    alert_crud.delete_alert(db, db_alert)
+    alert_crud.delete_alert(db, db_alert, admin_user=admin_user)
 
 
 @router.put("/update/{alert_id}", response_model=alert_schema.Alert)
@@ -107,7 +107,7 @@ async def alert_update(
     if not db_alert:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="알림을 찾을 수 없습니다.")
     
-    return alert_crud.update_alert(db, db_alert=db_alert, alert_update=_alert_update)
+    return alert_crud.update_alert(db, db_alert=db_alert, alert_update=_alert_update, admin_user=admin_user)
 
 
 @router.post("/toggle/{alert_id}", response_model=alert_schema.Alert)
@@ -123,7 +123,7 @@ async def alert_toggle(
     if not db_alert:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="알림을 찾을 수 없습니다.")
     
-    return await alert_crud.toggle_alert(db, db_alert)
+    return await alert_crud.toggle_alert(db, db_alert, admin_user=admin_user)
 
 
 @router.get("/{alert_id}/acknowledgements")
