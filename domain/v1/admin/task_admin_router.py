@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, func, or_
 from database import get_db
 from models import SystemTask, User
 from core.deps import require_app_permission
+from core.audit import safe_log_audit
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from .admin_schema import SystemTaskCreate
 
 router = APIRouter(
@@ -17,24 +18,94 @@ router = APIRouter(
 check_task_read = require_app_permission("tasks", action="read")
 check_task_write = require_app_permission("tasks", action="write")
 
+# 📋 관리자가 한눈에 이해하는 쉬운 한글 메타데이터 매핑
+TASK_METADATA: Dict[str, Dict[str, Any]] = {
+    "MEDIA_GC": {
+        "label": "스토리지 찌꺼기 청소",
+        "description": "불필요한 임시 업로드 파일과 휴지통 잔여 데이터를 자동 정리하여 서버 디스크 공간을 확보합니다.",
+        "category": "정리/보관",
+        "icon": "solar:broom-bold-duotone",
+        "example": {"indices": [1, 2, 3]}
+    },
+    "DYNAMIC_GROUP_REFRESH": {
+        "label": "오늘 운행 기사 그룹 동기화",
+        "description": "오늘 배차 및 휴무 일정과 대조하여 알림을 수신할 승무원 그룹(단체방)을 최신화합니다.",
+        "category": "배차/동기화",
+        "icon": "solar:users-group-two-rounded-bold-duotone",
+        "example": {}
+    },
+    "THUMB_GEN": {
+        "label": "사진 썸네일 축소판 생성",
+        "description": "업로드된 원본 이미지를 모바일 기기에서 초고속으로 열 수 있도록 최적화된 작은 축소판을 만듭니다.",
+        "category": "미디어",
+        "icon": "solar:gallery-wide-bold-duotone",
+        "example": {"asset_id": 1}
+    },
+    "MEDIA_BACKUP": {
+        "label": "중요 사진·파일 안전 백업",
+        "description": "지정된 첨부파일 자산들을 안전하게 압축하여 장기 보존용 저장소로 복제 백업합니다.",
+        "category": "정리/보관",
+        "icon": "solar:box-archive-bold-duotone",
+        "example": {"asset_ids": [1, 2], "target_user_id": 1}
+    },
+    "MEDIA_ISOLATE": {
+        "label": "의심 파일 격리 검역",
+        "description": "보안 위험이 의심되는 파일을 일반 사용자가 접근할 수 없는 격리 검역소로 이동시킵니다.",
+        "category": "보안",
+        "icon": "solar:shield-warning-bold-duotone",
+        "example": {"file_path": "/path/to/file", "asset_id": 1}
+    }
+}
+
+
+@router.get("/summary")
+def get_tasks_summary(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_task_read)
+):
+    """[관리자용] 상단 4대 로봇 일꾼(워커) 관제 요약 지표 집계"""
+    pending_count = db.query(func.count(SystemTask.id)).filter(SystemTask.status == "PENDING").scalar() or 0
+    running_count = db.query(func.count(SystemTask.id)).filter(SystemTask.status == "RUNNING").scalar() or 0
+    failed_count = db.query(func.count(SystemTask.id)).filter(SystemTask.status == "FAILED").scalar() or 0
+    scheduler_count = db.query(func.count(SystemTask.id)).filter(
+        or_(SystemTask.cron_expression.is_not(None), SystemTask.repeat_interval.is_not(None))
+    ).scalar() or 0
+
+    return {
+        "worker_status": "ONLINE",
+        "pending_count": pending_count,
+        "running_count": running_count,
+        "failed_count": failed_count,
+        "scheduler_count": scheduler_count
+    }
+
+
 @router.get("/types")
 def list_task_types(
     db: Session = Depends(get_db),
     admin: User = Depends(check_task_read)
 ):
-    """[관리자용] 현재 시스템에 등록된 모든 태스크 유형과 가이드를 조회합니다."""
+    """[관리자용] 현재 시스템에 등록된 모든 태스크 유형과 가이드를 친절한 한글 메타데이터와 함께 조회합니다."""
     from domain.system.task_worker import TASK_HANDLERS
     
-    # 작업 유형별 예시 페이로드 (간단한 정의)
-    guidelines = {
-        "MEDIA_ISOLATE": {"file_path": "/path/to/file", "asset_id": 1},
-        "THUMB_GEN": {"asset_id": 1},
-        "MEDIA_BACKUP": {"asset_ids": [1, 2], "target_user_id": 1},
-        "MEDIA_GC": {"indices": [1, 2, 3, 4, 5]},
-        "DYNAMIC_GROUP_REFRESH": {}
-    }
-    
-    return [{"type": t, "example": guidelines.get(t, {})} for t in TASK_HANDLERS.keys()]
+    result = []
+    for t in TASK_HANDLERS.keys():
+        meta = TASK_METADATA.get(t, {
+            "label": t,
+            "description": f"시스템 백그라운드 비동기 작업 ({t})",
+            "category": "기타",
+            "icon": "solar:cpu-bolt-bold-duotone",
+            "example": {}
+        })
+        result.append({
+            "type": t,
+            "label": meta["label"],
+            "description": meta["description"],
+            "category": meta["category"],
+            "icon": meta["icon"],
+            "example": meta.get("example", {})
+        })
+    return result
 
 @router.get("")
 def list_tasks(
@@ -87,6 +158,22 @@ def create_task(
     db.add(new_task)
     db.commit()
     db.refresh(new_task)
+
+    # 📜 [보안 감사로그]: 태스크 수동 등록 기록
+    safe_log_audit(
+        db=db,
+        app_id="tasks",
+        log_type="CHANGE",
+        severity="INFO",
+        action="TASK_CREATED",
+        title=f"관리자({admin.username})에 의한 태스크 #{new_task.id} ({new_task.task_type}) 등록",
+        user=admin,
+        resource_type="system_task",
+        resource_id=str(new_task.id),
+        message=f"작업 유형: {new_task.task_type}, 크론: {new_task.cron_expression or '단발성'}, 우선순위: {new_task.priority}",
+        metadata={"task_id": new_task.id, "task_type": new_task.task_type}
+    )
+
     return new_task
 
 @router.get("/{task_id}")
@@ -121,6 +208,22 @@ def retry_task(
     task.scheduled_at = datetime.now() # 지금 즉시 재시도
     
     db.commit()
+
+    # 📜 [보안 감사로그]: 실패 태스크 관리자 수동 재시도 기록
+    safe_log_audit(
+        db=db,
+        app_id="tasks",
+        log_type="SECURITY",
+        severity="WARN",
+        action="TASK_RETRIED",
+        title=f"관리자({admin.username})에 의한 태스크 #{task.id} 강제 재실행",
+        user=admin,
+        resource_type="system_task",
+        resource_id=str(task.id),
+        message=f"실패했던 작업 #{task.id} ({task.task_type})을 PENDING 상태로 재투입했습니다.",
+        metadata={"task_id": task.id, "task_type": task.task_type}
+    )
+
     return {"message": "태스크가 다시 큐에 등록되었습니다.", "task_id": task.id}
 
 @router.delete("/{task_id}")
@@ -139,4 +242,20 @@ def cancel_task(
         
     task.status = "CANCELLED"
     db.commit()
+
+    # 📜 [보안 감사로그]: 태스크 취소 기록
+    safe_log_audit(
+        db=db,
+        app_id="tasks",
+        log_type="SECURITY",
+        severity="WARN",
+        action="TASK_CANCELLED",
+        title=f"관리자({admin.username})에 의한 태스크 #{task.id} 강제 취소",
+        user=admin,
+        resource_type="system_task",
+        resource_id=str(task.id),
+        message=f"작업 #{task.id} ({task.task_type}) 취소 완료",
+        metadata={"task_id": task.id, "task_type": task.task_type}
+    )
+
     return {"message": "태스크가 취소되었습니다."}
