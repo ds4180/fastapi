@@ -34,18 +34,36 @@ def calculate_next_scheduled_at(
                 logger.error(f"Cron 표현식 파싱 실패 ({cron_expr}): {e}")
                 return None
         else:
-            # croniter 미설치 시 기본 패턴 폴백 파싱 (예: "*/5 * * * *", "0 0 * * *")
+            # croniter 미설치 환경에서도 주요 Cron 패턴을 100% 정밀하게 자체 계산
             parts = cron_expr.strip().split()
             if len(parts) == 5:
-                minute_part = parts[0]
-                if minute_part.startswith("*/"):
+                m_str, h_str, dom_str, mon_str, dow_str = parts
+
+                # 1. 일일 특정 시각 고정 스케줄 (예: "0 7 * * *" -> 매일 아침 07:00, "0 3 * * *" -> 매일 새벽 03:00)
+                if m_str.isdigit() and h_str.isdigit() and dom_str == "*" and mon_str == "*" and dow_str == "*":
+                    target_hour = int(h_str)
+                    target_min = int(m_str)
+                    candidate = base.replace(hour=target_hour, minute=target_min, second=0, microsecond=0)
+                    if candidate <= base:
+                        candidate += timedelta(days=1)
+                    return candidate
+
+                # 2. 고빈도 분 주기 스케줄 (예: "*/10 * * * *")
+                if m_str.startswith("*/"):
                     try:
-                        step_min = int(minute_part.split("/")[1])
+                        step_min = int(m_str.split("/")[1])
                         return base + timedelta(minutes=step_min)
                     except ValueError:
                         pass
-            # 기본 1시간 후 폴백
-            logger.warning(f"croniter 모듈이 없어 Cron({cron_expr})을 1시간 후로 기본 폴백 예약합니다.")
+
+                # 3. 매시간 정각 스케줄 (예: "0 * * * *")
+                if m_str.isdigit() and h_str == "*":
+                    target_min = int(m_str)
+                    candidate = base.replace(minute=target_min, second=0, microsecond=0) + timedelta(hours=1)
+                    return candidate
+
+            # 알 수 없는 패턴 시 기본 1시간 후 폴백
+            logger.warning(f"Cron({cron_expr}) 패턴을 1시간 후로 기본 폴백 예약합니다.")
             return base + timedelta(hours=1)
 
     elif interval_sec and interval_sec > 0:
@@ -118,10 +136,10 @@ def bootstrap_default_cron_tasks(db: Session) -> int:
             "unique_key": "cron:dynamic_group_refresh",
             "payload": {},
             "priority": 3,
-            "repeat_interval": 600, # 10분마다
-            "cron_expression": None,
+            "repeat_interval": None,
+            "cron_expression": "0 7 * * *", # 매일 아침 07:00 정기 자동 생성
             "tags": ["core", "dynamic_group", "cron"],
-            "desc": "기사·휴무·배차 동적 그룹 10분 주기 실시간 자율 연산"
+            "desc": "기사·휴무·배차 동적 타겟 그룹 매일 아침 07:00 정기 자율 갱신"
         },
         {
             "task_type": "SYSTEM_WATCHDOG_INSPECTION",
@@ -193,6 +211,29 @@ def bootstrap_default_cron_tasks(db: Session) -> int:
             )
             registered_count += 1
             logger.info(f"🌱 [Bootstrap] 자율신경계 정기 태스크 등록 완료: {defn['task_type']} ({defn['desc']})")
+        else:
+            # 🛡️ [자가치유 및 사양 동기화]: FAILED 상태로 멈춰있거나 Cron 표현식이 변경된 경우 즉시 정상화
+            needs_heal = False
+            if existing.status in ("FAILED", "CANCELLED"):
+                existing.status = "PENDING"
+                existing.retry_count = 0
+                existing.error_message = None
+                needs_heal = True
+            if existing.cron_expression != defn["cron_expression"]:
+                existing.cron_expression = defn["cron_expression"]
+                needs_heal = True
+            if existing.repeat_interval != defn["repeat_interval"]:
+                existing.repeat_interval = defn["repeat_interval"]
+                needs_heal = True
+
+            if needs_heal:
+                existing.scheduled_at = calculate_next_scheduled_at(
+                    cron_expr=defn["cron_expression"],
+                    interval_sec=defn["repeat_interval"],
+                    base_time=now
+                ) or now
+                registered_count += 1
+                logger.info(f"✨ [Bootstrap] 핵심 정기 태스크 자가치유/사양 갱신 완료: {defn['task_type']} (Status: PENDING, Cron: {defn['cron_expression']})")
 
     if registered_count > 0:
         db.commit()

@@ -7,7 +7,7 @@ from core.deps import require_app_permission
 from core.audit import safe_log_audit
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from .admin_schema import SystemTaskCreate
+from .admin_schema import SystemTaskCreate, SystemTaskUpdate
 
 router = APIRouter(
     prefix="/admin/tasks",
@@ -226,36 +226,134 @@ def retry_task(
 
     return {"message": "태스크가 다시 큐에 등록되었습니다.", "task_id": task.id}
 
-@router.delete("/{task_id}")
-def cancel_task(
+
+@router.put("/{task_id}")
+def update_task(
     task_id: int,
+    task_in: SystemTaskUpdate,
     db: Session = Depends(get_db),
     admin: User = Depends(check_task_write)
 ):
-    """실행 대기 중인 태스크를 취소 처리합니다."""
+    """
+    [관리자용] 대기 중(PENDING)인 비동기/예약 태스크의 스케줄, 주기 및 옵션을 수정합니다.
+    """
+    task = db.query(SystemTask).filter(SystemTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="태스크를 찾을 수 없습니다.")
+
+    if task.status == "RUNNING":
+        raise HTTPException(status_code=400, detail="현재 실행 중(RUNNING)인 작업은 수정할 수 없습니다.")
+
+    update_data = task_in.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(task, field, value)
+
+    # cron_expression 또는 repeat_interval이 갱신되었고 scheduled_at이 명시되지 않은 경우 다음 스케줄 일시 재계산
+    if ("cron_expression" in update_data or "repeat_interval" in update_data) and "scheduled_at" not in update_data:
+        from domain.system.task_service import calculate_next_scheduled_at
+        re_next = calculate_next_scheduled_at(
+            cron_expr=task.cron_expression,
+            interval_sec=task.repeat_interval
+        )
+        if re_next:
+            task.scheduled_at = re_next
+
+    db.commit()
+    db.refresh(task)
+
+    # 📜 [보안 감사로그]: 태스크 스케줄 수정 기록
+    safe_log_audit(
+        db=db,
+        app_id="tasks",
+        log_type="CHANGE",
+        severity="INFO",
+        action="TASK_UPDATED",
+        title=f"관리자({admin.username})에 의한 태스크 #{task.id} 스케줄/설정 수정",
+        user=admin,
+        resource_type="system_task",
+        resource_id=str(task.id),
+        message=f"작업 #{task.id} ({task.task_type}) 수정 완료 (스케줄: {task.scheduled_at}, 크론: {task.cron_expression})",
+        metadata={"task_id": task.id, "task_type": task.task_type, "updated_fields": list(update_data.keys())}
+    )
+
+    return task
+
+
+@router.delete("/failed/clear")
+def clear_all_failed_tasks(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_task_write)
+):
+    """[관리자용] 실패(FAILED) 상태인 모든 고아 태스크를 일괄 영구 삭제합니다."""
+    failed_tasks = db.query(SystemTask).filter(SystemTask.status == "FAILED").all()
+    count = len(failed_tasks)
+    if count == 0:
+        return {"message": "삭제할 실패 태스크가 없습니다.", "deleted_count": 0}
+
+    for t in failed_tasks:
+        db.delete(t)
+    db.commit()
+
+    # 📜 [보안 감사로그]: 실패 태스크 일괄 정리 기록
+    safe_log_audit(
+        db=db,
+        app_id="tasks",
+        log_type="SECURITY",
+        severity="INFO",
+        action="FAILED_TASKS_CLEARED",
+        title=f"관리자({admin.username})에 의한 실패 태스크 {count}건 일괄 영구 삭제",
+        user=admin,
+        resource_type="system_task",
+        resource_id="ALL_FAILED",
+        message=f"FAILED 상태 고아 태스크 {count}건 영구 정리 완료",
+        metadata={"deleted_count": count}
+    )
+
+    return {"message": f"실패한 태스크 {count}건이 일괄 삭제되었습니다.", "deleted_count": count}
+
+
+@router.delete("/{task_id}")
+def cancel_or_delete_task(
+    task_id: int,
+    hard_delete: bool = False,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_task_write)
+):
+    """
+    태스크를 취소하거나 영구 삭제합니다.
+    - 실행 중(RUNNING)인 태스크는 삭제할 수 없습니다.
+    - hard_delete=True 이거나 이미 FAILED/CANCELLED 인 경우 DB에서 영구 삭제합니다.
+    """
     task = db.query(SystemTask).filter(SystemTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="태스크를 찾을 수 없습니다.")
     
     if task.status == "RUNNING":
-        raise HTTPException(status_code=400, detail="이미 실행 중인 태스크는 취소할 수 없습니다.")
+        raise HTTPException(status_code=400, detail="이미 실행 중인 태스크는 삭제/취소할 수 없습니다.")
         
-    task.status = "CANCELLED"
+    is_hard = hard_delete or task.status in ("FAILED", "CANCELLED")
+    action_name = "TASK_DELETED" if is_hard else "TASK_CANCELLED"
+    msg = f"태스크 #{task.id} 영구 삭제" if is_hard else f"태스크 #{task.id} 취소"
+
+    if is_hard:
+        db.delete(task)
+    else:
+        task.status = "CANCELLED"
     db.commit()
 
-    # 📜 [보안 감사로그]: 태스크 취소 기록
+    # 📜 [보안 감사로그]: 태스크 취소/삭제 기록
     safe_log_audit(
         db=db,
         app_id="tasks",
         log_type="SECURITY",
         severity="WARN",
-        action="TASK_CANCELLED",
-        title=f"관리자({admin.username})에 의한 태스크 #{task.id} 강제 취소",
+        action=action_name,
+        title=f"관리자({admin.username})에 의한 {msg}",
         user=admin,
         resource_type="system_task",
-        resource_id=str(task.id),
-        message=f"작업 #{task.id} ({task.task_type}) 취소 완료",
-        metadata={"task_id": task.id, "task_type": task.task_type}
+        resource_id=str(task_id),
+        message=f"작업 #{task_id} ({task.task_type}) {msg} 완료",
+        metadata={"task_id": task_id, "task_type": task.task_type, "hard_delete": is_hard}
     )
 
-    return {"message": "태스크가 취소되었습니다."}
+    return {"message": f"{msg} 완료되었습니다.", "task_id": task_id, "hard_deleted": is_hard}

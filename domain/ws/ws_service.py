@@ -30,6 +30,17 @@ class ConnectionManager:
                 if i < len(self.active_connections):
                     self.disconnect(self.active_connections[i])
 
+    def broadcast_sync(self, message: dict):
+        """동기 컨텍스트(워커, 백그라운드 스레드 등)에서 안전하게 브로드캐스트를 비동기 스케줄링"""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self.broadcast(message))
+            else:
+                loop.run_until_complete(self.broadcast(message))
+        except Exception:
+            pass
+
     async def ping_all(self):
         """연결 유지 확인 (Heartbeat)"""
         if not self.active_connections:

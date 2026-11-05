@@ -81,7 +81,8 @@ def get_watchdog_settings(db: Session) -> Dict[str, Any]:
 def check_and_alert_task_failure(db: Session, failed_task_id: Optional[int] = None) -> bool:
     """
     [1. 워커 연속 실패 감시]
-    최근 1시간 내 FAILED 태스크가 임계치(기본 3회)에 도달하면 관리자에게 L4 경보를 발행합니다.
+    최근 1시간 내 FAILED 태스크가 임계치(기본 3회)에 도달하면 관리자 화면에 실시간 토스트 알림을 발행합니다.
+    (알람·지시사항 피드 및 Alert 모달 DB에 적재하지 않고, 가벼운 실시간 토스트로만 표출)
     """
     cfg = get_watchdog_settings(db)
     if not cfg.get("watchdog_enabled", True):
@@ -104,18 +105,40 @@ def check_and_alert_task_failure(db: Session, failed_task_id: Optional[int] = No
             return False
 
         _set_cooldown(cooldown_key)
-        logger.warning(f"🚨 Watchdog: 태스크 연속 실패 임계치 도달 ({fail_count}/{threshold})! 관리자 경보 발송")
+        logger.warning(f"🚨 Watchdog: 태스크 연속 실패 임계치 도달 ({fail_count}/{threshold})! 토스트 알림 발송")
 
-        task_id_info = f"작업 ID #{failed_task_id} 포함 " if failed_task_id else ""
-        safe_notify(
-            db=db,
-            category="ALARM",
-            title="🚨 [시스템 경보] 백그라운드 태스크 연속 실패 감지",
-            message=f"{task_id_info}최근 1시간 내 총 {fail_count}건의 태스크가 영구 실패했습니다. 워커 큐를 즉시 점검하십시오.",
-            target_groups=["admin"],
-            level=4,
-            link="/v1/admin/tasks"
-        )
+        task_id_info = f" (작업 #{failed_task_id})" if failed_task_id else ""
+        toast_message = f"백그라운드 작업 연속 실패 감지{task_id_info}: 최근 1시간 내 {fail_count}건 실패"
+
+        # 🍞 1. 실시간 토스트 알림 전송 (업무 지시사항이나 Alert 모달에 추가하지 않음)
+        try:
+            from domain.ws.ws_service import manager
+            manager.broadcast_sync({
+                "type": "TOAST",
+                "toast_type": "error",
+                "message": f"🚨 {toast_message}"
+            })
+        except Exception as ws_err:
+            logger.warning(f"⚠️ [Watchdog] 토스트 웹소켓 전송 실패: {ws_err}")
+
+        # 📜 2. 관제탑 감사로그 기록 (이력 보존용)
+        try:
+            from core.audit import safe_log_audit
+            safe_log_audit(
+                db=db,
+                app_id="tasks",
+                log_type="ERROR",
+                severity="WARN",
+                action="WATCHDOG_TASK_FAILURE",
+                title="[Watchdog] 백그라운드 태스크 연속 실패 감지",
+                resource_type="system_task",
+                resource_id=str(failed_task_id) if failed_task_id else None,
+                message=toast_message,
+                metadata={"fail_count": fail_count, "threshold": threshold, "failed_task_id": failed_task_id}
+            )
+        except Exception as audit_err:
+            logger.warning(f"⚠️ [Watchdog] 감사로그 기록 실패: {audit_err}")
+
         return True
 
     return False

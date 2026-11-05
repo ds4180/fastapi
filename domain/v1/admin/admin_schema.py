@@ -399,6 +399,17 @@ class SystemTaskBase(BaseModel):
 class SystemTaskCreate(SystemTaskBase):
     pass
 
+class SystemTaskUpdate(BaseModel):
+    task_type: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+    priority: Optional[int] = None
+    scheduled_at: Optional[datetime] = None
+    cron_expression: Optional[str] = None
+    repeat_interval: Optional[int] = None
+    max_retries: Optional[int] = None
+    timeout_sec: Optional[int] = None
+    tags: Optional[List[str]] = None
+
 class SystemTaskSchema(SystemTaskBase):
     id: int
     status: str
