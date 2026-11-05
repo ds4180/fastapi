@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from starlette import status
 
 from database import get_db
-from models import User
+from models import User, SystemConfig
 from domain.user import user_schema, user_crud
 
 # ----------------------------------------------------------------------------
@@ -99,6 +99,13 @@ def login_for_access_token(
             detail="아이디 또는 비밀번호가 틀렸습니다."
         )
 
+    # 🛡️ [소프트 삭제 가드]: 비활성화된 계정 로그인 즉시 차단
+    if user.profile and user.profile.is_active is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="비활성화(삭제)된 사원 계정입니다. 인사 관리자에게 문의하세요."
+        )
+
     # 🚀 핵심 세션 생성 로직을 core 엔진으로 단 한 줄로 위임!
     jti = create_user_session(db=db, user=user, request=request)
 
@@ -139,18 +146,41 @@ def read_users_me(current_user: User = Depends(get_current_user)):
 
 
 # ----------------------------------------------------------------------------
-# 3. 회원 가입 엔드포인트 (/users/create)
+# 3. 회원 가입 엔드포인트 (/users/create, /users/register-mode)
 # ----------------------------------------------------------------------------
+@router.get("/register-mode")
+def get_public_register_mode(db: Session = Depends(get_db)):
+    """현재 시스템의 회원가입 정책 모드 공개 조회 (ADMIN_ONLY, APPROVAL, OPEN)"""
+    cfg = db.query(SystemConfig).filter(SystemConfig.key == "AUTH_REGISTER_MODE").first()
+    return {"register_mode": cfg.value if cfg and cfg.value else "ADMIN_ONLY"}
+
 @router.post("/create", response_model=user_schema.User, status_code=status.HTTP_201_CREATED)
 def create_user(user_create: user_schema.UserCreate, db: Session = Depends(get_db)):
-    """새로운 사용자 회원 가입"""
+    """새로운 사용자 회원 가입 (가입 정책 스위치 연동)"""
+    # 1. 시스템 가입 정책 검사
+    cfg = db.query(SystemConfig).filter(SystemConfig.key == "AUTH_REGISTER_MODE").first()
+    reg_mode = cfg.value if cfg and cfg.value else "ADMIN_ONLY"
+
+    if reg_mode == "ADMIN_ONLY":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="본 시스템은 보안 오피스 인트라넷으로, 관리자 직접 등록으로만 계정이 생성됩니다."
+        )
+
     db_user = user_crud.get_existing_user(db, user_create=user_create)
     if db_user:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="이미 등록된 사용자입니다."
         )
-    return user_crud.create_user(db=db, user_create=user_create)
+
+    # 2. 계정 생성 (기본 UserProfile rank_level=0으로 미승인 격리)
+    new_user = user_crud.create_user(db=db, user_create=user_create)
+    if reg_mode == "OPEN" and new_user.profile:
+        new_user.profile.rank_level = 1
+        db.commit()
+
+    return new_user
 
 
 # ----------------------------------------------------------------------------

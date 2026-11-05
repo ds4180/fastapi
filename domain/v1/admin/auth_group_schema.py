@@ -119,6 +119,7 @@ class InstancePermissionItemRes(BaseModel):
     """개별 인스턴스 단위 권한 설정 응답"""
     target_id: str = Field(..., description="인스턴스 고유 식별자 (예: '1', 'notice', 'dayoff')")
     instance_type: str = Field(..., description="'BOARD' | 'PAGE' | 'APP'")
+    app_type: Optional[str] = Field(default="CUSTOM", description="3대 앱 분류: 'SYSTEM' | 'CUSTOM' | 'INSTANCE'")
     title: str = Field(..., description="인스턴스 화면 명칭 (예: '공지게시판', '결근계 관리')")
     slug: Optional[str] = Field(default=None, description="URL 슬러그")
     frontend_route: Optional[str] = Field(default=None, description="프론트엔드 실제 진입 라우트 주소")

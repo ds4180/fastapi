@@ -16,6 +16,7 @@ from sqlalchemy import func
 from database import get_db
 from models import User, UserProfile, Group, AppRegistry, BoardConfig, Page
 from core.deps import get_current_user, require_app_permission
+from core.audit import safe_log_audit
 from domain.v1.admin.auth_group_schema import (
     GroupCreateReq,
     GroupUpdateReq,
@@ -176,6 +177,20 @@ def create_group_master(
     db.commit()
     db.refresh(new_group)
 
+    safe_log_audit(
+        db=db,
+        app_id="group_manage",
+        log_type="SECURITY",
+        action="GROUP_CREATED",
+        title=f"신규 권한 그룹 생성: [{new_group.name}] ({new_group.code})",
+        user=current_user,
+        severity="INFO",
+        resource_type="group",
+        resource_id=new_group.id,
+        message=f"관리자 '{current_user.username}'이(가) 신규 {new_group.group_type} 그룹 [{new_group.name}](코드: {new_group.code})을(를) 생성했습니다.",
+        metadata={"group_id": new_group.id, "code": new_group.code, "name": new_group.name, "group_type": new_group.group_type}
+    )
+
     return GroupItemRes(
         id=new_group.id,
         code=new_group.code,
@@ -215,6 +230,20 @@ def update_group_master(
 
     db.commit()
     db.refresh(group)
+
+    safe_log_audit(
+        db=db,
+        app_id="group_manage",
+        log_type="SECURITY",
+        action="GROUP_UPDATED",
+        title=f"권한 그룹 정보 수정: [{group.name}] ({group.code})",
+        user=current_user,
+        severity="INFO",
+        resource_type="group",
+        resource_id=group.id,
+        message=f"관리자 '{current_user.username}'이(가) 그룹 [{group.name}]의 메타 정보를 수정했습니다.",
+        metadata={"group_id": group.id, "code": group.code, "name": group.name}
+    )
 
     # 회원 및 앱 카운트 집계
     p_count = db.query(UserProfile).filter(UserProfile.primary_group == group.code).count()
@@ -297,6 +326,20 @@ def delete_group_master(
     db.delete(group)
     db.commit()
 
+    safe_log_audit(
+        db=db,
+        app_id="group_manage",
+        log_type="SECURITY",
+        action="GROUP_DELETED",
+        title=f"권한 그룹 삭제 및 연계 해제: [{group.name}] ({deleted_code})",
+        user=current_user,
+        severity="WARNING",
+        resource_type="group",
+        resource_id=group_id,
+        message=f"관리자 '{current_user.username}'이(가) 그룹 [{group.name}](코드: {deleted_code})을(를) 영구 삭제하고 연계된 회원 및 인스턴스 설정을 자동 정화했습니다.",
+        metadata={"deleted_group_id": group_id, "deleted_code": deleted_code}
+    )
+
     return {"message": "Success", "deleted_code": deleted_code}
 
 
@@ -361,6 +404,21 @@ def update_user_primary_group(
         profile.primary_group = None
 
     db.commit()
+
+    safe_log_audit(
+        db=db,
+        app_id="group_manage",
+        log_type="SECURITY",
+        action="USER_PRIMARY_GROUP_CHANGED",
+        title=f"사용자 #{user_id} 주그룹 변경: {profile.primary_group or '소속없음'}",
+        user=current_user,
+        severity="INFO",
+        resource_type="user",
+        resource_id=user_id,
+        message=f"관리자 '{current_user.username}'이(가) 회원 #{user_id}의 주그룹을 '{profile.primary_group or '소속없음'}'(으)로 변경했습니다.",
+        metadata={"target_user_id": user_id, "primary_group": profile.primary_group}
+    )
+
     return {"message": "Success", "user_id": user_id, "primary_group": profile.primary_group}
 
 
@@ -388,6 +446,20 @@ def add_user_secondary_group(
         profile.secondary_groups = current_sec
         db.commit()
 
+        safe_log_audit(
+            db=db,
+            app_id="group_manage",
+            log_type="SECURITY",
+            action="USER_SECONDARY_GROUP_ADDED",
+            title=f"사용자 #{user_id} 부그룹 추가: [{req.code}]",
+            user=current_user,
+            severity="INFO",
+            resource_type="user",
+            resource_id=user_id,
+            message=f"관리자 '{current_user.username}'이(가) 회원 #{user_id}에게 부그룹 [{req.code}]을(를) 부여했습니다.",
+            metadata={"target_user_id": user_id, "added_group": req.code}
+        )
+
     return {"message": "Success", "user_id": user_id, "secondary_groups": profile.secondary_groups}
 
 
@@ -409,6 +481,20 @@ def remove_user_secondary_group(
     if code in current_sec:
         profile.secondary_groups = [g for g in current_sec if g != code]
         db.commit()
+
+        safe_log_audit(
+            db=db,
+            app_id="group_manage",
+            log_type="SECURITY",
+            action="USER_SECONDARY_GROUP_REMOVED",
+            title=f"사용자 #{user_id} 부그룹 해제: [{code}]",
+            user=current_user,
+            severity="INFO",
+            resource_type="user",
+            resource_id=user_id,
+            message=f"관리자 '{current_user.username}'이(가) 회원 #{user_id}에게서 부그룹 [{code}]을(를) 해제했습니다.",
+            metadata={"target_user_id": user_id, "removed_group": code}
+        )
 
     return {"message": "Success", "user_id": user_id, "secondary_groups": profile.secondary_groups}
 
@@ -522,6 +608,7 @@ def get_all_instance_permissions(
         result.append(InstancePermissionItemRes(
             target_id=str(b.id),
             instance_type="BOARD",
+            app_type="INSTANCE",
             title=f"{b.name} 게시판",
             slug=b.slug,
             parent_engine="게시판 (board)",
@@ -538,6 +625,7 @@ def get_all_instance_permissions(
         result.append(InstancePermissionItemRes(
             target_id=str(p.id),
             instance_type="PAGE",
+            app_type="CUSTOM",
             title=f"{p.title} 페이지",
             slug=p.slug,
             parent_engine="페이지 (page)",
@@ -554,6 +642,7 @@ def get_all_instance_permissions(
         result.append(InstancePermissionItemRes(
             target_id=a.app_id,
             instance_type="APP",
+            app_type=a.app_type or "SYSTEM",
             title=a.name,
             slug=a.app_id,
             frontend_route=a.frontend_route,
@@ -599,9 +688,24 @@ def update_instance_permissions(
         db.commit()
         db.refresh(board)
 
+        safe_log_audit(
+            db=db,
+            app_id="group_manage",
+            log_type="SECURITY",
+            action="INSTANCE_PERMISSION_CHANGED",
+            title=f"게시판 권한 변경: [{board.name}] (R:{board.min_read_rank}/W:{board.min_write_rank})",
+            user=current_user,
+            severity="INFO",
+            resource_type="board_config",
+            resource_id=board.id,
+            message=f"관리자 '{current_user.username}'이(가) 게시판 [{board.name}]의 4단계 권한(R:{board.min_read_rank}, W:{board.min_write_rank})을 수정했습니다.",
+            metadata={"board_id": board.id, "min_read_rank": board.min_read_rank, "min_write_rank": board.min_write_rank}
+        )
+
         return InstancePermissionItemRes(
             target_id=str(board.id),
             instance_type="BOARD",
+            app_type="INSTANCE",
             title=f"{board.name} 게시판",
             slug=board.slug,
             parent_engine="게시판 (board)",
@@ -628,9 +732,24 @@ def update_instance_permissions(
         db.commit()
         db.refresh(page_obj)
 
+        safe_log_audit(
+            db=db,
+            app_id="group_manage",
+            log_type="SECURITY",
+            action="INSTANCE_PERMISSION_CHANGED",
+            title=f"페이지 권한 변경: [{page_obj.title}] (Rank:{page_obj.min_rank})",
+            user=current_user,
+            severity="INFO",
+            resource_type="page",
+            resource_id=page_obj.id,
+            message=f"관리자 '{current_user.username}'이(가) 페이지 [{page_obj.title}]의 권한(최소랭크: {page_obj.min_rank})을 수정했습니다.",
+            metadata={"page_id": page_obj.id, "min_rank": page_obj.min_rank}
+        )
+
         return InstancePermissionItemRes(
             target_id=str(page_obj.id),
             instance_type="PAGE",
+            app_type="CUSTOM",
             title=f"{page_obj.title} 페이지",
             slug=page_obj.slug,
             parent_engine="페이지 (page)",
@@ -659,9 +778,24 @@ def update_instance_permissions(
         db.commit()
         db.refresh(app)
 
+        safe_log_audit(
+            db=db,
+            app_id="group_manage",
+            log_type="SECURITY",
+            action="INSTANCE_PERMISSION_CHANGED",
+            title=f"앱 권한 변경: [{app.name}] ({app.app_id}, R:{app.min_read_rank}/W:{app.min_write_rank})",
+            user=current_user,
+            severity="INFO",
+            resource_type="app_registry",
+            resource_id=app.app_id,
+            message=f"관리자 '{current_user.username}'이(가) 앱 [{app.name}]의 4단계 권한(R:{app.min_read_rank}, W:{app.min_write_rank})을 수정했습니다.",
+            metadata={"app_id": app.app_id, "min_read_rank": app.min_read_rank, "min_write_rank": app.min_write_rank}
+        )
+
         return InstancePermissionItemRes(
             target_id=app.app_id,
             instance_type="APP",
+            app_type=app.app_type or "SYSTEM",
             title=app.name,
             slug=app.app_id,
             frontend_route=app.frontend_route,

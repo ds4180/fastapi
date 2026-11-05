@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, field_validator, Field
 from typing import List, Optional, Any, Dict
 from datetime import datetime, date
 
@@ -73,7 +73,17 @@ class UserAdminSchema(BaseModel):
         from_attributes = True
 
 class UserRankUpdate(BaseModel):
-    rank_level: int
+    rank_level: int = Field(..., ge=0, le=9, description="0~9 사이의 사용자 권한 랭크")
+
+class UserCreateByAdmin(BaseModel):
+    username: str
+    password: str
+    email: EmailStr
+    real_name: Optional[str] = None
+    rank_level: int = Field(default=1, ge=0, le=9, description="부여할 랭크 등급 (0~9)")
+    primary_group: Optional[str] = None
+    secondary_groups: List[str] = []
+    employee_no: Optional[str] = None
 
 # --- System Config 스키마 ---
 class SystemConfigSchema(BaseModel):
