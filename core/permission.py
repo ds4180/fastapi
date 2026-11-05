@@ -170,11 +170,16 @@ def evaluate_permission(
 
 def can_access_app(user: Optional[User], app_obj: Any, action: str = "read", op: str = ">=") -> bool:
     """
-    [AppRegistry 객체 기반 권한 판별 헬퍼]
-    DB에서 조회한 AppRegistry 인스턴스를 넘기면 해당 앱의 설정(allow_groups, deny_groups,
-    min_read_rank, min_write_rank)을 읽어 4단계 규칙으로 읽기/쓰기 가능 여부를 즉시 반환합니다.
+    [AppRegistry 객체 기반 권한 판별 헬퍼 (킬 스위치 연동)]
+    DB에서 조회한 AppRegistry 인스턴스를 넘기면 해당 앱의 활성화 여부(is_active) 및
+    보안 설정(allow_groups, deny_groups, min_read_rank, min_write_rank)을 읽어
+    4단계 규칙으로 읽기/쓰기 가능 여부를 즉시 반환합니다.
     """
     if not app_obj:
+        return False
+
+    # 🚨 [앱 킬 스위치]: 앱이 비활성화(is_active=False)된 경우 root(9)를 제외하고 즉시 차단
+    if getattr(app_obj, "is_active", True) is False and get_user_rank(user) != ROOT_RANK:
         return False
 
     return evaluate_permission(

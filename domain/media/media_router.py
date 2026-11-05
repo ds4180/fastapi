@@ -22,8 +22,8 @@ router = APIRouter(
 )
 
 # 🏛️ AppRegistry 거버넌스 연동 미디어 관리 권한 가드
-check_media_admin = require_app_permission("admin_media", action="read")
-check_media_admin_write = require_app_permission("admin_media", action="write")
+check_media_admin = require_app_permission("media", action="read")
+check_media_admin_write = require_app_permission("media", action="write")
 
 class FolderCreateRequest(BaseModel):
     tier: str

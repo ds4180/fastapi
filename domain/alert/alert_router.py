@@ -29,8 +29,8 @@ router = APIRouter(
 )
 
 # 🔒 관리자 권한 의존성 정의 (AppRegistry 실시간 4단계 인가 가드와 완전 연동)
-check_alerts_read = require_app_permission("admin_alerts", action="read")
-check_alerts_write = require_app_permission("admin_alerts", action="write")
+check_alerts_read = require_app_permission("alerts", action="read")
+check_alerts_write = require_app_permission("alerts", action="write")
 
 
 @router.get("/list", response_model=list[alert_schema.Alert])

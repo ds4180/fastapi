@@ -13,7 +13,8 @@ from core.deps import (
     check_rank,
     require_app_permission,
 )
-from core.permission import can_access_app, evaluate_permission
+from core.audit import safe_log_audit
+from core.permission import can_access_app, evaluate_permission, get_user_rank, ROOT_RANK
 from domain.v1.admin import admin_schema
 from typing import List, Optional, Any
 from datetime import date, datetime, timedelta
@@ -28,23 +29,23 @@ router = APIRouter(
 API_VERSION_PREFIX = "/v1"
 
 # 🏛️ AppRegistry 거버넌스 연동 시스템 앱별 전용 인가 가드 (실시간 4단계 권한 통일)
-check_admin = require_app_permission("admin_dashboard", action="read") # 대시보드 관제센터 전용 거버넌스 가드
-check_user_admin = require_app_permission("admin_user_manage")
-check_app_admin = require_app_permission("admin_apps")
-check_menu_admin = require_app_permission("admin_menu")
-check_board_admin = require_app_permission("admin_boards", action="read")
-check_board_admin_write = require_app_permission("admin_boards", action="write")
-check_service_admin = require_app_permission("admin_services", action="read")
-check_service_admin_write = require_app_permission("admin_services", action="write")
-check_dayoff_admin = require_app_permission("admin_dayoff", action="read")
-check_dayoff_admin_write = require_app_permission("admin_dayoff", action="write")
-check_config_admin = require_app_permission("admin_config")
-check_push_admin = require_app_permission("admin_pushs", action="read")
-check_push_admin_write = require_app_permission("admin_pushs", action="write")
-check_route_master_admin = require_app_permission("admin_route_master", action="read")
-check_route_master_admin_write = require_app_permission("admin_route_master", action="write")
-check_dispatch_admin = require_app_permission("admin_dispatch", action="read")
-check_dispatch_admin_write = require_app_permission("admin_dispatch", action="write")
+check_admin = require_app_permission("dashboard", action="read") # 대시보드 관제센터 전용 거버넌스 가드
+check_user_admin = require_app_permission("user_manage")
+check_app_admin = require_app_permission("apps")
+check_menu_admin = require_app_permission("menu")
+check_board_admin = require_app_permission("boards", action="read")
+check_board_admin_write = require_app_permission("boards", action="write")
+check_service_admin = require_app_permission("services", action="read")
+check_service_admin_write = require_app_permission("services", action="write")
+check_dayoff_admin = require_app_permission("dayoff", action="read")
+check_dayoff_admin_write = require_app_permission("dayoff", action="write")
+check_config_admin = require_app_permission("config")
+check_push_admin = require_app_permission("pushs", action="read")
+check_push_admin_write = require_app_permission("pushs", action="write")
+check_route_master_admin = require_app_permission("route_master", action="read")
+check_route_master_admin_write = require_app_permission("route_master", action="write")
+check_dispatch_admin = require_app_permission("dispatch", action="read")
+check_dispatch_admin_write = require_app_permission("dispatch", action="write")
 
 @router.get("/dashboard")
 def get_dashboard_summary(
@@ -202,14 +203,7 @@ def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_app_
     """시스템에 등록된 모든 App 엔진 목록 조회 (관리자용)"""
     from domain.system.app_service import DEFAULT_SYSTEM_APPS
 
-    # 1. 레거시 'STATIC' 값을 표준 'CUSTOM'으로 자동 정규화 동기화
-    legacy_apps = db.query(AppRegistry).filter(AppRegistry.app_type == "STATIC").all()
-    if legacy_apps:
-        for app in legacy_apps:
-            app.app_type = "CUSTOM"
-        db.commit()
-
-    # 2. 시스템 앱의 공식 명칭(title, name, icon) 실시간 동기화 보정
+    # 시스템 앱의 공식 명칭(title, name, icon) 및 시스템 앱 타입(SYSTEM, CUSTOM, INSTANCE) 동기화
     sys_map = {a["app_id"]: a for a in DEFAULT_SYSTEM_APPS}
     all_apps = db.query(AppRegistry).order_by(AppRegistry.app_id).all()
     needs_commit = False
@@ -225,6 +219,10 @@ def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_app_
             if meta.get("icon_default") and app.icon_default != meta["icon_default"]:
                 app.icon_default = meta["icon_default"]
                 needs_commit = True
+            # 시스템 앱의 경우 기본 app_type(SYSTEM, CUSTOM, INSTANCE) 동기화
+            if meta.get("app_type") and app.app_type != meta["app_type"]:
+                app.app_type = meta["app_type"]
+                needs_commit = True
     if needs_commit:
         db.commit()
         all_apps = db.query(AppRegistry).order_by(AppRegistry.app_id).all()
@@ -232,15 +230,19 @@ def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_app_
     return all_apps
 
 @router.get("/apps/{app_id}", response_model=admin_schema.AppRegistrySchema)
-def get_app_detail(app_id: str, db: Session = Depends(get_db)):
-    """특정 앱의 메타데이터 및 설정 스키마 조회 (전체 공개 가능 - 권한 점검 시 사용)"""
+def get_app_detail(
+    app_id: str, 
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_app_admin)
+):
+    """
+    [특정 앱의 메타데이터 및 설정 스키마 상세 조회]
+    - 인가 가드: admin_apps 전용 인가 가드(check_app_admin, Rank 9) 적용
+    - 내부 권한 그룹(allow/deny_groups) 및 설정 스키마의 무단 노출을 방지하기 위해 관리자 권한 필수
+    """
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not db_app:
         raise HTTPException(status_code=404, detail="등록되지 않은 앱 엔진입니다.")
-    if db_app.app_type == "STATIC":
-        db_app.app_type = "CUSTOM"
-        db.commit()
-        db.refresh(db_app)
     return db_app
 
 @router.post("/apps", response_model=admin_schema.AppRegistrySchema)
@@ -249,20 +251,46 @@ def create_app_registry(
     db: Session = Depends(get_db), 
     admin: User = Depends(check_app_admin)
 ):
-    """신규 App 엔진 및 메타데이터 등록"""
-    # 중복 ID 체크
+    """
+    [신규 App 엔진 및 메타데이터 등록]
+    - 인가 가드: admin_apps 전용 인가 가드(check_app_admin, Rank 9)
+    - 중복 식별자(app_id) 방어 및 Pydantic 엄격 검증(app_type 4대 분류, frontend_route 포맷)
+    - 📜 최고 관리자 등록 행위(APP_REGISTERED) 보안 감사로그(AuditLog) 영구 보존
+    """
+    # 1. 중복 ID 체크 (선점 방지)
     existing = db.query(AppRegistry).filter(AppRegistry.app_id == app_in.app_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="이미 등록된 앱 식별자입니다.")
     
     payload = app_in.dict()
-    if payload.get("app_type") == "STATIC":
-        payload["app_type"] = "CUSTOM"
     
+    # 2. 신규 AppRegistry DB 레코드 영속화
     db_app = AppRegistry(**payload)
     db.add(db_app)
     db.commit()
     db.refresh(db_app)
+
+    # 3. 📜 [보안 감사로그 영구 기록]
+    safe_log_audit(
+        db=db,
+        app_id="apps",
+        log_type="SECURITY",
+        action="APP_REGISTERED",
+        title=f"신규 앱 엔진 등록: {db_app.title or db_app.name} ({db_app.app_id})",
+        user=admin,
+        resource_type="app_registry",
+        resource_id=db_app.app_id,
+        message=f"유형: {db_app.app_type}, 진입로: {db_app.frontend_route}, 랭크: R{db_app.min_read_rank}/W{db_app.min_write_rank}",
+        metadata={
+            "app_id": db_app.app_id,
+            "app_type": db_app.app_type,
+            "min_read_rank": db_app.min_read_rank,
+            "min_write_rank": db_app.min_write_rank,
+            "allow_groups": db_app.allow_groups,
+            "deny_groups": db_app.deny_groups,
+        }
+    )
+
     return db_app
 
 @router.patch("/apps/{app_id}", response_model=admin_schema.AppRegistrySchema)
@@ -272,32 +300,106 @@ def update_app_registry(
     db: Session = Depends(get_db), 
     admin: User = Depends(check_app_admin)
 ):
-    """App 엔진 메타데이터 수정 (권한, 경로, 관리자 권한 위임 등)"""
+    """
+    [App 엔진 메타데이터 수정 (권한, 경로, 자치관리자 등)]
+    - 인가 가드: admin_apps 전용 인가 가드(check_app_admin, Rank 9)
+    - 🚨 SYSTEM 필수 앱 보호: app_type 변경 시도 및 is_active=False 비활성화 원천 차단 (403)
+    - 📜 변경 전/후 필드 차이점(Diff-Patch) 자동 추적 및 보안/시스템 감사로그(AuditLog) 영구 보존
+    """
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not db_app:
         raise HTTPException(status_code=404, detail="앱을 찾을 수 없습니다.")
     
-    # 전달된 필드만 부분 업데이트 (exclude_unset=True)
+    # 1. 전달된 필드만 추출 (exclude_unset=True)
     update_data = app_in.dict(exclude_unset=True)
-    if update_data.get("app_type") == "STATIC":
-        update_data["app_type"] = "CUSTOM"
+
+    # 2. 🚨 [SYSTEM 필수 관제 앱 철벽 방어선]
+    # SYSTEM 타입 앱은 시스템 척추이므로 임의로 타입을 바꾸거나 비활성화할 수 없습니다.
+    if db_app.app_type == "SYSTEM":
+        if "app_type" in update_data and update_data["app_type"] != "SYSTEM":
+            raise HTTPException(
+                status_code=403, 
+                detail="SYSTEM 앱의 유형(app_type)은 시스템 필수 규격이므로 변경할 수 없습니다."
+            )
+        if "is_active" in update_data and update_data["is_active"] is False:
+            raise HTTPException(
+                status_code=403, 
+                detail="SYSTEM 앱은 시스템 필수 관제 앱이므로 비활성화할 수 없습니다."
+            )
+
+    # 3. 🔍 변경 전/후 Diff 캡처 및 필드 갱신
+    diff_list = []
     for key, value in update_data.items():
-        setattr(db_app, key, value)
+        old_val = getattr(db_app, key, None)
+        if old_val != value:
+            diff_list.append({
+                "field": key,
+                "from": old_val,
+                "to": value
+            })
+            setattr(db_app, key, value)
     
     db.commit()
     db.refresh(db_app)
+
+    # 4. 📜 [보안 및 설정 감사로그 영구 기록]
+    if diff_list:
+        # 보안 등급이나 접근 권한, 활성화 여부 변경 시 SECURITY 로그로 격상 분류
+        is_security_change = any(
+            f["field"] in ["min_read_rank", "min_write_rank", "allow_groups", "deny_groups", "is_active", "app_type"] 
+            for f in diff_list
+        )
+        safe_log_audit(
+            db=db,
+            app_id="apps",
+            log_type="SECURITY" if is_security_change else "SYSTEM",
+            action="APP_UPDATED",
+            title=f"앱 엔진 메타데이터 수정: {db_app.title or db_app.name} ({db_app.app_id})",
+            user=admin,
+            resource_type="app_registry",
+            resource_id=db_app.app_id,
+            message=f"{len(diff_list)}개 항목 변경 완료: " + ", ".join([d["field"] for d in diff_list]),
+            diff_payload=diff_list,
+            metadata={"updated_fields": list(update_data.keys())}
+        )
+
     return db_app
 
 @router.delete("/apps/{app_id}")
 def delete_app(app_id: str, db: Session = Depends(get_db), admin: User = Depends(check_app_admin)):
-    """앱 등록 제거 (SYSTEM 앱은 삭제 불가)"""
+    """
+    [앱 등록 해제 및 제거]
+    - 인가 가드: admin_apps 전용 인가 가드(check_app_admin, Rank 9)
+    - 🚨 SYSTEM 앱은 시스템 필수 관제 앱이므로 삭제 영구 차단 (403)
+    - 📜 최고 관리자 앱 삭제 행위(APP_DELETED) 보안 감사로그(AuditLog, WARN) 영구 보존
+    """
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
     if not db_app:
         raise HTTPException(status_code=404, detail="앱을 찾을 수 없습니다.")
     if db_app.app_type == "SYSTEM":
         raise HTTPException(status_code=403, detail="SYSTEM 앱은 시스템 필수 관제 앱이므로 삭제할 수 없습니다.")
+    
+    app_name = db_app.title or db_app.name
+    app_type = db_app.app_type
+
     db.delete(db_app)
     db.commit()
+
+    # 📜 [보안 감사로그 영구 기록]
+    safe_log_audit(
+        db=db,
+        app_id="apps",
+        log_type="SECURITY",
+        action="APP_DELETED",
+        title=f"앱 엔진 삭제 완료: {app_name} ({app_id})",
+        user=admin,
+        severity="WARN",
+        resource_type="app_registry",
+        resource_id=app_id,
+        message=f"유형: {app_type} 앱이 시스템에서 영구 삭제되었습니다.",
+        metadata={"app_id": app_id, "app_type": app_type}
+    )
+
     return {"message": "success"}
 
 # --- Menu Management (지능형 메뉴 관리) ---
@@ -310,8 +412,18 @@ MIGRATED_PAGES_MAP = {
 }
 
 def resolve_menu_url(menu: Menu, db: Session) -> str:
-    """[v2.3 표준] INSTANCE / CUSTOM / SYSTEM 앱 분류 일치형 주소 조립기"""
-    # 🔗 [URL 레이어] 오직 URL 타입만 수동 입력 주소 사용 (PAGES 이관 경로 자동 보정 포함)
+    """
+    [v3.0 헌법 표준 단일 원칙 주소 조립기]
+    
+    🏛️ 사용자 정립 절대 원칙:
+    1. 고정 URL / 폴더 / 구분선: URL 또는 '#'
+    2. 관리자 기능이 필요한 모든 경우: 무조건 /v1/admin/{clean_id} (CUSTOM/INSTANCE 불문 관리자 직행)
+    3. 사용자 화면:
+       - CUSTOM: /v1/custom/{clean_id}
+       - INSTANCE: /v1/app/{clean_id}/{slug}
+       - STATIC / PAGE: /v1/pages/{slug or page_id}
+    """
+    # 1. 🔗 수동 입력 URL 및 폴더/구분선
     if menu.link_type == "URL":
         raw_url = menu.external_url or "#"
         if raw_url in MIGRATED_PAGES_MAP:
@@ -322,66 +434,81 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
 
     if menu.link_type in ["FOLDER", "DIVIDER"]:
         return "#"
-        
-    # ⚙️ [엔진 기반 레이어] INSTANCE(구 APP), CUSTOM, SYSTEM
-    if (menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP"]) and menu.app_id:
+
+    # 2. ⚙️ 앱 엔진 기반 메뉴 경로 판별
+    if menu.app_id:
+        clean_id = menu.app_id
         instance_id = str(menu.app_instance_id) if menu.app_instance_id is not None else ""
-        
-        # 연결된 AppRegistry의 실제 app_type 확인
-        db_app = db.query(AppRegistry).filter(AppRegistry.app_id == menu.app_id).first()
-        app_type = db_app.app_type if db_app else menu.link_type
-        if app_type == "STATIC":
-            app_type = "CUSTOM"
-        elif app_type == "APP":
-            app_type = "INSTANCE"
 
-        # 1) SYSTEM 앱이거나 관리자 화면 모드(-1)인 경우 -> AppRegistry frontend_route 최우선 적용
-        if menu.link_type == "SYSTEM" or app_type == "SYSTEM" or instance_id == "-1":
-            if db_app and db_app.frontend_route:
-                return db_app.frontend_route
-            clean_app_id = menu.app_id.replace("admin_", "")
-            if clean_app_id in ["dashboard", ""]:
+        # 🏛️ [대원칙]: 어느 메뉴이든 '관리자 기능이 필요한 경우' 무조건 /v1/admin/{clean_id} 로 직행!
+        # 1. link_type이 SYSTEM인 순수 시스템 관리 메뉴
+        # 2. 인스턴스 관리자 모드(instance_id == "-1")인 경우
+        is_admin_mode = (
+            menu.link_type == "SYSTEM" 
+            or instance_id == "-1"
+        )
+        if is_admin_mode:
+            if clean_id in ["dashboard", ""]:
                 return f"{API_VERSION_PREFIX}/admin"
-            return f"{API_VERSION_PREFIX}/admin/{clean_app_id}"
-            
-        # 2) CUSTOM 앱인 경우 (추상화 인스턴스 제외 단일 앱) -> /v1/custom/{app_id}
-        if menu.link_type == "CUSTOM" or app_type == "CUSTOM":
-            if db_app and db_app.frontend_route:
-                return db_app.frontend_route
-            clean_app_id = menu.app_id.replace("custom_", "")
-            return f"{API_VERSION_PREFIX}/custom/{clean_app_id}"
+            return f"{API_VERSION_PREFIX}/admin/{clean_id}"
 
-        # 3) INSTANCE 앱인 경우 (기본 추상화 다중 인스턴스 앱) -> /v1/app/{app_id}/{slug}
-        prefix = f"{API_VERSION_PREFIX}/app"
-        slug_or_id = get_instance_slug(menu, db)
-        if slug_or_id and slug_or_id != "":
-            return f"{prefix}/{menu.app_id}/{slug_or_id}"
-            
-        return f"{prefix}/{menu.app_id}"
+        # 👤 [사용자 화면]: 각 앱의 타입에 맞는 전용 거처로 1:1 직행
+        if menu.link_type == "CUSTOM":
+            return f"{API_VERSION_PREFIX}/custom/{clean_id}"
 
-    # 📄 [PAGE 레이어]
-    if menu.link_type == "PAGE" and menu.page_id:
-        return f"{API_VERSION_PREFIX}/pages/{menu.page_id}"
+        if menu.link_type in ["INSTANCE", "APP"]:
+            slug = get_instance_slug(menu, db)
+            if slug and slug != "-1":
+                # 🏛️ [단수형 원칙]: 특정 인스턴스 개체 화면은 단수형 (/v1/app/board/{slug})
+                instance_prefix = clean_id.rstrip("s") if clean_id.endswith("s") else clean_id
+                return f"{API_VERSION_PREFIX}/app/{instance_prefix}/{slug}"
+            # 🏛️ [복수형 원칙]: 슬러그가 없는 인스턴스 전체 목록 허브는 복수형 (/v1/app/boards)
+            return f"{API_VERSION_PREFIX}/app/{clean_id}"
+
+    # 3. 📄 정적 콘텐츠 레이어 (PAGE / STATIC)
+    if menu.link_type in ["PAGE", "STATIC"] and (menu.page_id or menu.app_id):
+        target = menu.page_id or menu.app_id
+        return f"{API_VERSION_PREFIX}/pages/{target}"
 
     return menu.external_url or "#"
 
 def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
     """
-    [인스턴스 ID -> 슬러그(Slug) 변환 헬퍼]
-    - INSTANCE 앱(board, page 등)에 연결된 숫자형 인스턴스 ID를 실제 URL용 슬러그(slug)로 변환합니다.
-    - 관리자 화면(-1)이거나 슬러그가 없는 경우에는 원본 문자열을 반환합니다.
+    [인스턴스 ID -> 슬러그(Slug) 변환 헬퍼 (PostgreSQL 타입 안전 가드)]
+    - INSTANCE 앱(board, page 등)에 연결된 인스턴스 식별자를 슬러그(slug)로 변환합니다.
+    - menu.app_instance_id가 정수형 ID인 경우 DB 조회, 이미 문자열 슬러그인 경우 즉시 반환하여
+      PostgreSQL 'invalid input syntax for type integer' 예외(500 에러)를 원천 차단합니다.
     """
     if menu.app_instance_id is None:
         return None
-    if menu.app_instance_id == -1:
+    raw_val = menu.app_instance_id
+    if raw_val == -1 or str(raw_val) == "-1":
         return "-1"
-    if menu.app_id == 'board' and menu.app_instance_id:
-        board = db.query(BoardConfig).filter(BoardConfig.id == menu.app_instance_id).first()
-        return board.slug if board else str(menu.app_instance_id)
-    if menu.app_id == 'page' and menu.app_instance_id:
-        page_obj = db.query(Page).filter(Page.id == menu.app_instance_id).first()
-        return page_obj.slug if page_obj else str(menu.app_instance_id)
-    return str(menu.app_instance_id)
+
+    clean_id = menu.app_id or ""
+
+    # 1. 숫자형 정수 ID인지 안전하게 판별
+    int_id = None
+    try:
+        int_id = int(raw_val)
+    except (ValueError, TypeError):
+        int_id = None
+
+    # 2. 게시판(Board) 인스턴스 슬러그 역추적
+    if clean_id in ['board', 'boards']:
+        if int_id is not None:
+            board = db.query(BoardConfig).filter(BoardConfig.id == int_id).first()
+            return board.slug if board else str(raw_val)
+        return str(raw_val)
+
+    # 3. 페이지(Page) 인스턴스 슬러그 역추적
+    if clean_id in ['page', 'pages']:
+        if int_id is not None:
+            page_obj = db.query(Page).filter(Page.id == int_id).first()
+            return page_obj.slug if page_obj else str(raw_val)
+        return str(raw_val)
+
+    return str(raw_val)
 
 def filter_menu_tree(
     menus: List[Menu],
@@ -411,6 +538,14 @@ def filter_menu_tree(
                 deny_groups=m.deny_groups or [],
             )
         )
+
+        # 🚨 [앱 킬 스위치 연동]: 연결된 앱이 비활성화(is_active=False)된 경우 일반 사용자 메뉴 자동 숨김
+        if is_allowed and not bypass_auth and m.app_id:
+            user_rank = get_user_rank(current_user)
+            if user_rank != ROOT_RANK:
+                app_meta = db.query(AppRegistry.is_active).filter(AppRegistry.app_id == m.app_id).first()
+                if app_meta and app_meta[0] is False:
+                    is_allowed = False
         if is_allowed:
             # 동적 URL 계산 (INSTANCE / CUSTOM / SYSTEM 분류 체계 반영)
             final_url = resolve_menu_url(m, db)

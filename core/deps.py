@@ -187,8 +187,19 @@ def require_app_permission(app_id: str, action: str = "read"):
                 resource_id=app_id
             )
 
+        app_title = getattr(app_meta, "title", None) or getattr(app_meta, "name", app_id)
+
+        # 🚨 [앱 킬 스위치(Kill-Switch) 실시간 가드]:
+        # 앱이 비활성화(is_active=False)된 경우, 시스템 최고 관리자(root, Rank 9)를 제외한
+        # 모든 사용자의 진입 및 API 호출을 즉시 차단합니다.
+        if getattr(app_meta, "is_active", True) is False and get_user_rank(current_user) != ROOT_RANK:
+            raise AccessDeniedError(
+                message=f"'{app_title}' 앱은 현재 관리자에 의해 비활성화(점검 중) 상태입니다.",
+                resource=app_id,
+                resource_id=current_user.id
+            )
+
         if not can_access_app(user=current_user, app_obj=app_meta, action=action):
-            app_title = getattr(app_meta, "title", None) or getattr(app_meta, "name", app_id)
             raise AccessDeniedError(
                 message=f"'{app_title}' 시스템 앱 접근 권한이 없습니다.",
                 resource=app_id,

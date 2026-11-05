@@ -25,9 +25,9 @@ __all__ = [
 
 router = APIRouter(prefix="/v1/admin/groups", tags=["Admin Groups Management"])
 
-# 🏛️ AppRegistry 거버넌스 연동 (admin_target_groups)
-check_target_groups_read = require_app_permission("admin_target_groups", action="read")
-check_target_groups_write = require_app_permission("admin_target_groups", action="write")
+# 🏛️ AppRegistry 거버넌스 연동 (target_groups)
+check_target_groups_read = require_app_permission("target_groups", action="read")
+check_target_groups_write = require_app_permission("target_groups", action="write")
 
 
 @router.get("/candidates")

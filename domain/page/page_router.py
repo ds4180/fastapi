@@ -15,8 +15,8 @@ router = APIRouter(
 )
 
 # 🏛️ AppRegistry 거버넌스 연동 실시간 권한 가드
-check_page_admin = require_app_permission("admin_pages", action="read")
-check_page_admin_write = require_app_permission("admin_pages", action="write")
+check_page_admin = require_app_permission("pages", action="read")
+check_page_admin_write = require_app_permission("pages", action="write")
 
 # --- [관리자용 API] ---
 

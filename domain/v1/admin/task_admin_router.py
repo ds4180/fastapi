@@ -14,8 +14,8 @@ router = APIRouter(
 )
 
 # 🏛️ AppRegistry 4단계 거버넌스 연동 (읽기: min_read_rank=8, 쓰기: min_write_rank=8)
-check_task_read = require_app_permission("admin_tasks", action="read")
-check_task_write = require_app_permission("admin_tasks", action="write")
+check_task_read = require_app_permission("tasks", action="read")
+check_task_write = require_app_permission("tasks", action="write")
 
 @router.get("/types")
 def list_task_types(

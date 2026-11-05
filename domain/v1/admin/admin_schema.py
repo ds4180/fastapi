@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import List, Optional, Any, Dict
 from datetime import datetime, date
 
@@ -91,26 +91,88 @@ class SystemConfigUpdate(BaseModel):
 
 # --- 시스템 App 관리 스키마 ---
 
+# 🏛️ 앱 4대 분류 체계 표준 정의 (SYSTEM, CUSTOM, INSTANCE, STATIC)
+VALID_APP_TYPES = {"SYSTEM", "CUSTOM", "INSTANCE", "STATIC"}
+
 class AppRegistryBase(BaseModel):
     app_id: str
     name: str
     title: Optional[str] = None                     # UI 표시 공식 명칭
     description: Optional[str] = None
-    app_type: str = "INSTANCE"                      # INSTANCE | CUSTOM | SYSTEM
-    frontend_route: Optional[str] = None            # Svelte 라우트 경로
+    app_type: str = "INSTANCE"                      # SYSTEM | CUSTOM | INSTANCE | STATIC
+    frontend_route: Optional[str] = None            # Svelte 라우트 경로 (예: /v1/admin/pages)
     main_component: Optional[str] = None            # Dynamic Import용 컴포넌트명
     icon_default: Optional[str] = None              # 기본 아이콘
     # 보안 주권 설정 (4단계 권한: 1.root(9) ➔ 2.deny_groups ➔ 3.allow_groups ➔ 4.rank)
-    min_read_rank: int = 0                          # 읽기/진입 최소 권한 (0~9)
-    min_write_rank: int = 2                         # 쓰기/행위 최소 권한 (0~9)
-    allow_groups: List[str] = []                    # 허용 그룹 코드 목록 (읽기/쓰기 모두 허용)
-    deny_groups: List[str] = []                     # 차단 그룹 코드 목록 (Deny-Wins)
-    admin_ids: List[int] = []                       # 앱 자치 관리자 user_id 목록
-    config_schema: Dict[str, Any] = {}              # 인스턴스별 설정 스키마
-    is_active: bool = True
+    min_read_rank: Optional[int] = 0                # 읽기/진입 최소 권한 (0~9)
+    min_write_rank: Optional[int] = 2               # 쓰기/행위 최소 권한 (0~9)
+    allow_groups: Optional[List[str]] = []          # 허용 그룹 코드 목록 (읽기/쓰기 모두 허용)
+    deny_groups: Optional[List[str]] = []           # 차단 그룹 코드 목록 (Deny-Wins)
+    admin_ids: Optional[List[int]] = []             # 앱 자치 관리자 user_id 목록
+    config_schema: Optional[Dict[str, Any]] = {}    # 인스턴스별 설정 스키마
+    is_active: Optional[bool] = True
+
+    @field_validator("allow_groups", "deny_groups", "admin_ids", mode="before")
+    @classmethod
+    def default_list_if_none(cls, v):
+        """DB 레코드에 NULL이 들어있을 경우 빈 리스트로 안전 치환"""
+        return v if v is not None else []
+
+    @field_validator("config_schema", mode="before")
+    @classmethod
+    def default_dict_if_none(cls, v):
+        """DB 레코드에 NULL이 들어있을 경우 빈 딕셔너리로 안전 치환"""
+        return v if v is not None else {}
 
 class AppRegistryCreate(AppRegistryBase):
-    pass
+    """
+    [신규 앱 등록 입력 스키마 (Create Validation)]
+    - 신규 등록 시 4대 분류, 경로 형식, 권한 랭크 범위를 엄격히 검증합니다.
+    """
+    @field_validator("app_type")
+    @classmethod
+    def validate_app_type(cls, v: str) -> str:
+        """
+        [앱 4대 분류 체계 엄격 검증]
+        - SYSTEM: 관리자 화면만 있는 순수 시스템 관제 앱
+        - CUSTOM: 관리자, 사용자 화면이 모두 있는 단독 비즈니스 앱
+        - INSTANCE: 다중 인스턴스 추상화 기본형 앱 (게시판, 페이지 등)
+        - STATIC: 관리자 화면이 없는 정적 콘텐츠 페이지
+        """
+        normalized = v.strip().upper() if isinstance(v, str) else v
+        if normalized not in VALID_APP_TYPES:
+            raise ValueError(f"유효하지 않은 앱 분류('{v}')입니다. 반드시 {sorted(list(VALID_APP_TYPES))} 중 하나여야 합니다.")
+        return normalized
+
+    @field_validator("frontend_route")
+    @classmethod
+    def validate_frontend_route(cls, v: Optional[str]) -> Optional[str]:
+        """
+        [프론트엔드 라우트 경로 엄격 검증 - 오등록 및 템플릿 리터럴 차단]
+        - 슬래시('/')로 시작하지 않는 상대 경로 방어
+        - '[slug]', '[app_id]' 등 클라이언트 라우트 파라미터 리터럴이 직접 DB에 저장되는 사고 방지
+        """
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if not v.startswith("/"):
+            raise ValueError(f"frontend_route는 반드시 슬래시('/')로 시작해야 합니다: '{v}'")
+        if "[" in v or "]" in v:
+            raise ValueError(
+                f"frontend_route에 '[slug]'와 같은 동적 라우트 플레이스홀더를 직접 저장할 수 없습니다. "
+                f"정규 정적 진입 경로(예: /v1/admin/pages 또는 /v1/custom/page)를 입력하십시오: '{v}'"
+            )
+        return v
+
+    @field_validator("min_read_rank", "min_write_rank")
+    @classmethod
+    def validate_ranks(cls, v: int) -> int:
+        """권한 등급(rank_level) 0~9 정수 범위 검증"""
+        if v < 0 or v > 9:
+            raise ValueError("권한 랭크(min_read_rank / min_write_rank)는 0부터 9 사이의 정수여야 합니다.")
+        return v
 
 class AppRegistryUpdate(BaseModel):
     name: Optional[str] = None
@@ -127,6 +189,42 @@ class AppRegistryUpdate(BaseModel):
     admin_ids: Optional[List[int]] = None
     config_schema: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
+
+    @field_validator("app_type")
+    @classmethod
+    def validate_app_type(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        normalized = v.strip().upper()
+        if normalized not in VALID_APP_TYPES:
+            raise ValueError(f"유효하지 않은 앱 분류('{v}')입니다. 반드시 {sorted(list(VALID_APP_TYPES))} 중 하나여야 합니다.")
+        return normalized
+
+    @field_validator("frontend_route")
+    @classmethod
+    def validate_frontend_route(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if not v.startswith("/"):
+            raise ValueError(f"frontend_route는 반드시 슬래시('/')로 시작해야 합니다: '{v}'")
+        if "[" in v or "]" in v:
+            raise ValueError(
+                f"frontend_route에 '[slug]'와 같은 동적 라우트 플레이스홀더를 직접 저장할 수 없습니다. "
+                f"정규 정적 진입 경로(예: /v1/admin/pages 또는 /v1/custom/page)를 입력하십시오: '{v}'"
+            )
+        return v
+
+    @field_validator("min_read_rank", "min_write_rank")
+    @classmethod
+    def validate_ranks(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return v
+        if v < 0 or v > 9:
+            raise ValueError("권한 랭크(min_read_rank / min_write_rank)는 0부터 9 사이의 정수여야 합니다.")
+        return v
 
 class AppRegistrySchema(AppRegistryBase):
     created_at: datetime

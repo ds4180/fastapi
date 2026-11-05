@@ -32,9 +32,9 @@ from domain.v1.admin.observability_schema import (
 logger = logging.getLogger("admin.observability")
 router = APIRouter(prefix="/v1/admin/observability", tags=["Admin Observability"])
 
-# 🏛️ AppRegistry 4단계 거버넌스 연동 (admin_observability)
-check_obs_read = require_app_permission("admin_observability", action="read")
-check_obs_write = require_app_permission("admin_observability", action="write")
+# 🏛️ AppRegistry 4단계 거버넌스 연동 (observability)
+check_obs_read = require_app_permission("observability", action="read")
+check_obs_write = require_app_permission("observability", action="write")
 
 
 # ==========================================================================

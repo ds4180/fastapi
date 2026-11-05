@@ -32,9 +32,9 @@ from domain.v1.admin.auth_group_schema import (
 
 router = APIRouter(prefix="/v1/admin/auth-groups", tags=["Admin Auth Groups"])
 
-# 🏛️ AppRegistry 거버넌스 연동 (admin_group_manage)
-check_groups_read = require_app_permission("admin_group_manage", action="read")
-check_groups_write = require_app_permission("admin_group_manage", action="write")
+# 🏛️ AppRegistry 거버넌스 연동 (group_manage)
+check_groups_read = require_app_permission("group_manage", action="read")
+check_groups_write = require_app_permission("group_manage", action="write")
 
 
 def remove_group_from_spec(spec: Any, target_code: str) -> tuple[Any, bool]:
