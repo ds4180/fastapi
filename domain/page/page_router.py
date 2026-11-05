@@ -74,6 +74,17 @@ def admin_delete_page(
 
 # --- [사용자용 API] ---
 
+@router.get("/public/list", response_model=List[page_schema.PageSimpleResponse])
+def get_public_pages(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional)
+):
+    """사용자용 공개 페이지 목록 조회 (발행 상태 및 4단계 권한 필터링 적용)"""
+    all_published = page_crud.get_public_page_list(db)
+    # 로그인 유저 랭크 및 권한 기반 필터링
+    allowed = [p for p in all_published if can_access_page(current_user, p, action="read")]
+    return allowed
+
 @router.get("/detail/{slug}", response_model=page_schema.PageResponse)
 def get_page_detail(
     slug: str,

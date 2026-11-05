@@ -7,6 +7,16 @@ def get_page_list(db: Session):
     """전체 페이지 목록 조회 (삭제되지 않은 것만)"""
     return db.query(Page).filter(Page.is_deleted == False).order_by(Page.created_at.desc()).all()
 
+def get_public_page_list(db: Session):
+    """사용자용 공개 페이지 목록 조회 (삭제되지 않고 활성화 및 발행된 것만)"""
+    now = datetime.now()
+    return db.query(Page).filter(
+        Page.is_deleted == False,
+        Page.is_active == True,
+        Page.status == "PUBLISHED",
+        Page.published_at <= now
+    ).order_by(Page.created_at.desc()).all()
+
 def get_page_by_id(db: Session, page_id: int):
     """ID로 페이지 상세 조회"""
     return db.query(Page).filter(Page.id == page_id, Page.is_deleted == False).first()

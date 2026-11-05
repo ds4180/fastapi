@@ -15,10 +15,10 @@ from models.system import AppRegistry
 
 logger = logging.getLogger("app_service")
 
-# 🏛️ 시스템 등록 앱 18종 4대 분류 정의 (순수 도메인 app_id 사용, /admin/+page.svelte 공식 명칭과 완전 동기화)
-# 1. SYSTEM (13종): 사용자 화면이 없는 순수 시스템 필수 관제/운영 앱
-# 2. CUSTOM (4종): 단독 비즈니스/도메인 앱 (배차, 노선 마스터, 결근계, 페이지 엔진)
-# 3. INSTANCE (1종): 다중 인스턴스 추상화 기본형 앱 (게시판 인스턴스 관리)
+# 🏛️ 시스템 등록 앱 19종 3대 분류 정의 (순수 도메인 app_id 사용, /admin/+page.svelte 공식 명칭과 완전 동기화)
+# 1. SYSTEM (14종): 사용자 화면이 없는 순수 시스템 필수 관제/운영 앱 (메뉴, 권한, 고정페이지 탐색기 등)
+# 2. CUSTOM (4종): 단독 비즈니스/도메인 앱 (배차, 노선 마스터, 결근계, 페이지 엔진 'page')
+# 3. INSTANCE (1종): 다중 인스턴스 추상화 기본형 앱 (게시판 인스턴스 관리 'boards')
 DEFAULT_SYSTEM_APPS = [
     {
         "app_id": "dashboard",
@@ -139,13 +139,26 @@ DEFAULT_SYSTEM_APPS = [
         "deny_groups": [],
     },
     {
-        "app_id": "pages",
+        "app_id": "page",
         "name": "페이지 엔진 관리",
-        "title": "페이지 엔진 관리",
+        "title": "페이지 관리자",
         "app_type": "CUSTOM",
-        "description": "DB 기반 고정 콘텐츠 페이지 작성 및 게시 기간·권한 제어 (단독 도메인 업무 앱)",
+        "description": "인스턴스 없는 단독 커스텀 앱: 정적 콘텐츠 생성·편집·게시 관리 (단독 도메인 업무 앱)",
         "frontend_route": "/v1/admin/page",
         "icon_default": "mdi:file-document-edit-outline",
+        "min_read_rank": 4,
+        "min_write_rank": 4,
+        "allow_groups": [],
+        "deny_groups": [],
+    },
+    {
+        "app_id": "pages",
+        "name": "고정 정적 페이지",
+        "title": "고정 정적 페이지 탐색기",
+        "app_type": "SYSTEM",
+        "description": "물리 파일 시스템 기반 정적 웹페이지 실시간 스캔 및 관제 도구 (시스템 관리자 전용)",
+        "frontend_route": "/v1/admin/pages",
+        "icon_default": "mdi:file-document-outline",
         "min_read_rank": 4,
         "min_write_rank": 4,
         "allow_groups": [],

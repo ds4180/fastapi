@@ -32,7 +32,9 @@ API_VERSION_PREFIX = "/v1"
 check_admin = require_app_permission("dashboard", action="read") # 대시보드 관제센터 전용 거버넌스 가드
 check_user_admin = require_app_permission("user_manage")
 check_app_admin = require_app_permission("apps")
-check_menu_admin = require_app_permission("menu")
+check_menu_admin_read = require_app_permission("menu", action="read")
+check_menu_admin_write = require_app_permission("menu", action="write")
+check_menu_admin = check_menu_admin_read # 하위 호환 보존
 check_board_admin = require_app_permission("boards", action="read")
 check_board_admin_write = require_app_permission("boards", action="write")
 check_service_admin = require_app_permission("services", action="read")
@@ -426,6 +428,11 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
     # 1. 🔗 수동 입력 URL 및 폴더/구분선
     if menu.link_type == "URL":
         raw_url = menu.external_url or "#"
+        # 🩹 부모 접합 버그로 오염된 '#/' 접두사 자동 자가치유
+        if raw_url.startswith("#/") and len(raw_url) > 2:
+            raw_url = raw_url[1:]
+            menu.external_url = raw_url
+            db.commit()
         if raw_url in MIGRATED_PAGES_MAP:
             menu.external_url = MIGRATED_PAGES_MAP[raw_url]
             db.commit()
@@ -440,35 +447,43 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
         clean_id = menu.app_id
         instance_id = str(menu.app_instance_id) if menu.app_instance_id is not None else ""
 
-        # 🏛️ [대원칙]: 어느 메뉴이든 '관리자 기능이 필요한 경우' 무조건 /v1/admin/{clean_id} 로 직행!
+        # 🏛️ [대원칙]: 어느 메뉴이든 '관리자 기능이 필요한 경우' 관리자 전용 경로로 직행!
         # 1. link_type이 SYSTEM인 순수 시스템 관리 메뉴
         # 2. 인스턴스 관리자 모드(instance_id == "-1")인 경우
         is_admin_mode = (
             menu.link_type == "SYSTEM" 
             or instance_id == "-1"
         )
+
+        # 🌟 [단일 진실 공급원 SSOT]: AppRegistry에 정의된 공식 frontend_route 최우선 바인딩
+        app_reg = db.query(AppRegistry).filter(AppRegistry.app_id == clean_id).first()
+
         if is_admin_mode:
+            if app_reg and app_reg.frontend_route:
+                return app_reg.frontend_route
             if clean_id in ["dashboard", ""]:
                 return f"{API_VERSION_PREFIX}/admin"
             return f"{API_VERSION_PREFIX}/admin/{clean_id}"
 
-        # 👤 [사용자 화면]: 각 앱의 타입에 맞는 전용 거처로 1:1 직행
+        # 👤 [사용자 화면]: 각 앱의 타입에 맞는 전용 거처로 1:1 직행 (CUSTOM은 예외 없이 /v1/custom/{clean_id})
         if menu.link_type == "CUSTOM":
             return f"{API_VERSION_PREFIX}/custom/{clean_id}"
 
         if menu.link_type in ["INSTANCE", "APP"]:
             slug = get_instance_slug(menu, db)
+            # 게시판 등 다중 인스턴스: 특정 개체는 단수형(/v1/app/board/{slug}), 허브는 복수형(/v1/app/boards)
             if slug and slug != "-1":
-                # 🏛️ [단수형 원칙]: 특정 인스턴스 개체 화면은 단수형 (/v1/app/board/{slug})
                 instance_prefix = clean_id.rstrip("s") if clean_id.endswith("s") else clean_id
                 return f"{API_VERSION_PREFIX}/app/{instance_prefix}/{slug}"
-            # 🏛️ [복수형 원칙]: 슬러그가 없는 인스턴스 전체 목록 허브는 복수형 (/v1/app/boards)
             return f"{API_VERSION_PREFIX}/app/{clean_id}"
 
-    # 3. 📄 정적 콘텐츠 레이어 (PAGE / STATIC)
+    # 3. 📄 정적 콘텐츠 레이어 (PAGE / STATIC 직접 링크)
     if menu.link_type in ["PAGE", "STATIC"] and (menu.page_id or menu.app_id):
         target = menu.page_id or menu.app_id
-        return f"{API_VERSION_PREFIX}/pages/{target}"
+        slug = get_instance_slug(menu, db)
+        if slug and slug != "-1":
+            return f"{API_VERSION_PREFIX}/pages/{slug}"
+        return f"{API_VERSION_PREFIX}/pages"
 
     return menu.external_url or "#"
 
@@ -502,7 +517,7 @@ def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
         return str(raw_val)
 
     # 3. 페이지(Page) 인스턴스 슬러그 역추적
-    if clean_id in ['page', 'pages']:
+    if clean_id in ['page', 'pages'] or menu.link_type in ['PAGE', 'STATIC']:
         if int_id is not None:
             page_obj = db.query(Page).filter(Page.id == int_id).first()
             return page_obj.slug if page_obj else str(raw_val)
@@ -558,7 +573,7 @@ def filter_menu_tree(
                 "order": m.order, "is_visible": m.is_visible, "min_rank": m.min_rank,
                 "allow_groups": m.allow_groups or [],
                 "deny_groups": m.deny_groups or [],
-                "app_id": m.app_id, "app_instance_id": get_instance_slug(m, db),
+                "app_id": m.app_id, "app_instance_id": m.app_instance_id if bypass_auth else (get_instance_slug(m, db) or m.app_instance_id),
                 "sub_menus": filter_menu_tree(m.sub_menus, current_user, db, bypass_auth=bypass_auth)
             }
             filtered.append(menu_data)
@@ -580,7 +595,7 @@ def get_public_menus(
     return filtered_menus
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])
-def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_menu_admin)):
+def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_menu_admin_read)):
     """관리자용 전체 메뉴 트리 (admin_menu 거버넌스 연동)"""
     legacy_menus = db.query(Menu).filter(Menu.link_type == "APP").all()
     if legacy_menus:
@@ -601,7 +616,7 @@ def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_men
     return filter_menu_tree(root_menus, admin, db, bypass_auth=True)
 
 @router.post("/menu", response_model=admin_schema.MenuSchema)
-def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin)):
+def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin_write)):
     data = menu_in.dict()
     if data.get("link_type") == "APP":
         data["link_type"] = "INSTANCE"
@@ -611,20 +626,49 @@ def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db),
     original_instance_id = data.get("app_instance_id")
     
     if original_instance_id and isinstance(original_instance_id, str):
-        board = db.query(BoardConfig).filter(BoardConfig.slug == original_instance_id).first()
-        if board:
-            data["app_instance_id"] = board.id
+        if data.get("app_id") in ["page", "pages"]:
+            page_obj = db.query(Page).filter(Page.slug == original_instance_id).first()
+            if page_obj:
+                data["app_instance_id"] = page_obj.id
+        else:
+            board = db.query(BoardConfig).filter(BoardConfig.slug == original_instance_id).first()
+            if board:
+                data["app_instance_id"] = board.id
     
     db_menu = Menu(**data)
     db.add(db_menu)
     db.commit()
     db.refresh(db_menu)
 
-    # 링크 타입이 엔진 기반인 경우 정규화된 URL 동기화 저장
-    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP"]:
+    # 링크 타입이 엔진 또는 정적 레이어 기반인 경우 정규화된 URL 동기화 저장
+    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP", "STATIC", "PAGE"]:
         db_menu.external_url = resolve_menu_url(db_menu, db)
         db.commit()
         db.refresh(db_menu)
+
+    # 📜 [시스템 및 보안 감사로그 영구 기록]
+    safe_log_audit(
+        db=db,
+        app_id="menu",
+        log_type="SYSTEM",
+        action="MENU_CREATED",
+        title=f"메뉴 항목 생성: {db_menu.title} (ID: {db_menu.id})",
+        user=admin,
+        resource_type="menu",
+        resource_id=str(db_menu.id),
+        message=f"타입: {db_menu.link_type}, URL: {db_menu.external_url}, 권한: R{db_menu.min_rank}",
+        metadata={
+            "menu_id": db_menu.id,
+            "title": db_menu.title,
+            "parent_id": db_menu.parent_id,
+            "link_type": db_menu.link_type,
+            "external_url": db_menu.external_url,
+            "app_id": db_menu.app_id,
+            "min_rank": db_menu.min_rank,
+            "allow_groups": db_menu.allow_groups,
+            "deny_groups": db_menu.deny_groups,
+        }
+    )
     
     # 응답 시 slug가 원래 요청에 있었다면 slug로 복구
     result = admin_schema.MenuSchema.model_validate(db_menu)
@@ -634,7 +678,7 @@ def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db),
     return result
 
 @router.put("/menu/{menu_id}", response_model=admin_schema.MenuSchema)
-def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin)):
+def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin_write)):
     db_menu = db.query(Menu).filter(Menu.id == menu_id).first()
     if not db_menu: raise HTTPException(status_code=404)
     
@@ -647,20 +691,55 @@ def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = De
     original_instance_id = data.get("app_instance_id")
     
     if original_instance_id and isinstance(original_instance_id, str):
-        board = db.query(BoardConfig).filter(BoardConfig.slug == original_instance_id).first()
-        if board:
-            data["app_instance_id"] = board.id
-    
+        if data.get("app_id") in ["page", "pages"]:
+            page_obj = db.query(Page).filter(Page.slug == original_instance_id).first()
+            if page_obj:
+                data["app_instance_id"] = page_obj.id
+        else:
+            board = db.query(BoardConfig).filter(BoardConfig.slug == original_instance_id).first()
+            if board:
+                data["app_instance_id"] = board.id
+
+    # 📜 변경 전/후 diff 추출
+    diff_list = []
     for key, value in data.items():
+        old_val = getattr(db_menu, key, None)
+        if old_val != value:
+            diff_list.append({
+                "field": key,
+                "old": old_val,
+                "new": value
+            })
         setattr(db_menu, key, value)
+
     db.commit()
     db.refresh(db_menu)
 
-    # 링크 타입이 엔진 기반인 경우 정규화된 URL 동기화 저장
-    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP"]:
+    # 링크 타입이 엔진 또는 정적 레이어 기반인 경우 정규화된 URL 동기화 저장
+    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP", "STATIC", "PAGE"]:
         db_menu.external_url = resolve_menu_url(db_menu, db)
         db.commit()
         db.refresh(db_menu)
+
+    # 📜 [시스템/보안 감사로그 영구 기록]
+    if diff_list:
+        is_security_change = any(
+            f["field"] in ["min_rank", "allow_groups", "deny_groups", "is_visible"] 
+            for f in diff_list
+        )
+        safe_log_audit(
+            db=db,
+            app_id="menu",
+            log_type="SECURITY" if is_security_change else "SYSTEM",
+            action="MENU_UPDATED",
+            title=f"메뉴 항목 수정: {db_menu.title} (ID: {db_menu.id})",
+            user=admin,
+            resource_type="menu",
+            resource_id=str(db_menu.id),
+            message=f"{len(diff_list)}개 항목 변경 완료: " + ", ".join([d["field"] for d in diff_list]),
+            diff_payload=diff_list,
+            metadata={"menu_id": db_menu.id, "updated_fields": list(data.keys())}
+        )
     
     result = admin_schema.MenuSchema.model_validate(db_menu)
     if isinstance(original_instance_id, str):
@@ -669,11 +748,32 @@ def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = De
     return result
 
 @router.delete("/menu/{menu_id}")
-def delete_menu(menu_id: int, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin)):
+def delete_menu(menu_id: int, db: Session = Depends(get_db), admin: User = Depends(check_menu_admin_write)):
     db_menu = db.query(Menu).filter(Menu.id == menu_id).first()
     if not db_menu: raise HTTPException(status_code=404)
+
+    menu_id_val = db_menu.id
+    menu_title = db_menu.title
+    menu_url = db_menu.external_url
+
     db.delete(db_menu)
     db.commit()
+
+    # 📜 [보안 감사로그 영구 기록]
+    safe_log_audit(
+        db=db,
+        app_id="menu",
+        log_type="SECURITY",
+        action="MENU_DELETED",
+        title=f"메뉴 항목 삭제 완료: {menu_title} (ID: {menu_id_val})",
+        user=admin,
+        severity="WARN",
+        resource_type="menu",
+        resource_id=str(menu_id_val),
+        message=f"메뉴 '{menu_title}' (URL: {menu_url}) 항목이 시스템에서 영구 삭제되었습니다.",
+        metadata={"menu_id": menu_id_val, "title": menu_title, "url": menu_url}
+    )
+
     return {"message": "success"}
 
 # --- System Configuration (admin_config 거버넌스 연동) ---
