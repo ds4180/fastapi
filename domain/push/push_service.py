@@ -19,9 +19,20 @@ async def save_subscription(db: Session, subscription_data: schemas.PushSubscrip
     existing_sub = get_subscription_by_endpoint(db, subscription_data.endpoint)
 
     if existing_sub:
-        # If exists, update its details or just return it if no changes
-        # For simplicity, if it exists, we just return it. In a real app, you might update p256dh, auth.
-        print("Service: Subscription already exists, returning existing one.")
+        # ⚡ [자원 최적화] 기존 DB 레코드와 소유자(user_id) 및 암호화 키가 완전히 동일하면 불필요한 DB Write(commit)를 생략합니다.
+        if (
+            existing_sub.user_id == user_id
+            and existing_sub.p256dh == subscription_data.keys.p256dh
+            and existing_sub.auth == subscription_data.keys.auth
+        ):
+            return existing_sub
+
+        # 공용 기기에서 다른 사원이 로그인했거나 키가 갱신된 경우에만 Upsert Commit 수행
+        existing_sub.user_id = user_id
+        existing_sub.p256dh = subscription_data.keys.p256dh
+        existing_sub.auth = subscription_data.keys.auth
+        db.commit()
+        db.refresh(existing_sub)
         return existing_sub
     
     new_sub = PushSubscription(
@@ -35,6 +46,19 @@ async def save_subscription(db: Session, subscription_data: schemas.PushSubscrip
     db.refresh(new_sub)
     print("Service: New subscription saved successfully.")
     return new_sub
+
+
+async def delete_subscription_by_endpoint(db: Session, endpoint: str) -> int:
+    """
+    로그아웃 시 해당 기기 브라우저의 푸시 엔드포인트를 DB 발송 명단에서 즉시 제거합니다.
+    """
+    deleted = (
+        db.query(PushSubscription)
+        .filter(PushSubscription.endpoint == endpoint)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return deleted
 
 import json
 from database import SessionLocal # 백그라운드 태스크 및 관리자용 세션 생성을 위해 추가

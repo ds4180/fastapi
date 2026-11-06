@@ -27,6 +27,19 @@ async def subscribe_push_notification(
     print(f"Received push subscription request for user {current_user.id}: {subscription_data.dict()}")
     return {"message": "Subscription successful", "status": "active", "id": saved_subscription.id}
 
+
+@router.post("/unsubscribe", status_code=status.HTTP_200_OK)
+async def unsubscribe_push_notification(
+    payload: schemas.PushUnsubscribeRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    로그아웃 또는 세션 종료 시 해당 기기(endpoint)의 푸시 알림 구독을 DB에서 제거합니다.
+    (쿠키 만료 직후에도 안전하게 호출될 수 있도록 고유 endpoint 기반으로 삭제)
+    """
+    deleted_count = await push_service.delete_subscription_by_endpoint(db, payload.endpoint)
+    return {"message": "Unsubscribed successfully", "deleted": deleted_count}
+
 # Endpoint to send push notifications to all subscribers
 @router.post("/send-all", status_code=status.HTTP_200_OK)
 async def send_all_push_notifications(

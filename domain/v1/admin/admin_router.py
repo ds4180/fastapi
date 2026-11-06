@@ -1271,6 +1271,16 @@ def admin_send_push(
     
     return {"message": "success", "sent_count": result.get("sent", 0)}
 
+@router.delete("/push/subscriptions")
+def delete_all_push_subscriptions(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_push_admin_write)
+):
+    """전체 푸시 구독 기기 목록 일괄 초기화(전체 삭제)"""
+    deleted_count = db.query(models.PushSubscription).delete(synchronize_session=False)
+    db.commit()
+    return {"message": "success", "deleted_count": deleted_count}
+
 @router.delete("/push/subscriptions/{sub_id}")
 def delete_push_subscription(
     sub_id: int,

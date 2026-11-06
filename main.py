@@ -97,10 +97,11 @@ async def lifespan(app: FastAPI):
     # 3. 가동 중인 백그라운드 작업들 안전하게 종료 요청 (Graceful Shutdown)
     ping_task.cancel()
     system_task_worker.cancel()
+    await ws_service.manager.close_all()
     
     # 작업들이 완전히 멈출 때까지 기다려줍니다.
     await asyncio.gather(ping_task, system_task_worker, return_exceptions=True)
-    print("👋 시스템 워커가 안전하게 종료되었습니다.")
+    print("👋 시스템 워커 및 실시간 웹소켓 연결이 안전하게 종료되었습니다.")
 
 from domain.v1.board import board_router as v1_board_router
 from domain.v1.admin import admin_router as v1_admin_router

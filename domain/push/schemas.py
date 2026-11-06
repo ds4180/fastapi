@@ -7,4 +7,6 @@ class PushSubscriptionKeys(BaseModel):
 class PushSubscriptionCreate(BaseModel):
     endpoint: str
     keys: PushSubscriptionKeys
-    # Add any other fields from the PushSubscription object if needed
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: str
