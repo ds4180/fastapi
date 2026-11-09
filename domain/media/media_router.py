@@ -106,7 +106,26 @@ async def media_secure_serve(
 
     # 썸네일 요청 처리
     target_rel_path = asset.file_path
-    if size and size.upper() in ["SM", "MD", "LG"]:
+    if not size and asset.category == "image":
+        # [v3.5] 원본 직접 요청 시 원본 부재(복제본 또는 60일 경과 파기) 시 고화질 썸네일(LG)로 안전 폴백
+        orig_abs_path = os.path.join(media_config.MEDIA_ROOT, asset.file_path)
+        if (asset.meta_info and asset.meta_info.get("has_original") is False) or not os.path.exists(orig_abs_path):
+            base_name = os.path.basename(asset.file_path)
+            unique_id = base_name.replace(media_config.PREFIX['IMAGE'], "").split('.')[0]
+            dir_name = os.path.dirname(asset.file_path)
+            lg_found = False
+            for fallback_size in ["LG", "MD", "SM"]:
+                fallback_name = f"{media_config.PREFIX['THUMB']}{unique_id}_{fallback_size}.WEBP"
+                fallback_rel = os.path.join(dir_name, media_config.THUMB_FOLDER_NAME, fallback_name).replace("\\", "/")
+                fallback_abs = os.path.join(media_config.MEDIA_ROOT, fallback_rel)
+                if os.path.exists(fallback_abs):
+                    target_rel_path = fallback_rel
+                    lg_found = True
+                    break
+            if not lg_found:
+                return RedirectResponse(url="/default-thumbnail.png")
+
+    elif size and size.upper() in ["SM", "MD", "LG"]:
         size_upper = size.upper()
         
         # [v3.2] Task Worker 네이밍 규칙(UUID 기반)으로 수정
@@ -122,13 +141,38 @@ async def media_secure_serve(
         if os.path.exists(thumb_abs_path):
             target_rel_path = thumb_rel_path
         else:
-            # 썸네일이 없으면 생성 예약 (Unique Key로 중복 방지)
-            from domain.system.task_service import enqueue_task
-            enqueue_task(db, "THUMB_GEN", {"asset_id": asset.id}, priority=2, unique_key=f"thumb-gen-{asset.id}")
-            db.commit()
+            # 1. 레거시 썸네일 경로 호환 탐색
+            legacy_found = False
+            if asset.meta_info and isinstance(asset.meta_info.get("thumbs"), dict):
+                saved_thumb = asset.meta_info["thumbs"].get(size.lower()) or asset.meta_info["thumbs"].get(size_upper)
+                if saved_thumb:
+                    saved_abs = os.path.join(media_config.MEDIA_ROOT, saved_thumb)
+                    if os.path.exists(saved_abs):
+                        target_rel_path = saved_thumb
+                        legacy_found = True
             
-            # [v3.2] 기본 이미지 반환
-            return RedirectResponse(url="/default-thumbnail.png")
+            if not legacy_found:
+                legacy_thumb_name = f"{unique_id}_{size.lower()}.webp"
+                legacy_rel_path = os.path.join(dir_name, "thumbnails", legacy_thumb_name).replace("\\", "/")
+                legacy_abs = os.path.join(media_config.MEDIA_ROOT, legacy_rel_path)
+                if os.path.exists(legacy_abs):
+                    target_rel_path = legacy_rel_path
+                    legacy_found = True
+
+            if not legacy_found:
+                # [안전 가드 원칙]: 이미 삭제된 자산(is_deleted=True)이거나 디스크에 원본 파일이 없으면
+                # 절대로 비동기 큐(THUMB_GEN)를 발행하지 않고 기본 이미지만 반환하여 큐 오염 방지
+                orig_abs_path = os.path.join(media_config.MEDIA_ROOT, asset.file_path)
+                if asset.is_deleted or not os.path.exists(orig_abs_path):
+                    return RedirectResponse(url="/default-thumbnail.png")
+
+                # 원본 파일이 실제로 디스크에 존재하는 정상 활성 자산만 비동기 썸네일 생성 예약
+                from domain.system.task_service import enqueue_task
+                enqueue_task(db, "THUMB_GEN", {"asset_id": asset.id}, priority=2, unique_key=f"thumb-gen-{asset.id}")
+                db.commit()
+                
+                # [v3.2] 기본 이미지 반환
+                return RedirectResponse(url="/default-thumbnail.png")
 
     internal_prefix = TIER_INTERNAL_MAP.get(asset.access_level, "/PUBLIC/")
     
@@ -142,10 +186,27 @@ async def media_secure_serve(
 
     redirect_path = f"{internal_prefix}{path_without_tier}"
 
+    # [v3.5] 실제 서빙되는 파일(썸네일 등)의 확장자에 맞추어 Content-Type 안전 동기화
+    ext = target_rel_path.split(".")[-1].lower()
+    if ext == "webp":
+        content_type = "image/webp"
+    elif ext in ["jpg", "jpeg"]:
+        content_type = "image/jpeg"
+    elif ext == "png":
+        content_type = "image/png"
+    elif ext == "gif":
+        content_type = "image/gif"
+    elif ext == "svg":
+        content_type = "image/svg+xml"
+    elif ext == "pdf":
+        content_type = "application/pdf"
+    else:
+        content_type = asset.mime_type or "application/octet-stream"
+
     return Response(
         headers={
             "X-Accel-Redirect": redirect_path,
-            "Content-Type": asset.mime_type or "application/octet-stream"
+            "Content-Type": content_type
         }
     )
 

@@ -109,7 +109,14 @@ async def media_process_upload(
         os.chmod(abs_file_path, 0o644) # [v3.2] 원본 파일 읽기 권한 보장
         
         file_size = len(content)
-        meta_info = {"original_name": original_name}
+        from datetime import datetime, timedelta
+        expires_at = (datetime.now() + timedelta(days=60)).isoformat()
+        meta_info = {
+            "original_name": original_name,
+            "has_original": True,
+            "original_expires_at": expires_at,
+            "original_purged": False
+        }
         thumb_main_path = None
 
         # 6. 이미지 썸네일 (SM 동기 생성)
@@ -253,39 +260,80 @@ def media_publish_assets(
         relative_file_path = os.path.join(relative_dir, filename).replace("\\", "/")
         abs_file_path = os.path.join(abs_dir, filename)
 
-        # 물리 파일 복사 및 권한 설정
-        shutil.copy2(src_abs_path, abs_file_path)
-        os.chmod(abs_file_path, 0o644)
-
-        file_size = os.path.getsize(abs_file_path)
-        meta_info = {"original_name": original_name, "published_from": src_asset.id}
+        need_bg_thumb_gen = False
         thumb_main_path = None
 
-        # 이미지인 경우 SM 썸네일 즉시 생성
+        # [v3.5 대원칙]:
+        # 1. 이미지(IMAGE): 원본 복사 생략! 썸네일 3종(SM, MD, LG)만 물리 복사하여 스토리지 90% 절감
+        # 2. 문서(DOC): 원본 물리 복사
         if category == config.MEDIA_CATEGORIES["IMAGE"]:
-            try:
-                with Image.open(abs_file_path) as img:
-                    meta_info["width"], meta_info["height"] = img.size
-                    thumb_dir = os.path.join(abs_dir, config.THUMB_FOLDER_NAME)
-                    safe_makedirs(thumb_dir)
+            meta_info = {
+                "original_name": original_name,
+                "published_from": src_asset.id,
+                "has_original": False,  # 복제본은 원본 미포함 (상세보기에서 원본 다운로드 비활성화)
+                "thumbs": {}
+            }
+            file_size = src_asset.file_size or 0
+            thumb_dir = os.path.join(abs_dir, config.THUMB_FOLDER_NAME)
+            safe_makedirs(thumb_dir)
 
-                    if img.mode in ("P", "CMYK"):
-                        img = img.convert("RGB")
+            # 1. 원본 자산(src_asset)에 이미 존재하는 썸네일 3종(SM, MD, LG) 물리 복사
+            src_dir = os.path.dirname(src_abs_path)
+            src_base = os.path.basename(src_asset.file_path)
+            src_uuid = src_base.replace(config.PREFIX['IMAGE'], "").split('.')[0]
 
-                    sm_cfg = config.MEDIA_THUMB_CONFIG["SM"]
-                    sm_img = img.copy()
-                    sm_img.thumbnail(sm_cfg["size"], Image.Resampling.LANCZOS)
-                    sm_filename = f"{config.PREFIX['THUMB']}{unique_uuid}_{sm_cfg['suffix']}.WEBP"
-                    sm_abs_path = os.path.join(thumb_dir, sm_filename)
-                    sm_rel_path = os.path.join(relative_dir, config.THUMB_FOLDER_NAME, sm_filename).replace("\\", "/")
+            copied_thumbs = {}
+            for size_key in ["SM", "MD", "LG"]:
+                cfg = config.MEDIA_THUMB_CONFIG[size_key]
+                src_thumb_file = f"{config.PREFIX['THUMB']}{src_uuid}_{cfg['suffix']}.WEBP"
+                src_thumb_path = os.path.join(src_dir, config.THUMB_FOLDER_NAME, src_thumb_file)
 
-                    sm_img.save(sm_abs_path, "WEBP", quality=config.WEBP_QUALITY)
-                    os.chmod(sm_abs_path, 0o644)
+                # 레거시 경로 대응
+                if not os.path.exists(src_thumb_path):
+                    legacy_path = os.path.join(src_dir, "thumbnails", f"{src_uuid}_{size_key.lower()}.webp")
+                    if os.path.exists(legacy_path):
+                        src_thumb_path = legacy_path
 
-                    meta_info["thumbs"] = {"sm": sm_rel_path}
-                    thumb_main_path = sm_rel_path
-            except Exception as e:
-                logger.error(f"[Media Publish Error] SM Thumbnail failed: {e}")
+                if os.path.exists(src_thumb_path):
+                    dst_thumb_file = f"{config.PREFIX['THUMB']}{unique_uuid}_{cfg['suffix']}.WEBP"
+                    dst_thumb_path = os.path.join(thumb_dir, dst_thumb_file)
+                    shutil.copy2(src_thumb_path, dst_thumb_path)
+                    os.chmod(dst_thumb_path, 0o644)
+
+                    rel_thumb_path = os.path.join(relative_dir, config.THUMB_FOLDER_NAME, dst_thumb_file).replace("\\", "/")
+                    copied_thumbs[size_key.lower()] = rel_thumb_path
+                    if size_key == "SM":
+                        thumb_main_path = rel_thumb_path
+
+            # 원본 자산에 썸네일이 없었던 경우: 원본(src_abs_path)에서 썸네일을 생성하여 저장 (원본 복사는 하지 않음)
+            if not copied_thumbs and os.path.exists(src_abs_path):
+                try:
+                    with Image.open(src_abs_path) as img:
+                        meta_info["width"], meta_info["height"] = img.size
+                        if img.mode in ("P", "CMYK"):
+                            img = img.convert("RGB")
+                        for size_key in ["SM", "MD", "LG"]:
+                            cfg = config.MEDIA_THUMB_CONFIG[size_key]
+                            t_img = img.copy()
+                            t_img.thumbnail(cfg["size"], Image.Resampling.LANCZOS)
+                            t_filename = f"{config.PREFIX['THUMB']}{unique_uuid}_{cfg['suffix']}.WEBP"
+                            t_abs = os.path.join(thumb_dir, t_filename)
+                            t_rel = os.path.join(relative_dir, config.THUMB_FOLDER_NAME, t_filename).replace("\\", "/")
+                            t_img.save(t_abs, "WEBP", quality=config.WEBP_QUALITY)
+                            os.chmod(t_abs, 0o644)
+                            copied_thumbs[size_key.lower()] = t_rel
+                            if size_key == "SM":
+                                thumb_main_path = t_rel
+                except Exception as e:
+                    logger.error(f"[Media Publish Error] Thumbnail gen from src failed: {e}")
+
+            meta_info["thumbs"] = copied_thumbs
+        else:
+            # 일반 문서인 경우: 원본 물리 복사
+            shutil.copy2(src_abs_path, abs_file_path)
+            os.chmod(abs_file_path, 0o644)
+            file_size = os.path.getsize(abs_file_path)
+            meta_info = {"original_name": original_name, "published_from": src_asset.id, "has_original": True}
 
         new_asset = MediaAsset(
             user_id=user.id,
@@ -303,7 +351,8 @@ def media_publish_assets(
         db.add(new_asset)
         db.flush()
 
-        if category == config.MEDIA_CATEGORIES["IMAGE"]:
+        # 썸네일이 누락된 경우에만 비동기 큐 예약 (완전 복사 시 워커 불필요)
+        if need_bg_thumb_gen:
             enqueue_task(
                 db=db,
                 task_type="THUMB_GEN",

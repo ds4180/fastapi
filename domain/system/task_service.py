@@ -93,13 +93,27 @@ def enqueue_task(
     이 함수는 DB 레코드만 생성하며, 실제 실행은 task_worker가 담당합니다.
     """
     
-    # 멱등성 체크: 만약 unique_key가 있고, 이미 PENDING인 동일 작업이 있다면 새로 만들지 않음
+    # 멱등성 체크: 만약 unique_key가 있고, 이미 존재하는 태스크가 있다면 UniqueViolation 500 방지
     if unique_key:
         existing = db.query(SystemTask).filter(
-            SystemTask.unique_key == unique_key,
-            SystemTask.status == "PENDING"
+            SystemTask.unique_key == unique_key
         ).first()
         if existing:
+            # 이미 대기 중이거나 실행 중이거나 성공한 경우 기존 태스크 반환
+            if existing.status in ["PENDING", "RUNNING", "SUCCESS"]:
+                return existing
+            
+            # 과거에 실패(FAILED) 또는 취소(CANCELLED)된 태스크라면 재활용하여 PENDING으로 리셋
+            existing.status = "PENDING"
+            existing.payload = payload
+            existing.priority = priority
+            existing.scheduled_at = scheduled_at or datetime.now()
+            existing.retry_count = 0
+            existing.error_log = None
+            existing.progress_pct = 0
+            existing.started_at = None
+            existing.completed_at = None
+            db.flush()
             return existing
 
     new_task = SystemTask(
@@ -164,7 +178,7 @@ def bootstrap_default_cron_tasks(db: Session) -> int:
         {
             "task_type": "MEDIA_GC",
             "unique_key": "cron:media_gc",
-            "payload": {"indices": [1, 2, 3, 4, 5]},
+            "payload": {"indices": [1, 2, 3, 4, 5, 6]},
             "priority": 8,
             "repeat_interval": None,
             "cron_expression": "0 4 * * *", # 매일 새벽 04:00
@@ -212,18 +226,32 @@ def bootstrap_default_cron_tasks(db: Session) -> int:
             registered_count += 1
             logger.info(f"🌱 [Bootstrap] 자율신경계 정기 태스크 등록 완료: {defn['task_type']} ({defn['desc']})")
         else:
-            # 🛡️ [자가치유 및 사양 동기화]: FAILED 상태로 멈춰있거나 Cron 표현식이 변경된 경우 즉시 정상화
+            # 🛡️ [자가치유 및 사양 동기화]: FAILED/CANCELLED 또는 비정상 장기 RUNNING(10분 이상) 시 즉시 정상화
             needs_heal = False
             if existing.status in ("FAILED", "CANCELLED"):
                 existing.status = "PENDING"
                 existing.retry_count = 0
                 existing.error_message = None
+                existing.worker_id = None
                 needs_heal = True
+            elif existing.status == "RUNNING":
+                started = existing.started_at or existing.scheduled_at or now
+                if (now - started).total_seconds() > 600: # 10분 이상 RUNNING 고착
+                    logger.warning(f"⚠️ [Bootstrap Auto-Heal] 장기 RUNNING 고착 태스크 감지 및 PENDING 복구: {existing.id} ({existing.task_type})")
+                    existing.status = "PENDING"
+                    existing.worker_id = None
+                    needs_heal = True
+
             if existing.cron_expression != defn["cron_expression"]:
                 existing.cron_expression = defn["cron_expression"]
                 needs_heal = True
             if existing.repeat_interval != defn["repeat_interval"]:
                 existing.repeat_interval = defn["repeat_interval"]
+                needs_heal = True
+            if existing.payload != defn["payload"]:
+                existing.payload = defn["payload"]
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(existing, "payload")
                 needs_heal = True
 
             if needs_heal:

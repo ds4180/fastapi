@@ -78,11 +78,17 @@ async def handle_thumb_gen(task: SystemTask, db: Session):
     asset_id = task.payload.get("asset_id")
     asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id).first()
     if not asset:
-        raise ValueError(f"자산을 찾을 수 없습니다: {asset_id}")
+        logger.warning(f"⚠️ [THUMB_GEN] 자산 부재로 작업 취소: asset_id={asset_id}")
+        task.status = "CANCELLED"
+        task.progress_pct = 100
+        return {"status": "cancelled", "reason": f"자산을 찾을 수 없습니다: {asset_id}"}
 
     abs_file_path = os.path.join(config.MEDIA_ROOT, asset.file_path)
     if not os.path.exists(abs_file_path):
-        raise FileNotFoundError(f"원본 파일을 찾을 수 없습니다: {abs_file_path}")
+        logger.warning(f"⚠️ [THUMB_GEN] 원본 파일 부재로 작업 취소: {abs_file_path}")
+        task.status = "CANCELLED"
+        task.progress_pct = 100
+        return {"status": "cancelled", "reason": f"원본 파일을 찾을 수 없습니다: {abs_file_path}"}
 
     # 이미지 처리
     with Image.open(abs_file_path) as img:
@@ -211,8 +217,8 @@ async def handle_media_gc(task: SystemTask, db: Session):
     """
     from domain.media.media_gc_service import MediaGCService
     
-    # payload에서 실행할 작업 인덱스 목록을 가져옴 (기본값: [1,2,3,4,5] 전체)
-    task_indices = task.payload.get("indices", [1, 2, 3, 4, 5])
+    # payload에서 실행할 작업 인덱스 목록을 가져옴 (기본값: [1,2,3,4,5,6] 전체)
+    task_indices = task.payload.get("indices", [1, 2, 3, 4, 5, 6])
     
     service = MediaGCService(db)
     logger.info(f"🧹 시스템 정리를 시작합니다 (작업: {task_indices})")
@@ -332,6 +338,75 @@ async def handle_check_miniapp_alarms(task: SystemTask, db: Session):
 
 # --- [핵심 엔진] 단일 태스크 처리기 & 워커 루프 ---
 
+def reclaim_stuck_tasks(db: Session) -> int:
+    """
+    [워커락 자동 회수기 (Stuck Task Auto-Reclaim)]
+    워커 프로세스 비정상 종료(컨테이너 재시작, OOM 등)로 인해
+    장시간 RUNNING 상태로 고착된 태스크를 감지하여 자동 복구합니다.
+    """
+    now = datetime.now()
+    running_tasks = db.query(SystemTask).filter(SystemTask.status == "RUNNING").all()
+    reclaimed_count = 0
+
+    for task in running_tasks:
+        timeout_sec = task.timeout_sec or 300
+        task_timeout = timedelta(seconds=timeout_sec)
+        started = task.started_at or task.scheduled_at or now
+        elapsed = now - started
+
+        if elapsed > task_timeout:
+            logger.warning(
+                f"🚨 [워커락 감지] 고착된 RUNNING 태스크 회수: ID={task.id} ({task.task_type}), "
+                f"경과={int(elapsed.total_seconds())}초, 타임아웃={timeout_sec}초"
+            )
+            task.retry_count += 1
+            if task.retry_count >= task.max_retries:
+                task.status = "FAILED"
+                task.completed_at = now
+                task.error_log = f"워커 비정상 종료 또는 타임아웃 초과로 고착됨 (경과: {int(elapsed.total_seconds())}초)"
+                logger.error(f"❌ [워커락 회수] 최대 재시도 초과로 FAILED 마감: ID={task.id}")
+
+                # 🌟 반복 작업인 경우 시스템 순환 루프가 멈추지 않도록 차기 회차 예약 자동 발행!
+                if task.cron_expression or task.repeat_interval:
+                    next_time = calculate_next_scheduled_at(
+                        cron_expr=task.cron_expression,
+                        interval_sec=task.repeat_interval,
+                        base_time=now
+                    )
+                    if next_time:
+                        next_unique_key = None
+                        if task.unique_key:
+                            base_parts = task.unique_key.split(":")
+                            base_key = ":".join(base_parts[:2]) if len(base_parts) >= 2 else task.unique_key
+                            next_unique_key = f"{base_key}:{next_time.strftime('%Y%m%d%H%M%S')}"
+                        enqueue_task(
+                            db=db,
+                            task_type=task.task_type,
+                            payload=task.payload,
+                            priority=task.priority,
+                            scheduled_at=next_time,
+                            cron_expression=task.cron_expression,
+                            repeat_interval=task.repeat_interval,
+                            unique_key=next_unique_key,
+                            parent_id=task.id,
+                            tags=task.tags
+                        )
+                        logger.info(f"🔄 [자가치유] 고착 실패 후 차기 스케줄 발행 완료: ID={task.id} -> 차기 예약={next_time}")
+            else:
+                task.status = "PENDING"
+                task.worker_id = None
+                task.scheduled_at = now
+                task.error_log = f"워커 비정상 종료 감지로 인한 자동 재시도 예약 (시도 {task.retry_count}/{task.max_retries})"
+                logger.info(f"🔄 [워커락 회수] PENDING 복귀 및 즉시 재실행 예약: ID={task.id}")
+
+            reclaimed_count += 1
+
+    if reclaimed_count > 0:
+        db.commit()
+
+    return reclaimed_count
+
+
 async def process_next_task(db: Session, worker_id: str) -> bool:
     """
     [단일 태스크 안전 선점 및 실행기]
@@ -390,6 +465,13 @@ async def process_next_task(db: Session, worker_id: str) -> bool:
                 base_time=datetime.now()
             )
             if next_time:
+                # 🌟 차기 회차 고유키 발급 (기존 static 키로 인한 DB UNIQUE 충돌 및 차기 생성 누락 방지)
+                next_unique_key = None
+                if task.unique_key:
+                    base_parts = task.unique_key.split(":")
+                    base_key = ":".join(base_parts[:2]) if len(base_parts) >= 2 else task.unique_key
+                    next_unique_key = f"{base_key}:{next_time.strftime('%Y%m%d%H%M%S')}"
+
                 enqueue_task(
                     db=db,
                     task_type=task.task_type,
@@ -398,14 +480,14 @@ async def process_next_task(db: Session, worker_id: str) -> bool:
                     scheduled_at=next_time,
                     cron_expression=task.cron_expression,
                     repeat_interval=task.repeat_interval,
-                    unique_key=task.unique_key, # 🌟 고유 키 보존으로 서버 재부팅 시 무한 중복 증식 원천 차단!
+                    unique_key=next_unique_key,
                     parent_id=task.id,
                     created_by=task.created_by,
                     tags=task.tags,
                     max_retries=task.max_retries,
                     timeout_sec=task.timeout_sec
                 )
-                logger.info(f"🔄 반복 태스크 차기 발행 완료: ID={task.id} -> 차기 예약={next_time} (Key: {task.unique_key})")
+                logger.info(f"🔄 반복 태스크 차기 발행 완료: ID={task.id} -> 차기 예약={next_time} (Key: {next_unique_key})")
 
         db.commit()
         return True
@@ -445,9 +527,28 @@ async def run_task_worker():
     worker_id = f"worker-{os.getpid()}-{uuid.uuid4().hex[:6]}"
     logger.info(f"🚀 시스템 태스크 워커(v3.2 자율신경계) 가동 시작! (Worker ID: {worker_id})")
     
+    # 🛡️ 워커 최초 기동 시: 이전 프로세스 비정상 종료로 고착된 RUNNING 태스크 즉각 회수
+    init_db = SessionLocal()
+    try:
+        recovered = reclaim_stuck_tasks(init_db)
+        if recovered > 0:
+            logger.info(f"✨ [워커 기동 회수] 잔여 고착 태스크 {recovered}건 안전 복구 완료")
+    except Exception as ie:
+        logger.warning(f"⚠️ 초기 고착 태스크 회수 실패: {ie}")
+    finally:
+        init_db.close()
+
+    last_reclaim_check = datetime.now()
+
     while True:
         db = SessionLocal()
         try:
+            # 🛡️ 60초마다 워커락(고착 RUNNING) 정기 감시 및 자동 치유
+            now_check = datetime.now()
+            if (now_check - last_reclaim_check).total_seconds() >= 60:
+                last_reclaim_check = now_check
+                reclaim_stuck_tasks(db)
+
             processed = await process_next_task(db, worker_id)
             if not processed:
                 await asyncio.sleep(2)
