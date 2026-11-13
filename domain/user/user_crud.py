@@ -13,6 +13,26 @@ from redis_config import rd
 # pwd_context.verify(), pwd_context.hash() 인터페이스가 그대로 유지되어 기존 호출부 수정 없이 동작
 pwd_context = PasswordHash((BcryptHasher(),))
 
+# 🛡️ [보안 강화 4 - 타이밍 공격(Timing Attack) 및 계정 열거(Username Enumeration) 방어용 더미 해시]:
+# 존재하지 않는 아이디(username)로 로그인을 시도할 때 bcrypt 해시 검증을 건너뛰고 즉시 401을 반환하면,
+# 응답 시간 차이(존재하지 않는 계정: ~1ms vs 존재하는 계정: ~150ms)를 측정해 사내 유효 아이디 목록을
+# 전수 추출할 수 있습니다. 이를 막기 위해 계정이 없을 때도 아래 더미 해시를 동일하게 검증합니다.
+DUMMY_PASSWORD_HASH = pwd_context.hash("__jeju_live_constant_time_dummy_secret__")
+
+
+def verify_user_credentials(user: Union[User, None], plain_password: str) -> bool:
+    """
+    [Constant-Time 자격증명 검증기]
+    계정 존재 여부와 무관하게 항상 동일한 bcrypt 해시 연산 시간을 소요하여
+    타이밍 공격(Timing Attack)을 통한 사내 계정 아이디 유추를 원천 차단합니다.
+    """
+    if user is None or not getattr(user, "password", None):
+        # 계정이 존재하지 않아도 더미 해시 검증을 수행하여 동일한 CPU 연산 시간 소모 후 False 반환
+        pwd_context.verify(plain_password, DUMMY_PASSWORD_HASH)
+        return False
+    return pwd_context.verify(plain_password, user.password)
+
+
 def get_session_list(db: Session, limit: int = 100):
     """최근 접속순으로 세션 목록 조회 및 통합 자가치유 동기화 (최대 100개)"""
     from core.session import sync_expired_sessions

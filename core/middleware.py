@@ -52,6 +52,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             has_session_cookie = any("session_id=" in h for h in set_cookie_headers if h)
             if not has_session_cookie:
                 from core.session import SESSION_EXPIRE_SECONDS
+                from core.config import settings
 
                 response.set_cookie(
                     key="session_id",
@@ -59,7 +60,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
                     httponly=True,
                     max_age=SESSION_EXPIRE_SECONDS,
                     samesite="lax",
-                    secure=False,
+                    secure=settings.COOKIE_SECURE,
                     path="/",
                 )
 

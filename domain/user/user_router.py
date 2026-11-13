@@ -33,6 +33,10 @@ from core.audit import safe_log_audit
 from core.session import (
     create_user_session,
     terminate_session,
+    get_client_ip,
+    check_login_rate_limit,
+    record_login_failure,
+    clear_login_failures,
     SESSION_EXPIRE_SECONDS,
 )
 from core.deps import (
@@ -71,52 +75,74 @@ def login_for_access_token(
     db: Session = Depends(get_db)
 ):
     """
-    사용자 아이디/비밀번호 검증 및 신규 세션 발급
-    - 비밀번호 검증 성공 시 core.session 엔진을 통해 UUID 세션을 발급합니다.
-    - 브라우저 쿠키(session_id)에 세션 키를 안전하게 설정합니다.
+    사용자 아이디/비밀번호 검증 및 신규 세션 발급 (5중 보안 강화 버전)
+
+    🛡️ 적용된 5대 보안 메커니즘:
+    1. [실제 IP & 기기 식별]: 프록시(SvelteKit SSR / Nginx)가 전달한 `X-Forwarded-For`, `X-Real-IP`,
+       `User-Agent`를 기반으로 실제 접속자 IP와 기기 카테고리(MOBILE/DESKTOP)를 정확히 식별합니다.
+    2. [Brute-Force 일시 잠금(Lockout)]: Redis 기반으로 계정+IP(5회/5분) 및 단일 IP(15회/15분)
+       연속 로그인 실패를 감시하며, 임계치 초과 시 `429 Too Many Requests`로 즉시 차단합니다.
+    3. [Constant-Time 타이밍 공격 방어]: 존재하지 않는 아이디 입력 시에도 더미 bcrypt 해시 연산을
+       동일하게 수행(`verify_user_credentials`)하여 응답 시간 차이로 아이디 유무를 유추할 수 없게 합니다.
+    4. [비활성 계정 차단]: 퇴사·정지된 계정(`is_active == False`)의 로그인을 `403 Forbidden`으로 차단합니다.
+    5. [세션 고정(Session Fixation) 방어 및 쿠키 보안]: 기존 `session_id` 쿠키가 있으면 먼저 폐기한 뒤
+       새 UUIDv4 세션을 발급하며, `settings.COOKIE_SECURE` 정책에 맞춰 쿠키를 설정합니다.
     """
-    user = user_crud.get_user(db, username=form_data.username)
-    if not user or not user_crud.pwd_context.verify(form_data.password, user.password):
-        # 📜 [감사로그]: 로그인 실패 기록 (계정 존재 여부 및 비밀번호 불일치)
-        ip = request.client.host if request.client else "unknown"
-        safe_log_audit(
-            db=db,
-            app_id="auth",
-            log_type="ACCESS",
-            severity="WARN",
-            action="LOGIN_FAILED",
-            title=f"로그인 실패: {form_data.username}",
-            user=user if user else None,
-            message="비밀번호가 일치하지 않거나 존재하지 않는 계정입니다.",
-            ip_address=ip,
-            metadata={
-                "attempted_username": form_data.username,
-                "user_agent": request.headers.get("user-agent", "")[:200]
-            }
+    ip = get_client_ip(request)
+    user_agent = request.headers.get("user-agent", "")
+
+    # 🛡️ [1단계] Brute-Force 잠금(Lockout) 상태 선행 확인 (DB 및 bcrypt 연산 전 초고속 차단)
+    retry_after = check_login_rate_limit(username=form_data.username, ip_address=ip)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"로그인 연속 실패로 인해 보안을 위해 일시 잠금되었습니다. {retry_after}초 후에 다시 시도하세요.",
+            headers={"Retry-After": str(retry_after)},
         )
+
+    # 🛡️ [2단계] 사용자 조회 및 Constant-Time 비밀번호 검증 (타이밍 공격 방어)
+    user = user_crud.get_user(db, username=form_data.username)
+    if not user or not user_crud.verify_user_credentials(user, form_data.password):
+        # 실패 횟수 누적 및 감사로그 기록 (임계치 도달 시 SECURITY/CRITICAL 로그 자동 발행)
+        _, lockout_secs = record_login_failure(
+            db=db,
+            username=form_data.username,
+            ip_address=ip,
+            user=user if user else None,
+            user_agent=user_agent,
+        )
+        if lockout_secs is not None:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"로그인 {settings.LOGIN_MAX_ATTEMPTS}회 연속 실패로 인해 {lockout_secs}초간 로그인이 일시 잠금되었습니다.",
+                headers={"Retry-After": str(lockout_secs)},
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="아이디 또는 비밀번호가 틀렸습니다."
         )
 
-    # 🛡️ [소프트 삭제 가드]: 비활성화된 계정 로그인 즉시 차단
+    # 🛡️ [3단계] 소프트 삭제/비활성화 가드: 비활성화된 사원 계정 로그인 즉시 차단
     if user.profile and user.profile.is_active is False:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="비활성화(삭제)된 사원 계정입니다. 인사 관리자에게 문의하세요."
         )
 
-    # 🚀 핵심 세션 생성 로직을 core 엔진으로 단 한 줄로 위임!
+    # 🛡️ [4단계] 로그인 성공 시 기존 실패 카운터 즉시 초기화
+    clear_login_failures(username=form_data.username, ip_address=ip)
+
+    # 🚀 [5단계] 핵심 세션 생성 (내부에서 이전 쿠키 세션 폐기 + 동일 기기 카테고리 중복 세션 KICKED_OUT 수행)
     jti = create_user_session(db=db, user=user, request=request)
 
-    # 브라우저에 session_id 쿠키 설정 (기존 설정 정책 100% 유지)
+    # 브라우저에 session_id 쿠키 설정 (HttpOnly + SameSite=Lax + 환경별 Secure 적용)
     response.set_cookie(
         key="session_id",
         value=jti,
         httponly=True,
         max_age=SESSION_EXPIRE_SECONDS,
         samesite="lax",
-        secure=False,
+        secure=settings.COOKIE_SECURE,
         path="/"
     )
 

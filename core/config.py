@@ -69,6 +69,17 @@ class Settings:
     # 세션 만료 기간 (일 단위) - 기본 3일
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "3"))
 
+    # 🛡️ [4-1] 로그인 보안 및 쿠키 정책 설정 (Brute-Force 방어 & HTTPS 쿠키 제어)
+    # - COOKIE_SECURE: HTTPS 운영 환경에서는 True로 설정하여 평문(HTTP) 쿠키 전송을 차단합니다.
+    #   (내부 HTTP 프록시/로컬 개발 환경 호환을 위해 기본값은 False)
+    COOKIE_SECURE: bool = os.getenv("COOKIE_SECURE", "False").lower() in ("true", "1", "t")
+    # - 계정+IP 기준 연속 로그인 실패 허용 횟수 (기본 5회 실패 시 300초=5분 잠금)
+    LOGIN_MAX_ATTEMPTS: int = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
+    LOGIN_LOCKOUT_SECONDS: int = int(os.getenv("LOGIN_LOCKOUT_SECONDS", "300"))
+    # - 단일 IP 기준 무차별 대입(다중 계정 스캐닝) 허용 횟수 (기본 15회 실패 시 900초=15분 잠금)
+    LOGIN_IP_MAX_ATTEMPTS: int = int(os.getenv("LOGIN_IP_MAX_ATTEMPTS", "15"))
+    LOGIN_IP_LOCKOUT_SECONDS: int = int(os.getenv("LOGIN_IP_LOCKOUT_SECONDS", "900"))
+
     # 📌 [5] 파일 및 미디어 저장소 경로
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "/app/uploads")
     # 파일 업로드 크기 제한 (기본 100MB)
