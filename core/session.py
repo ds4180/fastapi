@@ -18,7 +18,7 @@ FastAPI 라우터에 섞여 있던 '멀티 디바이스 세션(DESKTOP/MOBILE)' 
 
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import Request
 from sqlalchemy.orm import Session, joinedload
@@ -125,18 +125,55 @@ def create_user_session(db: Session, user: User, request: Request) -> str:
     return new_jti
 
 
-def validate_session(db: Session, session_id: Optional[str]) -> Optional[User]:
+def _is_session_inactive_expired(db_session: UserSession, now: datetime) -> bool:
+    """최근 활동 시각(없으면 로그인 시각) 기준 비활동 만료(SESSION_EXPIRE_DAYS) 초과 여부 판별."""
+    ref_time = db_session.last_activity or db_session.login_at
+    return bool(ref_time and (now - ref_time) > timedelta(days=SESSION_EXPIRE_DAYS))
+
+
+def _ensure_redis_session(
+    db_session: UserSession,
+    session_id: str,
+    username: Optional[str] = None,
+    log_context: str = "Session Self-Healing",
+) -> None:
+    """Redis Set 생존 확인, 휘발 시 자가치유 복구 및 슬라이딩 TTL(SESSION_EXPIRE_SECONDS) 연장."""
+    redis_key = f"session:{db_session.user_id}:{db_session.device_category}"
+    try:
+        if not rd.sismember(redis_key, session_id):
+            # ✨ [자가 치유 Self-Healing]:
+            # Redis가 재부팅되어 메모리가 비워졌거나 TTL이 일찍 끝났더라도,
+            # DB가 ACTIVE 상태라면 세션을 죽이지 않고 Redis에 키를 다시 복구 등록합니다!
+            rd.sadd(redis_key, session_id)
+            rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
+            actor = f"User: {username}" if username else f"UID={db_session.user_id}"
+            logger.info(
+                f"✨ [{log_context}] Redis 세션 복구 완료 "
+                f"({actor}, Device: {db_session.device_category}, Session: {session_id[:8]}...)"
+            )
+        else:
+            # 정상 활동: 슬라이딩 윈도우 TTL 3일 연장
+            rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
+    except RedisError as redis_err:
+        # 🛡️ [장애 방어]: Redis 일시 순단 시 500 에러를 뿜지 않고 DB 세션으로 안전 통과
+        logger.warning(f"⚠️ [{log_context}] Redis 일시 통신 장애, DB 세션으로 안전 폴백: {redis_err}")
+
+
+def validate_session(
+    db: Session,
+    session_id: Optional[str],
+    request: Optional[Request] = None,
+) -> Optional[User]:
     """
     세션 키의 유효성을 검증하고, 유효한 경우 사용자(User) 객체를 반환합니다.
-    
-    💡 [2중 정합성 및 자가 치유(Self-Healing)]:
+
+    💡 [2중 정합성, 비활동 만료 및 슬라이딩 윈도우]:
     1. DB에서 UserSession과 User, UserProfile을 단 1회의 고속 JOIN(joinedload)으로 일괄 로드합니다.
-    2. Redis에 세션 키가 살아있는지 검사합니다.
-       - Redis에 존재: 정상 작동 (TTL 3일 슬라이딩 연장)
-       - Redis에 부재(재부팅 등으로 휘발): DB 상태가 'ACTIVE'이므로 DB를 파괴하지 않고,
-         오히려 Redis에 세션 키를 다시 복원(자가 치유)하여 유저 로그아웃을 방어합니다.
-    3. Redis 일시 순단/에러(RedisError) 발생 시에도 시스템이 500으로 중단되지 않고
-       안전하게 DB 세션으로 폴백합니다.
+    2. 최근 활동 시각(last_activity, 없으면 login_at)이 SESSION_EXPIRE_DAYS를 초과한 경우
+       DB 상태를 'EXPIRED'로 전환하고 Redis 키를 제거한 뒤 None을 반환합니다.
+    3. Redis에 세션 키가 살아있는지 검사하고 휘발 시 자가치유 복구 및 TTL 3일 슬라이딩 연장합니다.
+    4. 5분 스로틀링 주기에 도달하면 DB last_activity를 갱신하고 request.state.renew_session_id를
+       표기하여 HTTP 응답 시 브라우저 session_id 쿠키의 Max-Age도 함께 슬라이딩 연장합니다.
     """
     if not session_id:
         return None
@@ -158,35 +195,40 @@ def validate_session(db: Session, session_id: Optional[str]) -> Optional[User]:
         return None
 
     user = db_session.user
-    redis_key = f"session:{user.id}:{db_session.device_category}"
+    now = datetime.now()
+
+    # [2단계] DB 기준 비활동 만료(SESSION_EXPIRE_DAYS) 초과 시 즉시 만료 처리
+    if _is_session_inactive_expired(db_session, now):
+        db_session.status = "EXPIRED"
+        db_session.logout_at = now
+        try:
+            rd.srem(f"session:{db_session.user_id}:{db_session.device_category}", session_id)
+        except RedisError:
+            pass
+        db.commit()
+        logger.info(
+            f"⌛ [Session] 비활동 만료 처리 "
+            f"(User: {user.username}, Device: {db_session.device_category}, Session: {session_id[:8]}...)"
+        )
+        return None
 
     # 🛡️ [개선 2] Redis 실시간 검증, 자가 치유(Self-Healing) 및 에러 방어막
-    try:
-        if not rd.sismember(redis_key, session_id):
-            # ✨ [자가 치유 Self-Healing]:
-            # Redis가 재부팅되어 메모리가 비워졌거나 TTL이 일찍 끝났더라도,
-            # DB가 ACTIVE 상태라면 세션을 죽이지 않고 Redis에 키를 다시 복구 등록합니다!
-            rd.sadd(redis_key, session_id)
-            rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
-            logger.info(
-                f"✨ [Session Self-Healing] Redis 세션 복구 완료 "
-                f"(User: {user.username}, Device: {db_session.device_category})"
-            )
-        else:
-            # 정상 활동: 슬라이딩 윈도우 TTL 3일 연장
-            rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
-    except RedisError as redis_err:
-        # 🛡️ [장애 방어]: Redis 일시 순단 시 500 에러를 뿜지 않고 DB 세션으로 안전 통과
-        logger.warning(f"⚠️ [Session] Redis 일시 통신 장애, DB 세션으로 안전 폴백: {redis_err}")
+    _ensure_redis_session(
+        db_session,
+        session_id,
+        username=user.username,
+        log_context="Session Self-Healing",
+    )
 
-    # [3단계] DB 최근 활동 시각(last_activity) 스로틀링 갱신 (5분 주기 DB Commit 락 경합 방지)
-    now = datetime.now()
+    # [3단계] DB 최근 활동 시각(last_activity) 스로틀링 갱신 + 브라우저 쿠키 슬라이딩 갱신 마킹
     if (
         not db_session.last_activity
         or (now - db_session.last_activity).total_seconds() >= ACTIVITY_UPDATE_INTERVAL_SECONDS
     ):
         db_session.last_activity = now
         db.commit()
+        if request is not None:
+            request.state.renew_session_id = session_id
 
     return user
 
@@ -227,3 +269,45 @@ def terminate_session(db: Session, session_id: Optional[str]) -> bool:
         return True
 
     return False
+
+
+def sync_expired_sessions(db: Session) -> int:
+    """
+    [통합 세션 자가치유 및 비활동 만료 동기화 엔진 (SSOT)]
+
+    1. DB를 단일 진실 공급원(SSOT)으로 삼아 비활동 만료 기간(SESSION_EXPIRE_DAYS)을
+       초과한 세션만 EXPIRED 상태로 전환하고 Redis에서 제거합니다.
+    2. 유효 기간 내인데 Redis에서 휘발된 ACTIVE 세션은 키를 자가치유(Self-Healing) 복원하여
+       관리자 세션 목록 조회나 관제 동기화로 정상 세션이 끊어지는 사고를 방지합니다.
+    """
+    active_sessions = (
+        db.query(UserSession)
+        .filter(UserSession.status == "ACTIVE")
+        .all()
+    )
+    valid_count = 0
+    now = datetime.now()
+    modified = False
+
+    for s in active_sessions:
+        if _is_session_inactive_expired(s, now):
+            s.status = "EXPIRED"
+            s.logout_at = now
+            try:
+                rd.srem(f"session:{s.user_id}:{s.device_category}", s.session_key)
+            except RedisError:
+                pass
+            modified = True
+            continue
+
+        _ensure_redis_session(
+            s,
+            s.session_key,
+            log_context="Session Sync",
+        )
+        valid_count += 1
+
+    if modified:
+        db.commit()
+
+    return valid_count

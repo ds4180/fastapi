@@ -72,3 +72,170 @@ def test_validate_session_self_healing(monkeypatch):
     mock_rd.sadd.assert_called_once_with("session:99:DESKTOP", "test-jti-uuid")
     mock_rd.expire.assert_called_once()
 
+
+def test_validate_session_expires_after_inactivity(monkeypatch):
+    """
+    [비활동 만료 통합 검증]:
+    last_activity(또는 login_at)가 SESSION_EXPIRE_DAYS(3일)를 초과하면
+    Redis 상태와 무관하게 DB 상태를 EXPIRED로 전환하고 None을 반환해야 한다.
+    """
+    from datetime import datetime, timedelta
+    from unittest.mock import MagicMock
+    from models import User, UserSession
+    from core.session import validate_session, SESSION_EXPIRE_DAYS
+
+    mock_db = MagicMock()
+    mock_user = User(id=99, username="tester")
+    stale_time = datetime.now() - timedelta(days=SESSION_EXPIRE_DAYS, minutes=5)
+    session_record = UserSession(
+        user_id=99,
+        session_key="stale-jti-uuid",
+        device_category="DESKTOP",
+        status="ACTIVE",
+        last_activity=stale_time,
+        login_at=stale_time,
+        user=mock_user,
+    )
+    mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = session_record
+
+    mock_rd = MagicMock()
+    mock_rd.sismember.return_value = True
+    monkeypatch.setattr("core.session.rd", mock_rd)
+
+    validated_user = validate_session(mock_db, "stale-jti-uuid")
+
+    assert validated_user is None
+    assert session_record.status == "EXPIRED"
+    assert session_record.logout_at is not None
+    mock_rd.srem.assert_called_once_with("session:99:DESKTOP", "stale-jti-uuid")
+    mock_db.commit.assert_called_once()
+
+
+def test_validate_session_marks_cookie_renewal_on_activity_threshold(monkeypatch):
+    """
+    [브라우저 쿠키 슬라이딩 윈도우 트리거 검증]:
+    마지막 활동으로부터 5분(ACTIVITY_UPDATE_INTERVAL_SECONDS) 이상 경과 후 유효 요청이 오면
+    DB last_activity를 갱신하고 request.state.renew_session_id를 설정해야 한다.
+    """
+    from datetime import datetime, timedelta
+    from unittest.mock import MagicMock
+    from fastapi import Request
+    from models import User, UserSession
+    from core.session import validate_session, ACTIVITY_UPDATE_INTERVAL_SECONDS
+
+    mock_db = MagicMock()
+    mock_user = User(id=99, username="tester")
+    prev_activity = datetime.now() - timedelta(seconds=ACTIVITY_UPDATE_INTERVAL_SECONDS + 30)
+    session_record = UserSession(
+        user_id=99,
+        session_key="sliding-jti-uuid",
+        device_category="DESKTOP",
+        status="ACTIVE",
+        last_activity=prev_activity,
+        login_at=prev_activity,
+        user=mock_user,
+    )
+    mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = session_record
+
+    mock_rd = MagicMock()
+    mock_rd.sismember.return_value = True
+    monkeypatch.setattr("core.session.rd", mock_rd)
+
+    req = Request({"type": "http", "headers": []})
+    validated_user = validate_session(mock_db, "sliding-jti-uuid", request=req)
+
+    assert validated_user is mock_user
+    assert getattr(req.state, "renew_session_id", None) == "sliding-jti-uuid"
+    assert session_record.last_activity > prev_activity
+    mock_db.commit.assert_called_once()
+
+
+def test_get_session_list_uses_self_healing_instead_of_destructive_expire(monkeypatch):
+    """
+    [레거시 파괴적 동기화 제거 검증]:
+    user_crud.get_session_list() 호출 시 Redis에 키가 없더라도 유효 기간 내 ACTIVE 세션이면
+    EXPIRED로 파괴하지 않고 Redis 키를 자가치유(Self-Healing) 복원해야 한다.
+    """
+    from datetime import datetime, timedelta
+    from unittest.mock import MagicMock
+    from models import User, UserSession
+    from domain.user import user_crud
+
+    mock_db = MagicMock()
+    alice = User(id=7, username="alice")
+    recent_time = datetime.now() - timedelta(hours=2)
+    active_session = UserSession(
+        user_id=7,
+        session_key="heal-jti-uuid",
+        device_category="MOBILE",
+        status="ACTIVE",
+        last_activity=recent_time,
+        login_at=recent_time,
+        user=alice,
+    )
+
+    mock_db.query.return_value.filter.return_value.all.return_value = [active_session]
+    mock_db.query.return_value.join.return_value.order_by.return_value.limit.return_value.all.return_value = [
+        active_session
+    ]
+
+    mock_rd = MagicMock()
+    mock_rd.sismember.return_value = False
+    monkeypatch.setattr("core.session.rd", mock_rd)
+
+    sessions = user_crud.get_session_list(mock_db)
+
+    assert len(sessions) == 1
+    assert sessions[0].username == "alice"
+    assert active_session.status == "ACTIVE"
+    mock_rd.sadd.assert_called_once_with("session:7:MOBILE", "heal-jti-uuid")
+
+
+def test_middleware_sets_sliding_cookie_header():
+    """
+    [RequestIDMiddleware 슬라이딩 Set-Cookie 응답 헤더 검증]:
+    - 200 정상 응답 + renew_session_id 존재 시 Set-Cookie: session_id=... Max-Age 발급
+    - session_terminated=True(로그아웃) 또는 4xx 응답에서는 슬라이딩 Set-Cookie 미발급
+    """
+    from fastapi import FastAPI, Request, Response
+    from fastapi.testclient import TestClient
+    from core.middleware import RequestIDMiddleware
+    from core.session import SESSION_EXPIRE_SECONDS
+
+    app = FastAPI()
+    app.add_middleware(RequestIDMiddleware)
+
+    @app.get("/ok")
+    def ok_route(request: Request):
+        request.state.renew_session_id = "sliding-jti-uuid"
+        return {"ok": True}
+
+    @app.post("/logout")
+    def logout_route(request: Request, response: Response):
+        request.state.renew_session_id = "sliding-jti-uuid"
+        request.state.session_terminated = True
+        response.delete_cookie("session_id", path="/")
+        return {"ok": True}
+
+    @app.get("/err")
+    def err_route(request: Request):
+        request.state.renew_session_id = "sliding-jti-uuid"
+        return Response(status_code=401)
+
+    client = TestClient(app)
+
+    res_ok = client.get("/ok")
+    assert res_ok.status_code == 200
+    ok_cookie = res_ok.headers.get("set-cookie", "")
+    assert "session_id=sliding-jti-uuid" in ok_cookie
+    assert f"Max-Age={SESSION_EXPIRE_SECONDS}" in ok_cookie
+
+    res_logout = client.post("/logout")
+    assert res_logout.status_code == 200
+    assert "sliding-jti-uuid" not in res_logout.headers.get("set-cookie", "")
+
+    res_err = client.get("/err")
+    assert res_err.status_code == 401
+    assert "set-cookie" not in res_err.headers
+
+

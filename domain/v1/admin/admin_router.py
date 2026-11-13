@@ -678,7 +678,7 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
     3. 사용자 화면:
        - CUSTOM: /v1/custom/{clean_id}
        - INSTANCE: /v1/app/{clean_id}/{slug}
-       - STATIC / PAGE: /v1/pages/{slug or page_id}
+       - PAGES / PAGE: /v1/pages/{slug or page_id}
     """
     # 1. 🔗 수동 입력 URL 및 폴더/구분선
     if menu.link_type == "URL":
@@ -732,8 +732,8 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
                 return f"{API_VERSION_PREFIX}/app/{instance_prefix}/{slug}"
             return f"{API_VERSION_PREFIX}/app/{clean_id}"
 
-    # 3. 📄 정적 콘텐츠 레이어 (PAGE / STATIC 직접 링크)
-    if menu.link_type in ["PAGE", "STATIC"] and (menu.page_id or menu.app_id):
+    # 3. 📄 정적 콘텐츠 레이어 (PAGE / PAGES 직접 링크)
+    if menu.link_type in ["PAGE", "PAGES"] and (menu.page_id or menu.app_id):
         target = menu.page_id or menu.app_id
         slug = get_instance_slug(menu, db)
         if slug and slug != "-1":
@@ -772,7 +772,7 @@ def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
         return str(raw_val)
 
     # 3. 페이지(Page) 인스턴스 슬러그 역추적
-    if clean_id in ['page', 'pages'] or menu.link_type in ['PAGE', 'STATIC']:
+    if clean_id in ['page', 'pages'] or menu.link_type in ['PAGE', 'PAGES']:
         if int_id is not None:
             page_obj = db.query(Page).filter(Page.id == int_id).first()
             return page_obj.slug if page_obj else str(raw_val)
@@ -896,7 +896,7 @@ def create_menu(menu_in: admin_schema.MenuCreate, db: Session = Depends(get_db),
     db.refresh(db_menu)
 
     # 링크 타입이 엔진 또는 정적 레이어 기반인 경우 정규화된 URL 동기화 저장
-    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP", "STATIC", "PAGE"]:
+    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP", "PAGES", "PAGE"]:
         db_menu.external_url = resolve_menu_url(db_menu, db)
         db.commit()
         db.refresh(db_menu)
@@ -971,7 +971,7 @@ def update_menu(menu_id: int, menu_in: admin_schema.MenuUpdate, db: Session = De
     db.refresh(db_menu)
 
     # 링크 타입이 엔진 또는 정적 레이어 기반인 경우 정규화된 URL 동기화 저장
-    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP", "STATIC", "PAGE"]:
+    if db_menu.link_type in ["INSTANCE", "CUSTOM", "SYSTEM", "APP", "PAGES", "PAGE"]:
         db_menu.external_url = resolve_menu_url(db_menu, db)
         db.commit()
         db.refresh(db_menu)

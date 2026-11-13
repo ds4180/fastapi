@@ -7,7 +7,7 @@ class MenuBase(BaseModel):
     title: str
     icon_name: Optional[str] = None
     icon_color: Optional[str] = None
-    link_type: str = "INSTANCE" # INSTANCE, CUSTOM, SYSTEM, URL, PAGE, FOLDER, DIVIDER
+    link_type: str = "INSTANCE" # INSTANCE, CUSTOM, SYSTEM, URL, PAGES, PAGE, FOLDER, DIVIDER
     external_url: Optional[str] = None
     order: int = 0
     is_visible: bool = True
@@ -101,16 +101,16 @@ class SystemConfigUpdate(BaseModel):
 
 # --- 시스템 App 관리 스키마 ---
 
-# 🏛️ 앱 4대 분류 체계 표준 정의 (SYSTEM, CUSTOM, INSTANCE, STATIC)
-VALID_APP_TYPES = {"SYSTEM", "CUSTOM", "INSTANCE", "STATIC"}
+# 🏛️ 앱 3대 분류 체계 표준 정의 (SYSTEM, CUSTOM, INSTANCE) - 정적 /v1/pages 는 AppRegistry 미등록 독립 레이어
+VALID_APP_TYPES = {"SYSTEM", "CUSTOM", "INSTANCE"}
 
 class AppRegistryBase(BaseModel):
     app_id: str
     name: str
     title: Optional[str] = None                     # UI 표시 공식 명칭
     description: Optional[str] = None
-    app_type: str = "INSTANCE"                      # SYSTEM | CUSTOM | INSTANCE | STATIC
-    frontend_route: Optional[str] = None            # Svelte 라우트 경로 (예: /v1/admin/pages)
+    app_type: str = "INSTANCE"                      # SYSTEM | CUSTOM | INSTANCE
+    frontend_route: Optional[str] = None            # Svelte 라우트 경로 (예: /v1/admin/page)
     main_component: Optional[str] = None            # Dynamic Import용 컴포넌트명
     icon_default: Optional[str] = None              # 기본 아이콘
     # 보안 주권 설정 (4단계 권한: 1.root(9) ➔ 2.deny_groups ➔ 3.allow_groups ➔ 4.rank)
@@ -137,17 +137,17 @@ class AppRegistryBase(BaseModel):
 class AppRegistryCreate(AppRegistryBase):
     """
     [신규 앱 등록 입력 스키마 (Create Validation)]
-    - 신규 등록 시 4대 분류, 경로 형식, 권한 랭크 범위를 엄격히 검증합니다.
+    - 신규 등록 시 3대 분류, 경로 형식, 권한 랭크 범위를 엄격히 검증합니다.
     """
     @field_validator("app_type")
     @classmethod
     def validate_app_type(cls, v: str) -> str:
         """
-        [앱 4대 분류 체계 엄격 검증]
+        [앱 3대 분류 체계 엄격 검증]
         - SYSTEM: 관리자 화면만 있는 순수 시스템 관제 앱
         - CUSTOM: 관리자, 사용자 화면이 모두 있는 단독 비즈니스 앱
-        - INSTANCE: 다중 인스턴스 추상화 기본형 앱 (게시판, 페이지 등)
-        - STATIC: 관리자 화면이 없는 정적 콘텐츠 페이지
+        - INSTANCE: 다중 인스턴스 추상화 기본형 앱 (게시판 등)
+        (※ 정적 /v1/pages 레이어는 구 STATIC에서 분리되어 AppRegistry에 등록하지 않음)
         """
         normalized = v.strip().upper() if isinstance(v, str) else v
         if normalized not in VALID_APP_TYPES:
@@ -172,7 +172,7 @@ class AppRegistryCreate(AppRegistryBase):
         if "[" in v or "]" in v:
             raise ValueError(
                 f"frontend_route에 '[slug]'와 같은 동적 라우트 플레이스홀더를 직접 저장할 수 없습니다. "
-                f"정규 정적 진입 경로(예: /v1/admin/pages 또는 /v1/custom/page)를 입력하십시오: '{v}'"
+                f"정규 정적 진입 경로(예: /v1/admin/page 또는 /v1/custom/page)를 입력하십시오: '{v}'"
             )
         return v
 
@@ -223,7 +223,7 @@ class AppRegistryUpdate(BaseModel):
         if "[" in v or "]" in v:
             raise ValueError(
                 f"frontend_route에 '[slug]'와 같은 동적 라우트 플레이스홀더를 직접 저장할 수 없습니다. "
-                f"정규 정적 진입 경로(예: /v1/admin/pages 또는 /v1/custom/page)를 입력하십시오: '{v}'"
+                f"정규 정적 진입 경로(예: /v1/admin/page 또는 /v1/custom/page)를 입력하십시오: '{v}'"
             )
         return v
 

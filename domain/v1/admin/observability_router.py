@@ -8,7 +8,7 @@
 에러 및 보안 침해 로그를 단일 관제탑 화면에 제공하는 코어 API 라우터입니다.
 """
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import logging
 import csv
 import io
@@ -23,8 +23,7 @@ from database import get_db
 from models import User, UserSession, AuditLog
 from core.deps import require_app_permission
 from core.audit import safe_log_audit
-from core.config import settings
-from redis_config import rd
+from core.session import sync_expired_sessions
 from domain.user import user_crud
 from domain.v1.admin.observability_schema import (
     AuditLogItemRes,
@@ -42,57 +41,8 @@ check_obs_write = require_app_permission("observability", action="write")
 
 
 # ==========================================================================
-# 🌐 1. 실시간 활성 세션 관제 (core/session.py 자가치유 정책 100% 일원화)
+# 🌐 1. 실시간 활성 세션 관제 (core/session.py 통합 자가치유 엔진 재사용)
 # ==========================================================================
-
-def sync_expired_sessions(db: Session) -> int:
-    """
-    [세션 자가치유 및 만료 동기화 엔진 (core/session.py 정책 통일)]
-    
-    💡 원칙:
-    1. DB를 단일 진실 공급원(SSOT)으로 삼습니다.
-    2. 자연 만료 기간(SESSION_EXPIRE_DAYS)을 초과한 DB 세션만 EXPIRED 상태로 전환합니다.
-    3. 유효 기간 내인데 Redis에서 휘발된 정상 세션은 오히려 Redis 키를 자가치유(Self-Healing) 복원하여
-       사용자의 세션이 관제탑 조회로 인해 강제 종료되는 대형 사고를 원천 방어합니다.
-    """
-    active_sessions = (
-        db.query(UserSession)
-        .filter(UserSession.status == "ACTIVE")
-        .all()
-    )
-    valid_count = 0
-    now = datetime.now()
-    expire_delta = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    modified = False
-
-    for s in active_sessions:
-        # [1단계] DB 기준 실제 만료일 초과 여부 검사
-        if s.last_activity and (now - s.last_activity) > expire_delta:
-            s.status = "EXPIRED"
-            s.logout_at = now
-            modified = True
-            continue
-
-        # [2단계] 유효 세션: Redis 생존 확인 및 자가치유(Self-Healing)
-        redis_key = f"session:{s.user_id}:{s.device_category}"
-        try:
-            if not rd.sismember(redis_key, s.session_key):
-                # Redis가 재부팅되어 키가 없더라도 DB가 유효하므로 키를 안전하게 재등록
-                rd.sadd(redis_key, s.session_key)
-                rd.expire(redis_key, int(expire_delta.total_seconds()))
-                logger.info(f"✨ [Observability] 세션 자가치유 복원: UID={s.user_id}, Session={s.session_key[:8]}...")
-            else:
-                # 살아있는 세션 TTL 슬라이딩 연장
-                rd.expire(redis_key, int(expire_delta.total_seconds()))
-        except Exception as re:
-            logger.warning(f"⚠️ [Observability] Redis 일시 통신 오류, DB 세션 유지: {re}")
-
-        valid_count += 1
-
-    if modified:
-        db.commit()
-
-    return valid_count
 
 
 @router.get(

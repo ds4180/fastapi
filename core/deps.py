@@ -50,7 +50,7 @@ def get_current_user(
     if not session_id:
         raise AuthenticationRequiredError(message="로그인이 필요합니다.")
 
-    user = validate_session(db, session_id)
+    user = validate_session(db, session_id, request=request)
     if not user:
         raise SessionExpiredError(
             message="세션이 만료되었거나 다른 기기에서 로그인하여 접속이 종료되었습니다."
@@ -74,7 +74,7 @@ def get_current_user_optional(
         return None
 
     try:
-        return validate_session(db, session_id)
+        return validate_session(db, session_id, request=request)
     except Exception:
         return None
 

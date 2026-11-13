@@ -116,7 +116,8 @@ def login_for_access_token(
         httponly=True,
         max_age=SESSION_EXPIRE_SECONDS,
         samesite="lax",
-        secure=False
+        secure=False,
+        path="/"
     )
 
     return {
@@ -229,15 +230,17 @@ def kick_user_session(
 # ----------------------------------------------------------------------------
 @router.post("/logout")
 def logout(
+    request: Request,
     response: Response,
     session_id: Optional[str] = Cookie(None),
     db: Session = Depends(get_db)
 ):
     """로그아웃: Redis 및 DB 세션을 만료 처리하고 쿠키를 삭제합니다."""
+    request.state.session_terminated = True
     if session_id:
         terminate_session(db=db, session_id=session_id)
 
-    response.delete_cookie(key="session_id")
+    response.delete_cookie(key="session_id", path="/")
     return {"message": "Logout successful"}
 
 

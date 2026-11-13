@@ -36,6 +36,33 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         # 3. 다음 미들웨어 및 실제 API 라우터 실행
         response: Response = await call_next(request)
 
+        # 🛡️ [슬라이딩 윈도우 브라우저 쿠키 동기화]
+        # 활동 임계치(5분) 도달로 last_activity가 갱신된 HTTP 요청에만 브라우저 쿠키 Max-Age를 재발급합니다.
+        renew_jti = getattr(request.state, "renew_session_id", None)
+        if (
+            renew_jti
+            and response.status_code < 400
+            and not getattr(request.state, "session_terminated", False)
+        ):
+            set_cookie_headers = (
+                response.headers.getlist("set-cookie")
+                if hasattr(response.headers, "getlist")
+                else [response.headers.get("set-cookie", "")]
+            )
+            has_session_cookie = any("session_id=" in h for h in set_cookie_headers if h)
+            if not has_session_cookie:
+                from core.session import SESSION_EXPIRE_SECONDS
+
+                response.set_cookie(
+                    key="session_id",
+                    value=renew_jti,
+                    httponly=True,
+                    max_age=SESSION_EXPIRE_SECONDS,
+                    samesite="lax",
+                    secure=False,
+                    path="/",
+                )
+
         # 4. 응답 헤더에 X-Request-ID를 탑재하여 브라우저에 회신
         response.headers["X-Request-ID"] = request_id
 

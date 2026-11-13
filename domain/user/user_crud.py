@@ -14,28 +14,15 @@ from redis_config import rd
 pwd_context = PasswordHash((BcryptHasher(),))
 
 def get_session_list(db: Session, limit: int = 100):
-    """최근 접속순으로 세션 목록 조회 및 실시간 Redis 동기화 (최대 100개)"""
+    """최근 접속순으로 세션 목록 조회 및 통합 자가치유 동기화 (최대 100개)"""
+    from core.session import sync_expired_sessions
+
+    sync_expired_sessions(db)
     sessions = db.query(UserSession).join(User).order_by(UserSession.login_at.desc()).limit(limit).all()
-    
-    modified = False
+
     for s in sessions:
         s.username = s.user.username
-        
-        # 📌 Redis 실시간 생존 확인 (Redis 리부트 대응)
-        if s.status == "ACTIVE":
-            redis_key = f"session:{s.user_id}:{s.device_category}"
-            # Redis Set 내에 해당 JTI(session_key)가 존재하는지 확인
-            is_member = rd.sismember(redis_key, s.session_key)
-            
-            # Redis에 없으면 세션 만료 처리
-            if not is_member:
-                s.status = "EXPIRED"
-                s.logout_at = datetime.now()
-                modified = True
-    
-    if modified:
-        db.commit()
-        
+
     return sessions
 
 def kick_session(db: Session, session_id: Union[int, str]):
