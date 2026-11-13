@@ -50,7 +50,7 @@ from models.dispatch import (
 )
 
 # 📌 7. 기타 개별 도메인 업무 앱
-from models.dayoff import DayOff
+from models.dayoff import DayOff, DayOffPolicy
 from models.alert import Alert
 from models.page import Page
 from models.media import MediaAsset
@@ -99,6 +99,7 @@ __all__ = [
     "Dispatch",
     # Others
     "DayOff",
+    "DayOffPolicy",
     "Alert",
     "Page",
     "MediaAsset",

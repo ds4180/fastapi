@@ -1295,20 +1295,48 @@ def delete_push_subscription(
     db.commit()
     return {"message": "success"}
 
-# --- DayOff Management (전체 휴무 관리) ---
+# --- DayOff Management (전체 휴무 관리 & 직군별 선착순·정원 정책) ---
+
+from domain.dayoff.dayoff_crud import (
+    get_dayoff_policy,
+    get_all_dayoff_policies,
+    resolve_policy_for_date,
+    policy_row_to_dict,
+    save_dayoff_policy,
+    update_dayoff_policy_row,
+    delete_dayoff_policy_row,
+    update_date_overrides,
+    is_fcfs_user,
+    get_monthly_quota_status,
+)
+from domain.dayoff.dayoff_schema import DayOffPolicySchema, DayOffDateOverrideReq
 
 @router.get("/dayoffs")
 def admin_get_all_dayoffs(db: Session = Depends(get_db), admin: User = Depends(check_dayoff_admin)):
-    """모든 사용자의 휴무 신청 내역 조회 (관리자용 - 원본 데이터)"""
-    dayoffs = db.query(DayOff).join(User).filter(DayOff.is_deleted == False).order_by(DayOff.date.desc()).all()
-    
+    """모든 사용자의 휴무 신청 내역 조회 (관리자용 - 신청 일자 기준 유효 정책 판별)"""
+    policy_rows = get_all_dayoff_policies(db)
+    dayoffs = (
+        db.query(DayOff)
+        .join(User)
+        .options(joinedload(DayOff.user).joinedload(User.profile))
+        .filter(DayOff.is_deleted == False)
+        .order_by(DayOff.date.desc())
+        .all()
+    )
+
     result = []
     for d in dayoffs:
+        u = d.user
+        day_policy = resolve_policy_for_date(policy_rows, d.date)
+        fcfs = is_fcfs_user(u, day_policy) if u else False
         result.append({
             "id": d.id,
             "user_id": d.user_id,
-            "username": d.user.username,
-            "real_name": d.user.real_name,
+            "username": u.username if u else "unknown",
+            "real_name": u.real_name if u else None,
+            "primary_group": u.primary_group if u else None,
+            "rank_level": u.rank() if u else 0,
+            "work_type": "FCFS" if fcfs else "APPROVAL",
             "date": str(d.date),
             "type": d.type,
             "status": d.status,
@@ -1325,15 +1353,19 @@ def admin_update_dayoff_status(
     db: Session = Depends(get_db), 
     admin: User = Depends(check_dayoff_admin_write)
 ):
-    """휴무 신청 상태 변경 (승인/반려 등)"""
+    """휴무 신청 상태 변경 (승인/반려 등 - 해당 사원의 동일 신청 묶음만 안전하게 동기화)"""
     new_status = status_update.get("status")
     db_dayoff = db.query(DayOff).filter(DayOff.id == dayoff_id).first()
     if not db_dayoff:
         raise HTTPException(status_code=404, detail="내역을 찾을 수 없습니다.")
     
-    # 그룹 전체 상태 동기화
+    # 🛡️ 동일 사원(user_id)의 동일 group_id만 상태 동기화 (타인 신청 건 간섭 원천 차단)
     if db_dayoff.group_id:
-        items = db.query(DayOff).filter(DayOff.group_id == db_dayoff.group_id).all()
+        items = db.query(DayOff).filter(
+            DayOff.group_id == db_dayoff.group_id,
+            DayOff.user_id == db_dayoff.user_id,
+            DayOff.is_deleted == False
+        ).all()
         for item in items:
             item.status = new_status
     else:
@@ -1341,6 +1373,129 @@ def admin_update_dayoff_status(
         
     db.commit()
     return {"message": "success", "new_status": new_status}
+
+@router.get("/dayoff-policy")
+def admin_get_dayoff_policy(
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_dayoff_admin)
+):
+    """결근/휴무 정책 이력, 기준일 유효 정책 및 월간 일별 정원 현황 조회"""
+    now = datetime.now()
+    y = year if year and 1970 <= year <= 2100 else now.year
+    m = month if month and 1 <= month <= 12 else now.month
+
+    policy_rows = get_all_dayoff_policies(db)
+    policies = [policy_row_to_dict(r) for r in policy_rows]
+    monthly = get_monthly_quota_status(db, y, m, admin)
+    policy = monthly.get("policy") or get_dayoff_policy(db)
+
+    # 선택 가능한 그룹 후보 목록 수집 (Group 테이블 + UserProfile + 정책 그룹)
+    group_codes = set(["운전직", "운수팀", "사무직", "관리팀"])
+    for g in db.query(models.Group.code).all():
+        if g[0]:
+            group_codes.add(str(g[0]).strip())
+    for p in db.query(UserProfile.primary_group).distinct().all():
+        if p[0]:
+            group_codes.add(str(p[0]).strip())
+    for row_dict in policies:
+        for fg in row_dict.get("fcfs_groups", []):
+            if fg:
+                group_codes.add(str(fg).strip())
+
+    return {
+        "policy": policy,
+        "policies": policies,
+        "available_groups": sorted(list(group_codes)),
+        "monthly_quota": monthly
+    }
+
+@router.put("/dayoff-policy")
+def admin_update_dayoff_policy(
+    payload: DayOffPolicySchema,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_dayoff_admin_write)
+):
+    """Append-Only: 적용날짜 기준 새 결근/휴무 정책 레코드를 추가(INSERT)합니다."""
+    eff_date = payload.effective_date or datetime.now().date()
+    old_policy = get_dayoff_policy(db, as_of=eff_date)
+    saved = save_dayoff_policy(db, payload.model_dump(exclude_none=True))
+
+    win_desc = (
+        f"D+{saved['min_advance_days']}~D+{saved['max_advance_days']}"
+        if saved.get("max_advance_days", 0) > 0
+        else f"D+{saved['min_advance_days']}~무제한"
+    )
+    safe_log_audit(
+        db=db,
+        app_id="dayoff",
+        log_type="SYSTEM",
+        action="DAYOFF_POLICY_APPENDED",
+        title=f"결근/휴무 정책 추가 (적용일: {saved['effective_date']})",
+        user=admin,
+        resource_type="dayoff_policy",
+        resource_id=str(saved["id"]),
+        message=f"관리자 '{admin.username}'이(가) {saved['effective_date']}부터 적용되는 휴무 정책(#{saved['id']})을 등록했습니다. (정원: {saved['daily_quota']}명, 월최대: {saved['max_monthly_count']}회, 1회최대: {saved['max_days_per_request']}일, 신청기간: {win_desc})",
+        diff_payload=[{"field": "dayoff_policy", "from": old_policy, "to": saved}]
+    )
+    return {"message": "success", "policy": saved}
+
+@router.put("/dayoff-policy/date-override")
+def admin_update_dayoff_date_override(
+    payload: DayOffDateOverrideReq,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_dayoff_admin_write)
+):
+    """특정 날짜(단일 또는 복수 일자)의 선착순 정원을 Append-Only 레코드로 반영합니다."""
+    saved = update_date_overrides(db, payload.dates, payload.quota)
+    return {"message": "success", "policy": saved}
+
+@router.put("/dayoff-policy/{policy_id}")
+def admin_edit_dayoff_policy_row(
+    policy_id: int,
+    payload: DayOffPolicySchema,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_dayoff_admin_write)
+):
+    """입력 오타 정정 등을 위해 특정 정책 레코드(#id)를 수정합니다."""
+    saved = update_dayoff_policy_row(db, policy_id, payload.model_dump(exclude_none=True))
+
+    safe_log_audit(
+        db=db,
+        app_id="dayoff",
+        log_type="SYSTEM",
+        action="DAYOFF_POLICY_UPDATED",
+        title=f"결근/휴무 정책 #{policy_id} 수정 (적용일: {saved['effective_date']})",
+        user=admin,
+        resource_type="dayoff_policy",
+        resource_id=str(policy_id),
+        message=f"관리자 '{admin.username}'이(가) 정책 레코드 #{policy_id}를 수정했습니다.",
+        diff_payload=[{"field": "dayoff_policy", "to": saved}]
+    )
+    return {"message": "success", "policy": saved}
+
+@router.delete("/dayoff-policy/{policy_id}")
+def admin_delete_dayoff_policy_row(
+    policy_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_dayoff_admin_write)
+):
+    """특정 정책 레코드(#id)를 논리 삭제합니다."""
+    delete_dayoff_policy_row(db, policy_id)
+
+    safe_log_audit(
+        db=db,
+        app_id="dayoff",
+        log_type="SYSTEM",
+        action="DAYOFF_POLICY_DELETED",
+        title=f"결근/휴무 정책 #{policy_id} 삭제",
+        user=admin,
+        resource_type="dayoff_policy",
+        resource_id=str(policy_id),
+        message=f"관리자 '{admin.username}'이(가) 정책 레코드 #{policy_id}를 삭제했습니다.",
+    )
+    return {"message": "success", "deleted_id": policy_id}
 
 # --- [v1.6] Service App Architecture 관리 API ---
 

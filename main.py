@@ -51,10 +51,18 @@ async def lifespan(app: FastAPI):
     
     # 0. 자율신경계 필수 정기 태스크 및 시스템 앱 자동 시드 (Bootstrap)
     try:
+        from sqlalchemy import inspect as sa_inspect, text as sa_text
         from database import SessionLocal
         from models.miniapp import MiniappRead
-        # 📌 [방안 B] 미니앱 1:N 확인 서명 테이블 자동 보증 (테이블 부재 시 자동 생성)
+        from models.dayoff import DayOffPolicy
+        # 📌 [방안 B] 미니앱 1:N 확인 서명 및 휴무 정책 이력 테이블 자동 보증
         MiniappRead.__table__.create(bind=engine, checkfirst=True)
+        DayOffPolicy.__table__.create(bind=engine, checkfirst=True)
+        existing_policy_cols = {c["name"] for c in sa_inspect(engine).get_columns("dayoff_policy")}
+        with engine.begin() as conn:
+            for col_name in ("min_advance_days", "max_advance_days"):
+                if col_name not in existing_policy_cols:
+                    conn.execute(sa_text(f"ALTER TABLE dayoff_policy ADD COLUMN {col_name} INTEGER NOT NULL DEFAULT 0"))
 
         from domain.system.task_service import bootstrap_default_cron_tasks
         from domain.system.app_service import bootstrap_system_apps
@@ -65,6 +73,8 @@ async def lifespan(app: FastAPI):
         register_security_audit_hook(check_and_alert_security_violation)
 
         with SessionLocal() as db:
+            from domain.dayoff.dayoff_crud import ensure_initial_dayoff_policy
+            ensure_initial_dayoff_policy(db)
             seeded = bootstrap_default_cron_tasks(db)
             if seeded > 0:
                 print(f"🌱 자율신경계 필수 정기 태스크 {seeded}건이 성공적으로 등록되었습니다.")

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, field_validator
 import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from enum import Enum
 
 class DayOffType(str, Enum):
@@ -29,6 +29,9 @@ class DayOffCreate(BaseModel):
 class DayOffResponse(BaseModel):
     id: int
     date: str # 날짜 또는 날짜 범위 문자열
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    total_days: Optional[int] = None
     type: DayOffType
     status: DayOffStatus
     category: Optional[str] = None
@@ -43,3 +46,21 @@ class DayOffResponse(BaseModel):
 class DayOffListResponse(BaseModel):
     total: int
     data: List[DayOffResponse]
+
+class DayOffPolicySchema(BaseModel):
+    effective_date: Optional[datetime.date] = None
+    classify_mode: Optional[str] = None          # "GROUP" | "RANK" | "BOTH"
+    fcfs_groups: Optional[List[str]] = None
+    fcfs_ranks: Optional[List[int]] = None
+    daily_quota: Optional[int] = None
+    date_overrides: Optional[Dict[str, int]] = None
+    max_monthly_count: Optional[int] = None      # 월별 최대 결근 신청 횟수 (0=제한 없음)
+    max_days_per_request: Optional[int] = None   # 1회 신청 시 최대 일수 (0=제한 없음)
+    min_advance_days: Optional[int] = None       # 최소 신청 가능일 (D+X일부터, 0=오늘 D+0부터)
+    max_advance_days: Optional[int] = None       # 최대 신청 가능일 (D+Y일까지, 0=제한 없음)
+    etc: Optional[Dict[str, Any]] = None         # 확장용 JSONB
+
+class DayOffDateOverrideReq(BaseModel):
+    dates: List[str]
+    quota: Optional[int] = None
+

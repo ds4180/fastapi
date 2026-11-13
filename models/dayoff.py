@@ -8,10 +8,13 @@
 및 일자별 중복 신청 방지 인덱스를 관리합니다.
 """
 
-from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean, Index
+from datetime import datetime, date
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean, Index, JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from models.base import Base
+
+JSONType = JSON().with_variant(JSONB, "postgresql")
 
 
 class DayOff(Base):
@@ -37,3 +40,23 @@ class DayOff(Base):
     )
 
     user = relationship("User", back_populates="dayoffs")
+
+
+class DayOffPolicy(Base):
+    """결근/휴무 정책 및 정원 Append-Only 이력 테이블"""
+    __tablename__ = "dayoff_policy"
+
+    id = Column(Integer, primary_key=True)
+    effective_date = Column(Date, nullable=False, default=date.today, index=True)
+    classify_mode = Column(String(20), nullable=False, default="BOTH")
+    fcfs_groups = Column(JSONType, nullable=False, default=list)
+    fcfs_ranks = Column(JSONType, nullable=False, default=list)
+    daily_quota = Column(Integer, nullable=False, default=3)
+    date_overrides = Column(JSONType, nullable=False, default=dict)
+    max_monthly_count = Column(Integer, nullable=False, default=0)
+    max_days_per_request = Column(Integer, nullable=False, default=0)
+    min_advance_days = Column(Integer, nullable=False, default=0)
+    max_advance_days = Column(Integer, nullable=False, default=0)
+    etc = Column(JSONType, nullable=False, default=dict)
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    create_date = Column(DateTime, nullable=False, default=datetime.now)
