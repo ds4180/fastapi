@@ -668,7 +668,36 @@ MIGRATED_PAGES_MAP = {
     "/v1/custom/uploadfile": "/v1/pages/uploadfile",
 }
 
-def resolve_menu_url(menu: Menu, db: Session) -> str:
+def _build_menu_lookup_cache(db: Session) -> dict:
+    """
+    [메뉴 트리 N+1 쿼리 제거용 일괄 조회 캐시]
+    메뉴 순회 중 반복 호출되는 AppRegistry, BoardConfig(slug), Page(slug)를
+    요청당 1회씩만 일괄 로드하여 메모리 딕셔너리로 제공합니다.
+    """
+    apps_by_id = {a.app_id: a for a in db.query(AppRegistry).all() if a.app_id}
+    board_slugs = {
+        row[0]: row[1]
+        for row in db.query(BoardConfig.id, BoardConfig.slug).all()
+        if row[0] is not None
+    }
+    page_slugs = {
+        row[0]: row[1]
+        for row in db.query(Page.id, Page.slug).all()
+        if row[0] is not None
+    }
+    return {
+        "apps_by_id": apps_by_id,
+        "board_slugs": board_slugs,
+        "page_slugs": page_slugs,
+    }
+
+
+def resolve_menu_url(
+    menu: Menu,
+    db: Session,
+    lookup_cache: Optional[dict] = None,
+    resolved_slug: Optional[str] = None,
+) -> str:
     """
     [v3.0 헌법 표준 단일 원칙 주소 조립기]
     
@@ -711,7 +740,10 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
         )
 
         # 🌟 [단일 진실 공급원 SSOT]: AppRegistry에 정의된 공식 frontend_route 최우선 바인딩
-        app_reg = db.query(AppRegistry).filter(AppRegistry.app_id == clean_id).first()
+        if lookup_cache is not None and "apps_by_id" in lookup_cache:
+            app_reg = lookup_cache["apps_by_id"].get(clean_id)
+        else:
+            app_reg = db.query(AppRegistry).filter(AppRegistry.app_id == clean_id).first()
 
         if is_admin_mode:
             if app_reg and app_reg.frontend_route:
@@ -725,7 +757,7 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
             return f"{API_VERSION_PREFIX}/custom/{clean_id}"
 
         if menu.link_type in ["INSTANCE", "APP"]:
-            slug = get_instance_slug(menu, db)
+            slug = resolved_slug if resolved_slug is not None else get_instance_slug(menu, db, lookup_cache)
             # 게시판 등 다중 인스턴스: 특정 개체는 단수형(/v1/app/board/{slug}), 허브는 복수형(/v1/app/boards)
             if slug and slug != "-1":
                 instance_prefix = clean_id.rstrip("s") if clean_id.endswith("s") else clean_id
@@ -735,14 +767,18 @@ def resolve_menu_url(menu: Menu, db: Session) -> str:
     # 3. 📄 정적 콘텐츠 레이어 (PAGE / PAGES 직접 링크)
     if menu.link_type in ["PAGE", "PAGES"] and (menu.page_id or menu.app_id):
         target = menu.page_id or menu.app_id
-        slug = get_instance_slug(menu, db)
+        slug = resolved_slug if resolved_slug is not None else get_instance_slug(menu, db, lookup_cache)
         if slug and slug != "-1":
             return f"{API_VERSION_PREFIX}/pages/{slug}"
         return f"{API_VERSION_PREFIX}/pages"
 
     return menu.external_url or "#"
 
-def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
+def get_instance_slug(
+    menu: Menu,
+    db: Session,
+    lookup_cache: Optional[dict] = None,
+) -> Optional[str]:
     """
     [인스턴스 ID -> 슬러그(Slug) 변환 헬퍼 (PostgreSQL 타입 안전 가드)]
     - INSTANCE 앱(board, page 등)에 연결된 인스턴스 식별자를 슬러그(slug)로 변환합니다.
@@ -767,6 +803,9 @@ def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
     # 2. 게시판(Board) 인스턴스 슬러그 역추적
     if clean_id in ['board', 'boards']:
         if int_id is not None:
+            if lookup_cache is not None and "board_slugs" in lookup_cache:
+                slug_val = lookup_cache["board_slugs"].get(int_id)
+                return slug_val if slug_val else str(raw_val)
             board = db.query(BoardConfig).filter(BoardConfig.id == int_id).first()
             return board.slug if board else str(raw_val)
         return str(raw_val)
@@ -774,6 +813,9 @@ def get_instance_slug(menu: Menu, db: Session) -> Optional[str]:
     # 3. 페이지(Page) 인스턴스 슬러그 역추적
     if clean_id in ['page', 'pages'] or menu.link_type in ['PAGE', 'PAGES']:
         if int_id is not None:
+            if lookup_cache is not None and "page_slugs" in lookup_cache:
+                slug_val = lookup_cache["page_slugs"].get(int_id)
+                return slug_val if slug_val else str(raw_val)
             page_obj = db.query(Page).filter(Page.id == int_id).first()
             return page_obj.slug if page_obj else str(raw_val)
         return str(raw_val)
@@ -784,7 +826,8 @@ def filter_menu_tree(
     menus: List[Menu],
     current_user: Optional[User],
     db: Session,
-    bypass_auth: bool = False
+    bypass_auth: bool = False,
+    lookup_cache: Optional[dict] = None,
 ):
     """
     [4단계 권한 기반 재귀적 메뉴 필터링 및 동적 URL 주입]
@@ -793,8 +836,12 @@ def filter_menu_tree(
     3. 메뉴의 allow_groups 에 사용자의 부그룹/주그룹이 있는가? ➔ 랭킹 무관 노출
     4. 메뉴의 min_rank 와 사용자 랭킹 비교 ➔ 이상이면 노출
     """
+    if lookup_cache is None:
+        lookup_cache = _build_menu_lookup_cache(db)
+
     filtered = []
     sorted_menus = sorted(menus, key=lambda x: x.order)
+    user_rank = get_user_rank(current_user) if not bypass_auth else ROOT_RANK
     
     for m in sorted_menus:
         # 📌 [버그 수정]: 메뉴는 AppRegistry 객체가 아니라 개별 속성(min_rank, allow_groups, deny_groups)을
@@ -810,15 +857,14 @@ def filter_menu_tree(
         )
 
         # 🚨 [앱 킬 스위치 연동]: 연결된 앱이 비활성화(is_active=False)된 경우 일반 사용자 메뉴 자동 숨김
-        if is_allowed and not bypass_auth and m.app_id:
-            user_rank = get_user_rank(current_user)
-            if user_rank != ROOT_RANK:
-                app_meta = db.query(AppRegistry.is_active).filter(AppRegistry.app_id == m.app_id).first()
-                if app_meta and app_meta[0] is False:
-                    is_allowed = False
+        if is_allowed and not bypass_auth and m.app_id and user_rank != ROOT_RANK:
+            app_reg = lookup_cache["apps_by_id"].get(m.app_id)
+            if app_reg is not None and app_reg.is_active is False:
+                is_allowed = False
         if is_allowed:
+            resolved_slug = None if bypass_auth else get_instance_slug(m, db, lookup_cache)
             # 동적 URL 계산 (INSTANCE / CUSTOM / SYSTEM 분류 체계 반영)
-            final_url = resolve_menu_url(m, db)
+            final_url = resolve_menu_url(m, db, lookup_cache=lookup_cache, resolved_slug=resolved_slug)
             normalized_link_type = "INSTANCE" if m.link_type == "APP" else m.link_type
             
             menu_data = {
@@ -828,8 +874,8 @@ def filter_menu_tree(
                 "order": m.order, "is_visible": m.is_visible, "min_rank": m.min_rank,
                 "allow_groups": m.allow_groups or [],
                 "deny_groups": m.deny_groups or [],
-                "app_id": m.app_id, "app_instance_id": m.app_instance_id if bypass_auth else (get_instance_slug(m, db) or m.app_instance_id),
-                "sub_menus": filter_menu_tree(m.sub_menus, current_user, db, bypass_auth=bypass_auth)
+                "app_id": m.app_id, "app_instance_id": m.app_instance_id if bypass_auth else (resolved_slug or m.app_instance_id),
+                "sub_menus": filter_menu_tree(m.sub_menus, current_user, db, bypass_auth=bypass_auth, lookup_cache=lookup_cache)
             }
             filtered.append(menu_data)
     return filtered
@@ -842,11 +888,15 @@ def get_public_menus(
     """일반 사용자용 공개 메뉴 조회 (4단계 그룹/랭킹 권한 필터링 및 지능형 URL 생성 포함)"""
     # 📌 SQL 단계에서 min_rank로 미리 자르지 않고(그룹 허용 예외 반영을 위해),
     #    가시성(is_visible=True)이 켜진 루트 메뉴를 모두 가져온 뒤 4단계 권한 엔진(filter_menu_tree)으로 판별합니다.
-    root_menus = db.query(Menu).options(joinedload(Menu.sub_menus)).filter(
-        Menu.parent_id == None, Menu.is_visible == True
-    ).order_by(Menu.order).all()
-    
-    filtered_menus = filter_menu_tree(root_menus, current_user, db, bypass_auth=False)
+    root_menus = (
+        db.query(Menu)
+        .options(joinedload(Menu.sub_menus).joinedload(Menu.sub_menus))
+        .filter(Menu.parent_id == None, Menu.is_visible == True)
+        .order_by(Menu.order)
+        .all()
+    )
+    lookup_cache = _build_menu_lookup_cache(db)
+    filtered_menus = filter_menu_tree(root_menus, current_user, db, bypass_auth=False, lookup_cache=lookup_cache)
     return filtered_menus
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])

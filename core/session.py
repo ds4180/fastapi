@@ -18,6 +18,7 @@ FastAPI 라우터에 섞여 있던 '멀티 디바이스 세션(DESKTOP/MOBILE)' 
 
 import uuid
 import logging
+import redis
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from fastapi import Request
@@ -329,7 +330,22 @@ def _ensure_redis_session(
     """Redis Set 생존 확인, 휘발 시 자가치유 복구 및 슬라이딩 TTL(SESSION_EXPIRE_SECONDS) 연장."""
     redis_key = f"session:{db_session.user_id}:{db_session.device_category}"
     try:
-        if not rd.sismember(redis_key, session_id):
+        if isinstance(rd, redis.Redis):
+            pipe = rd.pipeline(transaction=False)
+            pipe.sismember(redis_key, session_id)
+            pipe.expire(redis_key, SESSION_EXPIRE_SECONDS)
+            is_member, _ = pipe.execute()
+            if not is_member:
+                heal_pipe = rd.pipeline(transaction=False)
+                heal_pipe.sadd(redis_key, session_id)
+                heal_pipe.expire(redis_key, SESSION_EXPIRE_SECONDS)
+                heal_pipe.execute()
+                actor = f"User: {username}" if username else f"UID={db_session.user_id}"
+                logger.info(
+                    f"✨ [{log_context}] Redis 세션 복구 완료 "
+                    f"({actor}, Device: {db_session.device_category}, Session: {session_id[:8]}...)"
+                )
+        elif not rd.sismember(redis_key, session_id):
             # ✨ [자가 치유 Self-Healing]:
             # Redis가 재부팅되어 메모리가 비워졌거나 TTL이 일찍 끝났더라도,
             # DB가 ACTIVE 상태라면 세션을 죽이지 않고 Redis에 키를 다시 복구 등록합니다!

@@ -6,7 +6,7 @@
 
 from typing import Optional, List, Dict, Tuple, NamedTuple
 from datetime import datetime
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, and_, func, case, select
 from models.miniapp import MiniappItem, MiniappRead
 from models.user import User
@@ -26,21 +26,15 @@ def get_user_miniapp_counts(db: Session, user_id: int) -> Dict[str, int]:
     """
     [상단 헤더 뱃지 및 슬라이더 뱃지 실시간 계산 (방안 B 1:N 확인 서명 모델 반영)]
     - 전사 공지(receiver_id IS NULL)는 MiniappRead 서명 테이블에 현재 사원의 확인 기록이 없는 경우에만 미결 카운트에 산입합니다.
-    - NOTIFICATION: 미확인 전사/개인 알림
-    - INSTRUCTION : 미완료 전사/개인 지시사항
-    - MESSAGE     : 안 읽은 메시지 (status == 'PENDING')
-    - MEMO        : 미완료 개인 메모 (status != 'COMPLETED')
-    - ALARM       : 대기 중인 알람 (status != 'COMPLETED')
-    - TOTAL       : 위 5대 미결 항목의 총합 (상단 헤더 🔴 뱃지용)
+    - 5개 카테고리 카운트를 CASE 집계 단일 SQL 쿼리(1회)로 통합하여 DB 왕복 지연을 최소화합니다.
     """
-    # 📌 현재 사원이 이미 확인(읽음) 또는 삭제한 전사 공지/지시 item_id 서브쿼리
-    read_item_ids_subquery = db.query(MiniappRead.item_id).filter(
+    # 📌 현재 사원이 이미 확인(읽음) 또는 삭제한 전사 공지/지시 item_id SELECT 구문 (SAWarning 방지)
+    read_item_ids_select = select(MiniappRead.item_id).where(
         MiniappRead.user_id == user_id,
         MiniappRead.status.in_(["READ", "CONFIRMED", "COMPLETED", "DELETED"])
-    ).subquery()
+    )
 
-    # 1. 알림 및 공지 (NOTIFICATION, NOTICE, URGENT_NOTICE 포괄, DELETED 제외)
-    noti_count = db.query(func.count(MiniappItem.id)).filter(
+    noti_cond = and_(
         MiniappItem.category.in_(["NOTIFICATION", "NOTICE", "URGENT_NOTICE"]),
         MiniappItem.status != "DELETED",
         or_(
@@ -48,13 +42,12 @@ def get_user_miniapp_counts(db: Session, user_id: int) -> Dict[str, int]:
             and_(
                 MiniappItem.receiver_id.is_(None),
                 MiniappItem.status == "PENDING",
-                ~MiniappItem.id.in_(read_item_ids_subquery)
+                ~MiniappItem.id.in_(read_item_ids_select)
             )
         )
-    ).scalar() or 0
+    )
 
-    # 2. 지시사항 (INSTRUCTION, DELETED 제외)
-    inst_count = db.query(func.count(MiniappItem.id)).filter(
+    inst_cond = and_(
         MiniappItem.category == "INSTRUCTION",
         MiniappItem.status != "DELETED",
         or_(
@@ -62,32 +55,49 @@ def get_user_miniapp_counts(db: Session, user_id: int) -> Dict[str, int]:
             and_(
                 MiniappItem.receiver_id.is_(None),
                 MiniappItem.status.notin_(["CONFIRMED", "COMPLETED"]),
-                ~MiniappItem.id.in_(read_item_ids_subquery)
+                ~MiniappItem.id.in_(read_item_ids_select)
             )
         )
-    ).scalar() or 0
+    )
 
-    # 3. 메시징 (MESSAGE, DELETED 제외)
-    msg_count = db.query(func.count(MiniappItem.id)).filter(
+    msg_cond = and_(
         MiniappItem.category == "MESSAGE",
         MiniappItem.receiver_id == user_id,
         MiniappItem.status == "PENDING"
-    ).scalar() or 0
+    )
 
-    # 4. 메모 (MEMO, DELETED 제외)
-    memo_count = db.query(func.count(MiniappItem.id)).filter(
+    memo_cond = and_(
         MiniappItem.category == "MEMO",
         MiniappItem.sender_id == user_id,
         MiniappItem.status.notin_(["COMPLETED", "DELETED"])
-    ).scalar() or 0
+    )
 
-    # 5. 알람 (ALARM, DELETED 제외)
-    alarm_count = db.query(func.count(MiniappItem.id)).filter(
+    alarm_cond = and_(
         MiniappItem.category == "ALARM",
         MiniappItem.sender_id == user_id,
         MiniappItem.status.notin_(["COMPLETED", "DELETED"])
-    ).scalar() or 0
+    )
 
+    row = (
+        db.query(
+            func.coalesce(func.sum(case((noti_cond, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((inst_cond, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((msg_cond, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((memo_cond, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((alarm_cond, 1), else_=0)), 0),
+        )
+        .filter(
+            MiniappItem.status != "DELETED",
+            or_(
+                MiniappItem.receiver_id == user_id,
+                MiniappItem.sender_id == user_id,
+                MiniappItem.receiver_id.is_(None),
+            ),
+        )
+        .one()
+    )
+
+    noti_count, inst_count, msg_count, memo_count, alarm_count = (int(v or 0) for v in row)
     total = noti_count + inst_count + msg_count + memo_count + alarm_count
 
     return {
@@ -132,6 +142,8 @@ def get_user_miniapp_items(
         MiniappItem,
         computed_status_expr,
         MiniappRead.confirmed_at
+    ).options(
+        joinedload(MiniappItem.sender)
     ).outerjoin(
         MiniappRead,
         and_(
