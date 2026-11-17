@@ -48,6 +48,9 @@ class ObservabilitySummaryRes(BaseModel):
     today_change_count: int = 0
     today_error_alert_count: int = 0
 
+    # 📋 필터 드롭다운용 동적 앱 목록 (AppRegistry + AuditLog 통합)
+    app_options: List[Dict[str, str]] = Field(default_factory=list)
+
 
 class AuditLogListRes(BaseModel):
     """감사로그 페이징 목록 응답"""

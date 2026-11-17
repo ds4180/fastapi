@@ -205,5 +205,7 @@ def require_app_permission(app_id: str, action: str = "read"):
                 resource=app_id,
                 resource_id=current_user.id
             )
+        from core.audit import set_audit_target
+        set_audit_target(app_id, getattr(current_user, "id", None))
         return current_user
     return _guard

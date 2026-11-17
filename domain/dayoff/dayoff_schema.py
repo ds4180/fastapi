@@ -53,7 +53,6 @@ class DayOffPolicySchema(BaseModel):
     fcfs_groups: Optional[List[str]] = None
     fcfs_ranks: Optional[List[int]] = None
     daily_quota: Optional[int] = None
-    date_overrides: Optional[Dict[str, int]] = None
     max_monthly_count: Optional[int] = None      # 월별 최대 결근 신청 횟수 (0=제한 없음)
     max_days_per_request: Optional[int] = None   # 1회 신청 시 최대 일수 (0=제한 없음)
     min_advance_days: Optional[int] = None       # 최소 신청 가능일 (D+X일부터, 0=오늘 D+0부터)

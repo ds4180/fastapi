@@ -33,8 +33,50 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         request.state.start_time = time.time()
 
-        # 3. 다음 미들웨어 및 실제 API 라우터 실행
-        response: Response = await call_next(request)
+        from core.audit import init_audit_context, get_audit_context, reset_audit_context
+        audit_token = init_audit_context()
+
+        try:
+            # 3. 다음 미들웨어 및 실제 API 라우터 실행
+            response: Response = await call_next(request)
+
+            # 🛡️ [등록된 앱 쓰기 작업 자동 감사 폴백]
+            # require_app_permission을 통과한 변경 요청(POST/PUT/PATCH/DELETE) 중 수동 safe_log_audit가 누락된 경우 자동 기록
+            audit_ctx = get_audit_context()
+            if (
+                response.status_code < 400
+                and request.method in ("POST", "PUT", "PATCH", "DELETE")
+                and audit_ctx
+                and audit_ctx.get("app_id")
+                and not audit_ctx.get("logged")
+            ):
+                try:
+                    from database import SessionLocal
+                    from core.audit import safe_log_audit
+                    from models import User
+                    db = SessionLocal()
+                    try:
+                        uid = audit_ctx.get("user_id")
+                        user_obj = db.query(User).filter(User.id == uid).first() if uid else None
+                        client_ip = request.client.host if request.client else None
+                        safe_log_audit(
+                            db=db,
+                            app_id=audit_ctx["app_id"],
+                            log_type="CHANGE",
+                            action=f"API_{request.method}",
+                            title=f"[{audit_ctx['app_id']}] {request.method} {request.url.path}",
+                            user=user_obj,
+                            resource_type=audit_ctx["app_id"],
+                            message=f"{request.method} {request.url.path} 요청 처리됨",
+                            ip_address=client_ip,
+                            metadata={"request_id": request_id, "auto_audit": True},
+                        )
+                    finally:
+                        db.close()
+                except Exception:
+                    pass
+        finally:
+            reset_audit_context(audit_token)
 
         # 🛡️ [슬라이딩 윈도우 브라우저 쿠키 동기화]
         # 활동 임계치(5분) 도달로 last_activity가 갱신된 HTTP 요청에만 브라우저 쿠키 Max-Age를 재발급합니다.

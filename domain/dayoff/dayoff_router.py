@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from starlette import status
 
 from database import get_db
+from core.audit import safe_log_audit
 from domain.dayoff import dayoff_schema, dayoff_crud
 from domain.user.user_router import get_current_user
 from models import User
@@ -38,6 +39,16 @@ def dayoff_create(
     휴무일 등록 (다중 날짜 - 사무직 승인대기 / 운전직 선착순 정원 검사 후 즉시 확정)
     """
     dayoff_crud.create_dayoff_list(db, _dayoff_create, current_user.id)
+    safe_log_audit(
+        db=db,
+        app_id="dayoff",
+        log_type="CHANGE",
+        action="DAYOFF_CREATE",
+        title=f"휴무 신청 ({len(_dayoff_create.dates)}일)",
+        user=current_user,
+        resource_type="dayoff",
+        message=f"'{current_user.username}'이(가) {_dayoff_create.type.value} 휴무 {len(_dayoff_create.dates)}일을 신청했습니다.",
+    )
 
 @router.get("/list", response_model=dayoff_schema.DayOffListResponse)
 def dayoff_list(
@@ -67,4 +78,15 @@ def dayoff_delete(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="데이터를 찾을 수 없습니다.")
     elif result is False:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="이미 경과한 승인 휴무이거나 삭제 권한이 없습니다.")
+    safe_log_audit(
+        db=db,
+        app_id="dayoff",
+        log_type="CHANGE",
+        action="DAYOFF_DELETE",
+        title=f"휴무 신청 취소 (#{dayoff_id})",
+        user=current_user,
+        resource_type="dayoff",
+        resource_id=str(dayoff_id),
+        message=f"'{current_user.username}'이(가) 휴무 신청(#{dayoff_id})을 취소했습니다.",
+    )
 

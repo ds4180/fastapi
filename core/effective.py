@@ -45,3 +45,22 @@ def pick(records, as_of=None, field="effective_date"):
     if not valid:
         return None
     return max(valid, key=lambda item: (item[0], item[1], item[2]))[3]
+
+
+def pick_reserved(records, today=None, field="effective_date"):
+    """적용날짜(field) > 오늘(today) 인 미삭제 예약 레코드 중 가장 최근 것 1건 (없으면 None)"""
+    anchor = _to_date(today) if today is not None else date.today()
+    valid = []
+    for idx, r in enumerate(records):
+        if _attr(r, "is_deleted", False):
+            continue
+        raw_d = _attr(r, field)
+        if raw_d is None:
+            continue
+        d_val = _to_date(raw_d)
+        if d_val > anchor:
+            tie_id = _attr(r, "id", 0) or 0
+            valid.append((d_val, tie_id, idx, r))
+    if not valid:
+        return None
+    return max(valid, key=lambda item: (item[0], item[1], item[2]))[3]

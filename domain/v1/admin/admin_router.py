@@ -1349,11 +1349,12 @@ def delete_push_subscription(
 
 from domain.dayoff.dayoff_crud import (
     get_dayoff_policy,
+    get_reserved_dayoff_policy,
+    get_date_overrides,
     get_all_dayoff_policies,
     resolve_policy_for_date,
     policy_row_to_dict,
     save_dayoff_policy,
-    update_dayoff_policy_row,
     delete_dayoff_policy_row,
     update_date_overrides,
     is_fcfs_user,
@@ -1439,7 +1440,9 @@ def admin_get_dayoff_policy(
     policy_rows = get_all_dayoff_policies(db)
     policies = [policy_row_to_dict(r) for r in policy_rows]
     monthly = get_monthly_quota_status(db, y, m, admin)
-    policy = monthly.get("policy") or get_dayoff_policy(db)
+    today_policy = get_dayoff_policy(db, now.date())
+    reserved_policy = get_reserved_dayoff_policy(db, now.date())
+    date_overrides = get_date_overrides(db)
 
     # 선택 가능한 그룹 후보 목록 수집 (Group 테이블 + UserProfile + 정책 그룹)
     group_codes = set(["운전직", "운수팀", "사무직", "관리팀"])
@@ -1455,8 +1458,10 @@ def admin_get_dayoff_policy(
                 group_codes.add(str(fg).strip())
 
     return {
-        "policy": policy,
-        "policies": policies,
+        "policy": today_policy,
+        "today_policy": today_policy,
+        "reserved_policy": reserved_policy,
+        "date_overrides": date_overrides,
         "available_groups": sorted(list(group_codes)),
         "monthly_quota": monthly
     }
@@ -1497,33 +1502,9 @@ def admin_update_dayoff_date_override(
     db: Session = Depends(get_db),
     admin: User = Depends(check_dayoff_admin_write)
 ):
-    """특정 날짜(단일 또는 복수 일자)의 선착순 정원을 Append-Only 레코드로 반영합니다."""
-    saved = update_date_overrides(db, payload.dates, payload.quota)
-    return {"message": "success", "policy": saved}
-
-@router.put("/dayoff-policy/{policy_id}")
-def admin_edit_dayoff_policy_row(
-    policy_id: int,
-    payload: DayOffPolicySchema,
-    db: Session = Depends(get_db),
-    admin: User = Depends(check_dayoff_admin_write)
-):
-    """입력 오타 정정 등을 위해 특정 정책 레코드(#id)를 수정합니다."""
-    saved = update_dayoff_policy_row(db, policy_id, payload.model_dump(exclude_none=True))
-
-    safe_log_audit(
-        db=db,
-        app_id="dayoff",
-        log_type="SYSTEM",
-        action="DAYOFF_POLICY_UPDATED",
-        title=f"결근/휴무 정책 #{policy_id} 수정 (적용일: {saved['effective_date']})",
-        user=admin,
-        resource_type="dayoff_policy",
-        resource_id=str(policy_id),
-        message=f"관리자 '{admin.username}'이(가) 정책 레코드 #{policy_id}를 수정했습니다.",
-        diff_payload=[{"field": "dayoff_policy", "to": saved}]
-    )
-    return {"message": "success", "policy": saved}
+    """특정 날짜(단일 또는 복수 일자)의 선착순 예외 정원을 정책 이력과 분리하여 저장합니다."""
+    saved_overrides = update_date_overrides(db, payload.dates, payload.quota)
+    return {"message": "success", "date_overrides": saved_overrides}
 
 @router.delete("/dayoff-policy/{policy_id}")
 def admin_delete_dayoff_policy_row(

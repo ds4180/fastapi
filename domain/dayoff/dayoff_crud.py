@@ -3,6 +3,7 @@ from datetime import datetime, date, timedelta
 from typing import Optional, Dict, Any, List
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_, func
 
 from core.effective import pick
@@ -10,6 +11,7 @@ from models import DayOff, DayOffPolicy, User, SystemConfig
 from domain.dayoff.dayoff_schema import DayOffCreate, DayOffStatus
 
 DAYOFF_POLICY_KEY = "dayoff_policy"
+DAYOFF_DATE_OVERRIDES_KEY = "dayoff_date_overrides"
 INITIAL_EFFECTIVE_DATE = date(2020, 1, 1)
 
 DEFAULT_DAYOFF_POLICY: Dict[str, Any] = {
@@ -212,15 +214,94 @@ def get_dayoff_policy(db: Session, as_of: Optional[date] = None) -> Dict[str, An
     return resolve_policy_for_date(rows, as_of or date.today())
 
 
+def get_reserved_dayoff_policy(db: Session, today: Optional[date] = None) -> Optional[Dict[str, Any]]:
+    """오늘 이후 적용 예정인 미삭제 예약 정책(최대 1건 유지 원칙)을 반환합니다."""
+    anchor = today or date.today()
+    row = (
+        db.query(DayOffPolicy)
+        .filter(
+            DayOffPolicy.is_deleted == False,
+            DayOffPolicy.effective_date > anchor,
+        )
+        .order_by(DayOffPolicy.effective_date.desc(), DayOffPolicy.id.desc())
+        .first()
+    )
+    return policy_row_to_dict(row) if row else None
+
+
+def get_date_overrides(db: Session) -> Dict[str, int]:
+    """
+    특정일 예외 정원 맵('YYYY-MM-DD' -> 정원)을 반환합니다.
+    정책 이력(DayOffPolicy)과 완전히 분리하여 SystemConfig 단일 키로 관리합니다.
+    """
+    cfg = db.query(SystemConfig).filter(SystemConfig.key == DAYOFF_DATE_OVERRIDES_KEY).first()
+    if cfg and isinstance(cfg.value, dict):
+        return {str(k): max(0, int(v)) for k, v in cfg.value.items() if v is not None}
+
+    # 최초 1회: 기존 DayOffPolicy.date_overrides에 있던 값을 안전하게 이관
+    migrated: Dict[str, int] = {}
+    legacy_rows = (
+        db.query(DayOffPolicy)
+        .filter(DayOffPolicy.is_deleted == False)
+        .order_by(DayOffPolicy.effective_date.asc(), DayOffPolicy.id.asc())
+        .all()
+    )
+    for r in legacy_rows:
+        if isinstance(r.date_overrides, dict):
+            for k, v in r.date_overrides.items():
+                k_str = str(k).strip()
+                if len(k_str) == 10 and v is not None:
+                    migrated[k_str] = max(0, int(v))
+
+    cfg = SystemConfig(
+        key=DAYOFF_DATE_OVERRIDES_KEY,
+        value=migrated,
+        description="결근계 특정일 예외 정원 맵 (YYYY-MM-DD -> quota)",
+    )
+    db.add(cfg)
+    db.commit()
+    return migrated
+
+
 def save_dayoff_policy(db: Session, policy_in: Dict[str, Any]) -> Dict[str, Any]:
     """
     Append-Only 정책 등록:
-    적용날짜 기준 직전 유효 레코드의 모든 필드를 복사하고, 전달된 변경 값과 effective_date만 반영해 새 행을 INSERT합니다.
+    - 적용일이 미래(> today)이면 기존 예약 정책을 소프트 삭제하고 새 예약 1건만 INSERT합니다.
+    - 적용일이 오늘(<= today)이면 예약이 없는 상태에서만 오늘 날짜로 새 레코드를 INSERT합니다.
     """
-    rows = get_all_dayoff_policies(db)
-    eff_date = _parse_date(policy_in.get("effective_date")) or date.today()
+    today = date.today()
+    ensure_initial_dayoff_policy(db)
+
+    eff_date = _parse_date(policy_in.get("effective_date")) or today
+    existing_reserved = (
+        db.query(DayOffPolicy)
+        .filter(
+            DayOffPolicy.is_deleted == False,
+            DayOffPolicy.effective_date > today,
+        )
+        .all()
+    )
+
+    if eff_date > today:
+        for r in existing_reserved:
+            r.is_deleted = True
+    else:
+        if existing_reserved:
+            raise HTTPException(
+                status_code=409,
+                detail="예약된 정책이 있어 현재 설정을 변경할 수 없습니다. 예약을 취소하거나 예약 내용을 수정해 주세요.",
+            )
+        eff_date = today
+
+    rows = (
+        db.query(DayOffPolicy)
+        .filter(DayOffPolicy.is_deleted == False)
+        .order_by(DayOffPolicy.effective_date.desc(), DayOffPolicy.id.desc())
+        .all()
+    )
     base_dict = resolve_policy_for_date(rows, eff_date)
     merged = normalize_policy(policy_in, base=base_dict)
+    merged["date_overrides"] = {}  # 예외 정원은 SystemConfig로 분리
     _validate_advance_window(merged)
 
     new_row = DayOffPolicy(
@@ -233,31 +314,6 @@ def save_dayoff_policy(db: Session, policy_in: Dict[str, Any]) -> Dict[str, Any]
     db.commit()
     db.refresh(new_row)
     return policy_row_to_dict(new_row)
-
-
-def update_dayoff_policy_row(db: Session, policy_id: int, policy_in: Dict[str, Any]) -> Dict[str, Any]:
-    """입력 오타 정정 등을 위해 특정 id의 정책 레코드를 수정합니다."""
-    row = db.query(DayOffPolicy).filter(
-        DayOffPolicy.id == policy_id,
-        DayOffPolicy.is_deleted == False,
-    ).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="수정할 정책 레코드를 찾을 수 없습니다.")
-
-    base_dict = policy_row_to_dict(row)
-    merged = normalize_policy(policy_in, base=base_dict)
-    _validate_advance_window(merged)
-    if policy_in.get("effective_date") is not None:
-        parsed_d = _parse_date(policy_in.get("effective_date"))
-        if parsed_d:
-            row.effective_date = parsed_d
-
-    for col_k, col_v in _policy_column_values(merged).items():
-        setattr(row, col_k, col_v)
-
-    db.commit()
-    db.refresh(row)
-    return policy_row_to_dict(row)
 
 
 def delete_dayoff_policy_row(db: Session, policy_id: int) -> bool:
@@ -274,37 +330,36 @@ def delete_dayoff_policy_row(db: Session, policy_id: int) -> bool:
     return True
 
 
-def update_date_overrides(db: Session, dates: List[str], quota: Optional[int]) -> Dict[str, Any]:
+def update_date_overrides(db: Session, dates: List[str], quota: Optional[int]) -> Dict[str, int]:
     """
-    특정 날짜 예외 정원을 Append-Only로 반영합니다.
-    대상 날짜가 속한 유효 정책 레코드를 복사하고 date_overrides만 갱신해 새 행으로 INSERT합니다.
+    특정일 예외 정원만 독립적으로 갱신합니다. (DayOffPolicy 이력과 완전 분리)
     """
-    rows = get_all_dayoff_policies(db)
-    grouped_by_base: Dict[int, tuple] = {}
+    overrides = dict(get_date_overrides(db))
 
     for d_str in dates:
         clean_d = str(d_str).strip()
         parsed_d = _parse_date(clean_d)
         if not parsed_d or len(clean_d) != 10:
             continue
-        base_row = pick(rows, parsed_d) or rows[-1]
-        if base_row.id not in grouped_by_base:
-            grouped_by_base[base_row.id] = (base_row, [])
-        grouped_by_base[base_row.id][1].append(clean_d)
+        if quota is None or quota < 0:
+            overrides.pop(clean_d, None)
+        else:
+            overrides[clean_d] = int(quota)
 
-    last_saved = None
-    for base_row, date_keys in grouped_by_base.values():
-        base_dict = policy_row_to_dict(base_row)
-        overrides = dict(base_dict.get("date_overrides") or {})
-        for clean_d in date_keys:
-            if quota is None or quota < 0:
-                overrides.pop(clean_d, None)
-            else:
-                overrides[clean_d] = int(quota)
-        base_dict["date_overrides"] = overrides
-        last_saved = save_dayoff_policy(db, base_dict)
+    cfg = db.query(SystemConfig).filter(SystemConfig.key == DAYOFF_DATE_OVERRIDES_KEY).first()
+    if cfg:
+        cfg.value = overrides
+        flag_modified(cfg, "value")
+    else:
+        cfg = SystemConfig(
+            key=DAYOFF_DATE_OVERRIDES_KEY,
+            value=overrides,
+            description="결근계 특정일 예외 정원 맵 (YYYY-MM-DD -> quota)",
+        )
+        db.add(cfg)
 
-    return last_saved or get_dayoff_policy(db)
+    db.commit()
+    return overrides
 
 
 def get_user_rank_val(user: Optional[User]) -> int:
@@ -346,8 +401,12 @@ def is_fcfs_user(user: Optional[User], policy: Dict[str, Any]) -> bool:
     return group_match or rank_match
 
 
-def get_quota_for_date(date_str: str, policy: Dict[str, Any]) -> int:
-    overrides = policy.get("date_overrides") or {}
+def get_quota_for_date(
+    date_str: str,
+    policy: Dict[str, Any],
+    date_overrides: Optional[Dict[str, int]] = None,
+) -> int:
+    overrides = date_overrides if date_overrides is not None else (policy.get("date_overrides") or {})
     if date_str in overrides:
         return max(0, int(overrides[date_str]))
     return max(0, int(policy.get("daily_quota", 3)))
@@ -408,6 +467,7 @@ def get_monthly_quota_status(
     각 날짜별로 pick()으로 선택된 정책 레코드를 적용해 과거/현재/미래 정원이 공존합니다.
     """
     policy_rows = get_all_dayoff_policies(db)
+    date_overrides = get_date_overrides(db)
     _, last_day = calendar.monthrange(year, month)
     start_d = date(year, month, 1)
     end_d = date(year, month, last_day)
@@ -445,8 +505,7 @@ def get_monthly_quota_status(
     for day_num in range(1, last_day + 1):
         d_str = f"{year:04d}-{month:02d}-{day_num:02d}"
         d_policy = day_policies[d_str]
-        overrides = d_policy.get("date_overrides") or {}
-        quota = get_quota_for_date(d_str, d_policy)
+        quota = get_quota_for_date(d_str, d_policy, date_overrides)
         approved_cnt = counts_by_date.get(d_str, 0)
         remaining = max(0, quota - approved_cnt)
         days_map[d_str] = {
@@ -454,7 +513,7 @@ def get_monthly_quota_status(
             "quota": quota,
             "policy_id": d_policy.get("id"),
             "effective_date": d_policy.get("effective_date"),
-            "is_override": d_str in overrides,
+            "is_override": d_str in date_overrides,
             "approved_count": approved_cnt,
             "remaining": remaining,
             "is_full": approved_cnt >= quota,
@@ -496,6 +555,7 @@ def create_dayoff_list(db: Session, dayoff_create: DayOffCreate, user_id: int):
         raise HTTPException(status_code=404, detail="사용자 정보를 찾을 수 없습니다.")
 
     policy_rows = get_all_dayoff_policies(db)
+    date_overrides = get_date_overrides(db)
     sorted_dates = sorted(list(set(dayoff_create.dates)))
     start_str = sorted_dates[0].strftime('%Y%m%d')
     end_str = sorted_dates[-1].strftime('%Y%m%d')
@@ -549,7 +609,7 @@ def create_dayoff_list(db: Session, dayoff_create: DayOffCreate, user_id: int):
 
         if fcfs_mode:
             d_str = date_item.strftime('%Y-%m-%d')
-            quota = get_quota_for_date(d_str, day_policy)
+            quota = get_quota_for_date(d_str, day_policy, date_overrides)
             current_cnt = get_fcfs_approved_count_for_date(db, date_item, day_policy)
             if current_cnt >= quota:
                 raise HTTPException(

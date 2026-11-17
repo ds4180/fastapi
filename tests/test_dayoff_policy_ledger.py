@@ -56,7 +56,7 @@ def test_append_only_copy_and_month_coexistence(db_session):
     assert p_nov["id"] == 1
     assert p_nov["daily_quota"] == 3
     assert p_nov["fcfs_groups"] == ["운전직", "운수1팀"]
-    assert p_nov["date_overrides"] == {"2026-11-25": 2}
+    assert dayoff_crud.get_date_overrides(db_session) == {"2026-11-25": 2}
 
     # 2. 12월 1일부터 정원 5명 + etc 확장필드 추가 (effective_date, daily_quota, etc만 넘김)
     saved = dayoff_crud.save_dayoff_policy(
@@ -74,7 +74,6 @@ def test_append_only_copy_and_month_coexistence(db_session):
     assert saved["classify_mode"] == "BOTH"
     assert saved["fcfs_groups"] == ["운전직", "운수1팀"]
     assert saved["fcfs_ranks"] == [1]
-    assert saved["date_overrides"] == {"2026-11-25": 2}
     assert saved["etc"] == {"notice": "12월 성수기 증원", "allow_weekend": True}
 
     # 3. 11월과 12월 달력 정원 동시 공존 검증
@@ -85,16 +84,13 @@ def test_append_only_copy_and_month_coexistence(db_session):
     assert dec_status["days"]["2026-12-05"]["quota"] == 5
 
 
-def test_edit_and_soft_delete_fallback(db_session):
-    """[검증 2] 특정 행 수정 및 삭제 시 pick()이 직전 유효 행을 자동 선택"""
+def test_soft_delete_fallback(db_session):
+    """[검증 2] 예약 삭제(소프트 삭제) 시 pick()이 직전 유효 행을 자동 선택"""
     r2 = dayoff_crud.save_dayoff_policy(
         db_session,
         {"effective_date": date(2026, 12, 1), "daily_quota": 5, "max_monthly_count": 2},
     )
-    # 오타 수정: daily_quota 5 -> 6
-    edited = dayoff_crud.update_dayoff_policy_row(db_session, r2["id"], {"daily_quota": 6})
-    assert edited["daily_quota"] == 6
-    assert dayoff_crud.get_dayoff_policy(db_session, date(2026, 12, 10))["daily_quota"] == 6
+    assert dayoff_crud.get_dayoff_policy(db_session, date(2026, 12, 10))["daily_quota"] == 5
 
     # r2 삭제 -> pick()이 자동으로 id=1(정원 3)로 복귀
     assert dayoff_crud.delete_dayoff_policy_row(db_session, r2["id"]) is True
@@ -238,3 +234,45 @@ def test_advance_window_min_max_days(db_session):
     )
     assert copied["min_advance_days"] == 2
     assert copied["max_advance_days"] == 5
+
+
+def test_single_reserved_policy_and_date_override_separation(db_session):
+    """[검증 5] 미래 예약 최대 1건 유지, 예약 중 오늘 저장 차단, 예외 정원 완전 분리"""
+    today = date.today()
+    future_1 = today + timedelta(days=5)
+    future_2 = today + timedelta(days=10)
+
+    # 1. 첫 미래 예약 등록
+    r1 = dayoff_crud.save_dayoff_policy(
+        db_session,
+        {"effective_date": future_1, "daily_quota": 5},
+    )
+    assert dayoff_crud.get_reserved_dayoff_policy(db_session, today)["id"] == r1["id"]
+
+    # 2. 예약이 이미 있을 때 오늘 적용 저장 시도 -> 409 차단
+    with pytest.raises(HTTPException) as conflict_exc:
+        dayoff_crud.save_dayoff_policy(
+            db_session,
+            {"effective_date": today, "daily_quota": 4},
+        )
+    assert conflict_exc.value.status_code == 409
+
+    # 3. 미래 날짜로 다시 저장 시 기존 예약은 자동 소프트 삭제되고 새 레코드 1건만 유지
+    r2 = dayoff_crud.save_dayoff_policy(
+        db_session,
+        {"effective_date": future_2, "daily_quota": 6},
+    )
+    assert r2["id"] != r1["id"]
+    active_rows = dayoff_crud.get_all_dayoff_policies(db_session)
+    future_rows = [r for r in active_rows if r.effective_date > today]
+    assert len(future_rows) == 1
+    assert future_rows[0].id == r2["id"]
+
+    # 4. 특정일 예외 정원 수정 시 DayOffPolicy 행은 전혀 늘어나지 않고 독립 저장됨
+    before_count = len(active_rows)
+    ov_date = str(future_2 + timedelta(days=1))
+    ov_res = dayoff_crud.update_date_overrides(db_session, [ov_date], 2)
+    after_rows = dayoff_crud.get_all_dayoff_policies(db_session)
+    assert len(after_rows) == before_count
+    assert ov_res[ov_date] == 2
+    assert dayoff_crud.get_date_overrides(db_session)[ov_date] == 2

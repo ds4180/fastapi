@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from database import get_db
+from core.audit import safe_log_audit
 from domain.user.user_router import get_current_user # To get current user and its ID
 from . import schemas # Assuming schemas.py will define PushSubscriptionCreate
 from . import push_service # Now importing the service
@@ -24,7 +25,16 @@ async def subscribe_push_notification(
     saved_subscription = await push_service.save_subscription(
         db, subscription_data, user_id=current_user.id
     )
-    print(f"Received push subscription request for user {current_user.id}: {subscription_data.dict()}")
+    safe_log_audit(
+        db=db,
+        app_id="pushs",
+        log_type="CHANGE",
+        action="PUSH_SUBSCRIBE",
+        title="푸시 알림 구독 등록",
+        user=current_user,
+        resource_type="push_subscription",
+        resource_id=str(saved_subscription.id),
+    )
     return {"message": "Subscription successful", "status": "active", "id": saved_subscription.id}
 
 
@@ -57,5 +67,14 @@ async def send_all_push_notifications(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="관리자 권한이 필요합니다.")
         
     result = await push_service.send_to_all_subscribers(db)
-    print("Received request to send push notifications to all!")
+    safe_log_audit(
+        db=db,
+        app_id="pushs",
+        log_type="CHANGE",
+        action="PUSH_BROADCAST",
+        title=f"전체 푸시 알림 발송 ({result.get('sent', 0)}건)",
+        user=current_user,
+        resource_type="pushs",
+        message=f"관리자 '{current_user.username}'이(가) 전체 푸시 알림을 발송했습니다. (발송: {result.get('sent', 0)}건)",
+    )
     return {"message": "Broadcast initiated", "sent": result.get("sent", 0)}

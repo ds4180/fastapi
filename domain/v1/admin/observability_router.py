@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 
 from database import get_db
-from models import User, UserSession, AuditLog
+from models import User, UserSession, AuditLog, AppRegistry
 from core.deps import require_app_permission
 from core.audit import safe_log_audit
 from core.session import sync_expired_sessions
@@ -178,6 +178,19 @@ def _get_summary_stats(db: Session) -> ObservabilitySummaryRes:
 
     today_error_alert = today_errors + today_security
 
+    # 6. 등록된 AppRegistry + 실제 AuditLog에 기록된 app_id 통합 목록
+    app_name_map = {}
+    for reg_id, reg_name in db.query(AppRegistry.app_id, AppRegistry.name).all():
+        if reg_id:
+            app_name_map[str(reg_id).strip()] = str(reg_name or reg_id).strip()
+    for (log_app_id,) in db.query(AuditLog.app_id).distinct().all():
+        if log_app_id:
+            aid = str(log_app_id).strip()
+            if aid and aid not in app_name_map:
+                app_name_map[aid] = aid
+
+    app_options = [{"id": aid, "name": app_name_map[aid]} for aid in sorted(app_name_map.keys())]
+
     return ObservabilitySummaryRes(
         active_sessions_count=active_sessions,
         today_logins_count=today_logins,
@@ -189,6 +202,7 @@ def _get_summary_stats(db: Session) -> ObservabilitySummaryRes:
         today_access_count=today_logins,
         today_change_count=today_changes,
         today_error_alert_count=today_error_alert,
+        app_options=app_options,
     )
 
 

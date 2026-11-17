@@ -193,7 +193,19 @@ def post_create(
             raise HTTPException(status_code=403, detail="이 게시판은 글 작성이 비활성화되어 있습니다.")
         
     # 4. 생성 실행
-    return board_crud.create_post(db, board_id=board.id, user_id=current_user.id, post_in=post_in)
+    created = board_crud.create_post(db, board_id=board.id, user_id=current_user.id, post_in=post_in)
+    from core.audit import safe_log_audit
+    safe_log_audit(
+        db=db,
+        app_id="boards",
+        log_type="CHANGE",
+        action="POST_CREATE",
+        title=f"[{board.name}] 게시글 작성: {post_in.title}",
+        user=current_user,
+        resource_type="board_post",
+        resource_id=str(getattr(created, "id", "")),
+    )
+    return created
 
 @router.put("/update/{post_id}")
 def post_update(
@@ -216,7 +228,19 @@ def post_update(
     if db_post.user_id != current_user.id and user_rank < 4:
         raise HTTPException(status_code=403, detail="본인이 작성한 글만 수정할 수 있습니다.")
         
-    return board_crud.update_post(db, db_post=db_post, post_in=post_in)
+    updated = board_crud.update_post(db, db_post=db_post, post_in=post_in)
+    from core.audit import safe_log_audit
+    safe_log_audit(
+        db=db,
+        app_id="boards",
+        log_type="CHANGE",
+        action="POST_UPDATE",
+        title=f"게시글 수정 (#{post_id})",
+        user=current_user,
+        resource_type="board_post",
+        resource_id=str(post_id),
+    )
+    return updated
 
 @router.delete("/delete/{post_id}")
 def post_delete(
@@ -239,6 +263,17 @@ def post_delete(
         raise HTTPException(status_code=403, detail="본인이 작성한 글만 삭제할 수 있습니다.")
         
     board_crud.delete_post(db, db_post=db_post)
+    from core.audit import safe_log_audit
+    safe_log_audit(
+        db=db,
+        app_id="boards",
+        log_type="CHANGE",
+        action="POST_DELETE",
+        title=f"게시글 삭제 (#{post_id})",
+        user=current_user,
+        resource_type="board_post",
+        resource_id=str(post_id),
+    )
     return {"message": "success"}
 
 @router.get("/landing", response_model=board_schema.LandingPageResponse)

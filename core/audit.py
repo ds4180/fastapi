@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import Optional, Any, Union, TYPE_CHECKING
 from sqlalchemy.orm import Session
@@ -42,6 +43,35 @@ logger = logging.getLogger("core.audit")
 # 코어 계층이 상위 도메인 앱(Watchdog 등)을 직접 역참조하지 않도록
 # 콜백 훅을 등록받아 안전하게 실행합니다.
 SECURITY_AUDIT_HOOKS: list = []
+
+# 요청 단위 자동 감사 추적 컨텍스트 (require_app_permission 통과 후 미기록 쓰기 요청 자동 보완)
+_audit_ctx: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("_audit_ctx", default=None)
+
+
+def init_audit_context() -> contextvars.Token:
+    return _audit_ctx.set({"app_id": None, "user_id": None, "logged": False})
+
+
+def set_audit_target(app_id: Optional[str], user_id: Optional[int] = None) -> None:
+    ctx = _audit_ctx.get()
+    if ctx is not None and app_id:
+        ctx["app_id"] = app_id
+        if user_id is not None:
+            ctx["user_id"] = user_id
+
+
+def mark_audit_logged() -> None:
+    ctx = _audit_ctx.get()
+    if ctx is not None:
+        ctx["logged"] = True
+
+
+def get_audit_context() -> Optional[dict]:
+    return _audit_ctx.get()
+
+
+def reset_audit_context(token: contextvars.Token) -> None:
+    _audit_ctx.reset(token)
 
 
 def register_security_audit_hook(callback) -> None:
@@ -133,6 +163,8 @@ def log_audit(
     [전사 통합 감사로그 표준 기록 함수]
     """
     from models.audit import AuditLog
+
+    mark_audit_logged()
 
     # 1. 사용자 신분 스냅샷
     user_summary = get_user_summary(user)
