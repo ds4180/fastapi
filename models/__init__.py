@@ -55,6 +55,13 @@ from models.alert import Alert
 from models.page import Page
 from models.media import MediaAsset
 from models.push import PushSubscription
+from models.backup import BackupPrintLog
+from models.blackbox import (
+    BlackboxDevice,
+    BlackboxVideo,
+    BlackboxUsage,
+    BlackboxRequest,
+)
 
 # 📌 8. 전역 감사로그 및 보안 관제 코어
 from models.audit import AuditLog, SENSITIVE_FIELDS
@@ -70,6 +77,7 @@ __all__ = [
     "AuditMixin",
     # Audit & Observability
     "AuditLog",
+    "BackupPrintLog",
     "SENSITIVE_FIELDS",
     # User & Group
     "User",
@@ -104,6 +112,10 @@ __all__ = [
     "Page",
     "MediaAsset",
     "PushSubscription",
+    "BlackboxDevice",
+    "BlackboxVideo",
+    "BlackboxUsage",
+    "BlackboxRequest",
     "AuditLog",
     "SENSITIVE_FIELDS",
     "MiniappItem",

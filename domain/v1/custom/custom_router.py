@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from models import RouteMaster, RouteTimetable, Dispatch
+from models import RouteMaster, RouteTimetable, Dispatch, User
+from core.deps import get_current_user
 from domain.v1.admin import admin_schema
 from domain.v1.admin.admin_router import load_drivers_metadata, load_vehicles_metadata
 from typing import List, Optional
@@ -26,6 +27,84 @@ def verify_timeline_access(target_date: date, db: Session):
             status_code=403,
             detail="배차 정보는 오늘 기준 +3일부터 +7일까지의 기간만 조회 가능합니다."
         )
+
+
+@router.get("/my-dispatch-briefing")
+def get_my_dispatch_briefing(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    로그인한 운전원 본인의 당일 및 명일(17시 이후) 배차 브리핑 조회
+    - 본인(real_name/username)에게 배정된 당일·명일 배차만 최소 정보로 반환합니다.
+    """
+    now = datetime.now()
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    is_after_17 = now.hour >= 17
+    now_hhmm = now.strftime("%H:%M")
+
+    candidate_names = {
+        str(n).strip()
+        for n in (getattr(current_user, "real_name", None), getattr(current_user, "username", None))
+        if n and str(n).strip()
+    }
+
+    def _serialize(rows: List[Dispatch]) -> List[dict]:
+        items = []
+        for d in rows:
+            tt = d.timetable
+            s_time = (d.start_time or (tt.start_time if tt else "") or "").strip()
+            items.append({
+                "id": d.id,
+                "route_name": tt.route_name if tt else "-",
+                "seq": tt.seq if tt else 0,
+                "vehicle_no": d.vehicle_no or "-",
+                "start_time": s_time,
+                "end_time": (tt.end_time if tt else "") or "",
+                "start_location": (tt.start_location if tt else "") or "-",
+                "end_location": (tt.end_location if tt else "") or "-",
+                "status": d.status or "DRAFT",
+            })
+        items.sort(key=lambda x: (x["start_time"], x["seq"]))
+        return items
+
+    today_dispatches = []
+    tomorrow_dispatches = []
+
+    if candidate_names:
+        today_rows = (
+            db.query(Dispatch)
+            .options(joinedload(Dispatch.timetable))
+            .filter(
+                Dispatch.target_date == today,
+                Dispatch.driver_name.in_(candidate_names),
+            )
+            .all()
+        )
+        today_dispatches = _serialize(today_rows)
+
+        if is_after_17:
+            tomorrow_rows = (
+                db.query(Dispatch)
+                .options(joinedload(Dispatch.timetable))
+                .filter(
+                    Dispatch.target_date == tomorrow,
+                    Dispatch.driver_name.in_(candidate_names),
+                )
+                .all()
+            )
+            tomorrow_dispatches = _serialize(tomorrow_rows)
+
+    return {
+        "today": str(today),
+        "tomorrow": str(tomorrow),
+        "now_hhmm": now_hhmm,
+        "is_after_17": is_after_17,
+        "driver_name": getattr(current_user, "real_name", None) or current_user.username,
+        "today_dispatches": today_dispatches,
+        "tomorrow_dispatches": tomorrow_dispatches,
+    }
 
 
 @router.get("/dispatch/active-routes", response_model=List[dict])
