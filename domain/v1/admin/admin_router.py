@@ -1347,7 +1347,7 @@ def delete_push_subscription(
 
 # --- DayOff Management (전체 휴무 관리 & 직군별 선착순·정원 정책) ---
 
-from domain.dayoff.dayoff_crud import (
+from domain.dayoff.dayoff_policy_service import (
     get_dayoff_policy,
     get_reserved_dayoff_policy,
     get_date_overrides,

@@ -56,6 +56,7 @@ from models.page import Page
 from models.media import MediaAsset
 from models.push import PushSubscription
 from models.backup import BackupPrintLog
+from models.schedule import Schedule
 from models.blackbox import (
     BlackboxDevice,
     BlackboxVideo,
@@ -112,6 +113,7 @@ __all__ = [
     "Page",
     "MediaAsset",
     "PushSubscription",
+    "Schedule",
     "BlackboxDevice",
     "BlackboxVideo",
     "BlackboxUsage",

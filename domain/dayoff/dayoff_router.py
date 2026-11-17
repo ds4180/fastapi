@@ -6,7 +6,7 @@ from starlette import status
 
 from database import get_db
 from core.audit import safe_log_audit
-from domain.dayoff import dayoff_schema, dayoff_crud
+from domain.dayoff import dayoff_schema, dayoff_crud, dayoff_policy_service
 from domain.user.user_router import get_current_user
 from models import User
 
@@ -27,7 +27,7 @@ def dayoff_quota_status(
     now = datetime.now()
     y = year if year and 1970 <= year <= 2100 else now.year
     m = month if month and 1 <= month <= 12 else now.month
-    return dayoff_crud.get_monthly_quota_status(db, y, m, current_user)
+    return dayoff_policy_service.get_monthly_quota_status(db, y, m, current_user)
 
 @router.post("/create", status_code=status.HTTP_204_NO_CONTENT)
 def dayoff_create(
