@@ -9,12 +9,8 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, JSON
-from sqlalchemy.dialects.postgresql import JSONB
-from models.base import Base
-
-# 🌐 크로스 DB 호환 (운영: PostgreSQL JSONB, 테스트: SQLite JSON)
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean
+from models.base import Base, JSONType
 
 
 class Page(Base):

@@ -9,11 +9,8 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, JSON
-from sqlalchemy.dialects.postgresql import JSONB
-from models.base import Base
-
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from sqlalchemy import Column, Integer, String, DateTime
+from models.base import Base, JSONType
 
 
 class BackupPrintLog(Base):

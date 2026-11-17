@@ -10,13 +10,9 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, BigInteger, Integer, String, Text, DateTime, ForeignKey, Index, JSON, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, BigInteger, Integer, String, Text, DateTime, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
-from models.base import Base, TimestampMixin
-
-# 🌐 크로스 DB 호환 (운영: PostgreSQL JSONB, 테스트: SQLite JSON)
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from models.base import Base, TimestampMixin, JSONType
 
 
 class MiniappItem(Base, TimestampMixin):

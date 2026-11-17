@@ -31,7 +31,7 @@ class BlackboxDevice(Base):
     """차량별 블랙박스 본체 스펙 모델"""
     __tablename__ = "blackbox_devices"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     vehicle_no = Column(String(50), nullable=False, index=True)
     manufacturer = Column(String(100), nullable=True)
     model_name = Column(String(100), nullable=True)
@@ -60,7 +60,7 @@ class BlackboxVideo(Base):
     """블랙박스 비디오 장부 및 현재 위치 모델"""
     __tablename__ = "blackbox_videos"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     video_no = Column(String(50), nullable=False, index=True)      # 고유 관리번호 (예: BB-0001)
     display_num = Column(String(3), nullable=False, index=True)    # 육안 식별 번호 (0~999, 최대 3자리)
     manufacturer = Column(String(100), nullable=True)
@@ -101,7 +101,7 @@ class BlackboxUsage(Base):
     """비디오 ↔ 차량 사용기간 이력 테이블 (역조회용)"""
     __tablename__ = "blackbox_usages"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     video_id = Column(Integer, ForeignKey("blackbox_videos.id", ondelete="CASCADE"), nullable=False, index=True)
     video_no = Column(String(50), nullable=False, index=True)
     display_num = Column(String(3), nullable=False)
@@ -120,7 +120,7 @@ class BlackboxRequest(Base):
     """운전기사 블랙박스 비디오 교체/확인 요청 모델"""
     __tablename__ = "blackbox_requests"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     requester_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     requester_name = Column(String(100), nullable=False)
     vehicle_no = Column(String(50), nullable=False, index=True)

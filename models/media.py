@@ -9,13 +9,9 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, JSON
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import JSONB
-from models.base import Base
-
-# 🌐 크로스 DB 호환 (운영: PostgreSQL JSONB, 테스트: SQLite JSON)
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from models.base import Base, JSONType
 
 
 class MediaAsset(Base):

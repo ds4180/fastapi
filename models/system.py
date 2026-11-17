@@ -9,20 +9,16 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship, backref
-from sqlalchemy.dialects.postgresql import JSONB
-from models.base import Base
-
-# SQLite와 PostgreSQL 크로스 호환 JSON 타입 정의
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from models.base import Base, JSONType
 
 
 class SystemConfig(Base):
     """시스템 전역 동적 설정 테이블 (JSONB 저장)"""
     __tablename__ = "system_config"
 
-    key = Column(String, primary_key=True, index=True)
+    key = Column(String, primary_key=True)
     value = Column(JSONType, nullable=False)
     description = Column(String, nullable=True)
     updated_date = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -32,7 +28,7 @@ class AppRegistry(Base):
     """시스템에 등록된 앱(플러그인) 목록 메타데이터"""
     __tablename__ = "app_registry"
 
-    app_id = Column(String, primary_key=True, index=True) # 앱 고유 식별자 (예: 'board', 'dispatch')
+    app_id = Column(String, primary_key=True) # 앱 고유 식별자 (예: 'board', 'dispatch')
     name = Column(String, nullable=False)                 # 앱 이름
     title = Column(String, nullable=True)                 # UI 표시용 공식 명칭
     description = Column(Text, nullable=True)             # 요약 설명

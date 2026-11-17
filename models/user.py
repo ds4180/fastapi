@@ -11,13 +11,9 @@
 
 from datetime import datetime
 from typing import Optional, List, Set
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import JSONB
-from models.base import Base
-
-# 🌐 크로스 DB 호환 (운영: PostgreSQL JSONB, 테스트: SQLite JSON)
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from models.base import Base, JSONType
 
 
 class Group(Base):
@@ -143,7 +139,7 @@ class UserSession(Base):
     __tablename__ = "user_session"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     session_key = Column(String, unique=True, nullable=False, index=True)
     device_category = Column(String, nullable=False, index=True) # MOBILE, DESKTOP
     status = Column(String, default="ACTIVE", index=True)        # ACTIVE, EXPIRED, KICKED_OUT

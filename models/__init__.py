@@ -14,7 +14,7 @@
 """
 
 # 📌 1. 최소 척추 (Base & Mixin)
-from models.base import Base, TimestampMixin, AuditMixin
+from models.base import Base, TimestampMixin, AuditMixin, JSONType
 
 # 📌 2. 인증 및 사용자/그룹 코어
 from models.user import User, UserProfile, UserSession, Group

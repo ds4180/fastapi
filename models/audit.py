@@ -9,12 +9,8 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, BigInteger, Integer, String, Text, DateTime, ForeignKey, Index, JSON
-from sqlalchemy.dialects.postgresql import JSONB
-from models.base import Base
-
-# 🌐 크로스 데이터베이스 호환: PostgreSQL에서는 고성능 바이너리 JSONB, 테스트 SQLite에서는 표준 JSON
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from sqlalchemy import Column, BigInteger, Integer, String, Text, DateTime, ForeignKey, Index
+from models.base import Base, JSONType
 
 # 🛡️ 개인정보보호 및 보안을 위한 민감 필드 마스킹 목록
 SENSITIVE_FIELDS = {

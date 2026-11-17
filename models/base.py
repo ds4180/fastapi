@@ -13,8 +13,12 @@
 
 from datetime import datetime
 from typing import Set
-from sqlalchemy import Column, DateTime, Integer
+from sqlalchemy import Column, DateTime, Integer, JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
+
+# 🌐 크로스 데이터베이스 호환: PostgreSQL에서는 바이너리 JSONB, SQLite(테스트)에서는 표준 JSON
+JSONType = JSON().with_variant(JSONB, "postgresql")
 
 
 class TimestampMixin:

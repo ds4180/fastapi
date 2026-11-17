@@ -51,19 +51,7 @@ async def lifespan(app: FastAPI):
     
     # 0. 자율신경계 필수 정기 태스크 및 시스템 앱 자동 시드 (Bootstrap)
     try:
-        from sqlalchemy import inspect as sa_inspect, text as sa_text
         from database import SessionLocal
-        from models.miniapp import MiniappRead
-        from models.dayoff import DayOffPolicy
-        # 📌 [방안 B] 미니앱 1:N 확인 서명 및 휴무 정책 이력 테이블 자동 보증
-        MiniappRead.__table__.create(bind=engine, checkfirst=True)
-        DayOffPolicy.__table__.create(bind=engine, checkfirst=True)
-        existing_policy_cols = {c["name"] for c in sa_inspect(engine).get_columns("dayoff_policy")}
-        with engine.begin() as conn:
-            for col_name in ("min_advance_days", "max_advance_days"):
-                if col_name not in existing_policy_cols:
-                    conn.execute(sa_text(f"ALTER TABLE dayoff_policy ADD COLUMN {col_name} INTEGER NOT NULL DEFAULT 0"))
-
         from domain.system.task_service import bootstrap_default_cron_tasks
         from domain.system.app_service import bootstrap_system_apps
         from core.audit import register_security_audit_hook
@@ -73,7 +61,7 @@ async def lifespan(app: FastAPI):
         register_security_audit_hook(check_and_alert_security_violation)
 
         with SessionLocal() as db:
-            from domain.dayoff.dayoff_crud import ensure_initial_dayoff_policy
+            from domain.dayoff.dayoff_policy_service import ensure_initial_dayoff_policy
             ensure_initial_dayoff_policy(db)
             seeded = bootstrap_default_cron_tasks(db)
             if seeded > 0:
@@ -81,15 +69,6 @@ async def lifespan(app: FastAPI):
             app_seed = bootstrap_system_apps(db)
             if app_seed["created"] > 0:
                 print(f"✨ 시스템 앱 {app_seed['created']}건이 성공적으로 등록되었습니다.")
-            
-            # 🧹 [과거 레거시 정화] 관제 분리 원칙에 따라 피드 내 과거 보안 경보 레코드 안전 삭제
-            from models.miniapp import MiniappItem
-            cleaned_alarms = db.query(MiniappItem).filter(
-                MiniappItem.title.like("%보안 경보%")
-            ).delete(synchronize_session=False)
-            if cleaned_alarms > 0:
-                db.commit()
-                print(f"🧹 피드 내 레거시 보안 경보 레코드 {cleaned_alarms}건이 영구 정화되었습니다.")
     except Exception as e:
         print(f"⚠️ 시스템 부트스트랩 오류: {e}")
 

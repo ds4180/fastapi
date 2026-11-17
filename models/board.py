@@ -9,13 +9,9 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Table, UniqueConstraint, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Table, UniqueConstraint
 from sqlalchemy.orm import relationship, backref
-from sqlalchemy.dialects.postgresql import JSONB
-from models.base import Base
-
-# SQLite와 PostgreSQL 크로스 호환 JSON 타입 정의
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from models.base import Base, JSONType
 
 # --- N:M 다대다 조인 테이블 ---
 post_tag = Table(
@@ -61,8 +57,8 @@ class Post(Base):
     __tablename__ = "post"
 
     id = Column(Integer, primary_key=True)
-    board_id = Column(Integer, ForeignKey("board_config.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    board_id = Column(Integer, ForeignKey("board_config.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String, nullable=False)
     content = Column(Text, nullable=True)
     content_json = Column(JSONType, nullable=False, default=dict) # TipTap 에디터 JSON 데이터
@@ -72,7 +68,7 @@ class Post(Base):
     view_count = Column(Integer, default=0)
     create_date = Column(DateTime, default=datetime.now)
     modify_date = Column(DateTime, nullable=True)
-    is_deleted = Column(Boolean, default=False, nullable=False)
+    is_deleted = Column(Boolean, default=False, nullable=False, index=True)
     delete_date = Column(DateTime, nullable=True)
 
     user = relationship("User", back_populates="posts")
@@ -109,8 +105,8 @@ class Comment(Base):
     __tablename__ = "comment"
 
     id = Column(Integer, primary_key=True)
-    post_id = Column(Integer, ForeignKey("post.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    post_id = Column(Integer, ForeignKey("post.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     parent_id = Column(Integer, ForeignKey("comment.id"), nullable=True)
     content = Column(Text, nullable=False)
     create_date = Column(DateTime, default=datetime.now)

@@ -9,12 +9,9 @@
 """
 
 from datetime import datetime, date
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean, Index, JSON
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Date, Boolean, Index
 from sqlalchemy.orm import relationship
-from models.base import Base
-
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from models.base import Base, JSONType
 
 
 class DayOff(Base):
@@ -22,10 +19,10 @@ class DayOff(Base):
     __tablename__ = "dayoff"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    date = Column(Date, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    date = Column(Date, nullable=False, index=True)
     type = Column(String, nullable=False) # 휴무 종류
-    status = Column(String, default="REQUESTED") # REQUESTED, APPROVED, REJECTED
+    status = Column(String, default="REQUESTED", index=True) # REQUESTED, APPROVED, REJECTED
     memo = Column(Text, nullable=True)
     
     group_id = Column(String, nullable=True, index=True)

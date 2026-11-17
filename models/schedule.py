@@ -17,20 +17,16 @@ from sqlalchemy import (
     DateTime,
     Boolean,
     ForeignKey,
-    JSON,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
-from models.base import Base
-
-JSONType = JSON().with_variant(JSONB, "postgresql")
+from models.base import Base, JSONType
 
 
 class Schedule(Base):
     """통합 일정 모델"""
     __tablename__ = "schedules"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
     title = Column(String(200), nullable=False)

@@ -42,7 +42,7 @@ class RouteTimetable(Base):
     __tablename__ = "route_timetable"
 
     id = Column(Integer, primary_key=True)
-    route_master_id = Column(Integer, ForeignKey("route_master.id", ondelete="CASCADE"), nullable=False)
+    route_master_id = Column(Integer, ForeignKey("route_master.id", ondelete="CASCADE"), nullable=False, index=True)
     route_name = Column(String(100), nullable=False)
     seq = Column(Integer, nullable=False)            # 운행 순번 (1회차, 2회차...)
     start_time = Column(String(10), nullable=False)  # HH:MM
@@ -67,7 +67,7 @@ class Dispatch(Base):
 
     id = Column(Integer, primary_key=True)
     target_date = Column(Date, nullable=False, index=True)
-    timetable_id = Column(Integer, ForeignKey("route_timetable.id", ondelete="CASCADE"), nullable=False)
+    timetable_id = Column(Integer, ForeignKey("route_timetable.id", ondelete="CASCADE"), nullable=False, index=True)
     
     driver_name = Column(String(50), nullable=True)  # 배정 기사명 스냅샷
     vehicle_no = Column(String(50), nullable=True)   # 배정 차량번호 스냅샷
