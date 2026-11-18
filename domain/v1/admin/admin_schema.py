@@ -543,3 +543,43 @@ class DispatchSavePayload(BaseModel):
     rows: List[DispatchRowInput] = []
 
 
+class RouteRosterAppend(BaseModel):
+    """
+    노선 로번 Append-Only 버전 추가 요청 스키마
+    - 기존 과거/미래 버전을 덮어쓰지 않고 새로운 날짜 구간 버전을 추가합니다.
+    """
+    route_name: str
+    route_type: str = "REGULAR"
+    start_date: date
+    end_date: Optional[date] = None
+    vehicle_count: int = 0
+    version: Optional[str] = None
+    is_regular_duty: bool = False
+    timetables: List[RouteTimetableCreate] = []
+
+
+class RouteSegmentItem(BaseModel):
+    seq: int
+    segment_name: str
+    start_stop: Optional[str] = None
+    end_stop: Optional[str] = None
+    duration_min: int = 0
+    distance_km: Optional[str] = None
+    memo: Optional[str] = None
+
+
+class RouteSegmentBulkSave(BaseModel):
+    route_name: str
+    route_master_id: Optional[int] = None
+    segments: List[RouteSegmentItem] = []
+
+
+class RouteSegmentSchema(RouteSegmentItem):
+    id: int
+    route_name: str
+    route_master_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+

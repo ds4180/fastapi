@@ -4,7 +4,7 @@ from database import get_db
 from models import (
     User, UserProfile, BoardConfig, Post, Menu, SystemConfig, AppRegistry,
     DayOff, Page, ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance,
-    RouteMaster, RouteTimetable, SystemTask, AuditLog, UserSession, MiniappItem
+    RouteMaster, RouteTimetable, RouteSegment, SystemTask, AuditLog, UserSession, MiniappItem
 )
 from core.deps import (
     get_current_user,
@@ -1846,6 +1846,118 @@ def delete_route_master(
         db.rollback()
         print(f"❌ [AdminRouteMaster] Error deleting route master: {e}")
         raise HTTPException(status_code=500, detail="노선 정보를 삭제하는 중 오류가 발생하였습니다.")
+
+
+@router.post("/route-masters/append-roster")
+def append_route_roster(
+    payload: admin_schema.RouteRosterAppend,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_route_master_admin_write),
+):
+    """
+    [Append-Only] 노선의 날짜별 로번(시간표 버전)을 덮어쓰기 없이 추가합니다.
+    - 기존 과거/미래 이력은 절대 삭제하지 않고 보존합니다.
+    - 새 버전의 start_date 직전 버전이 열려 있거나 기간이 겹치면 end_date = start_date - 1일로 자동 마감합니다.
+    """
+    try:
+        existing_versions = (
+            db.query(RouteMaster)
+            .filter(RouteMaster.route_name == payload.route_name)
+            .order_by(RouteMaster.start_date.asc(), RouteMaster.id.asc())
+            .all()
+        )
+
+        # 겹치는 이전 버전 마감 처리 (과거 이력 보존)
+        prev_day = payload.start_date - timedelta(days=1)
+        for prev in existing_versions:
+            if prev.start_date < payload.start_date and (prev.end_date is None or prev.end_date >= payload.start_date):
+                prev.end_date = prev_day
+
+        next_version = (payload.version or "").strip() or f"v{len(existing_versions) + 1}"
+
+        db_master = RouteMaster(
+            route_name=payload.route_name,
+            route_type=payload.route_type,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            vehicle_count=payload.vehicle_count,
+            version=next_version,
+            is_regular_duty=payload.is_regular_duty,
+        )
+        db.add(db_master)
+        db.flush()
+
+        for t in payload.timetables:
+            db.add(
+                RouteTimetable(
+                    route_master_id=db_master.id,
+                    route_name=payload.route_name,
+                    seq=t.seq,
+                    start_time=t.start_time,
+                    end_time=t.end_time,
+                    start_location=t.start_location,
+                    end_location=t.end_location,
+                    version=next_version,
+                    start_garage=t.start_garage,
+                    end_garage=t.end_garage,
+                    is_regular_duty=t.is_regular_duty,
+                )
+            )
+
+        db.commit()
+        db.refresh(db_master)
+        return {"message": "success", "id": db_master.id, "version": next_version}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [AdminRouteMaster] Error appending roster: {e}")
+        raise HTTPException(status_code=500, detail="로번 버전 추가 중 오류가 발생하였습니다.")
+
+
+@router.get("/route-segments", response_model=List[admin_schema.RouteSegmentSchema])
+def list_route_segments(
+    route_name: Optional[str] = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_route_master_admin),
+):
+    q = db.query(RouteSegment)
+    if route_name:
+        q = q.filter(RouteSegment.route_name == route_name)
+    return q.order_by(RouteSegment.route_name.asc(), RouteSegment.seq.asc()).all()
+
+
+@router.put("/route-segments", response_model=List[admin_schema.RouteSegmentSchema])
+def save_route_segments(
+    payload: admin_schema.RouteSegmentBulkSave,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_route_master_admin_write),
+):
+    try:
+        db.query(RouteSegment).filter(RouteSegment.route_name == payload.route_name).delete()
+        created = []
+        for idx, seg in enumerate(payload.segments, start=1):
+            row = RouteSegment(
+                route_name=payload.route_name,
+                route_master_id=payload.route_master_id,
+                seq=seg.seq or idx,
+                segment_name=seg.segment_name,
+                start_stop=seg.start_stop,
+                end_stop=seg.end_stop,
+                duration_min=max(0, int(seg.duration_min or 0)),
+                distance_km=seg.distance_km,
+                memo=seg.memo,
+            )
+            db.add(row)
+            created.append(row)
+        db.commit()
+        for row in created:
+            db.refresh(row)
+        return created
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [AdminRouteSegments] Error saving segments: {e}")
+        raise HTTPException(status_code=500, detail="구간 시간 저장 중 오류가 발생하였습니다.")
 
 
 # =====================================================================

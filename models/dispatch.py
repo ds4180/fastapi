@@ -8,7 +8,8 @@
 그리고 일일 배차 스냅샷(Dispatch) 모델을 정의합니다.
 """
 
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, Date, Boolean, UniqueConstraint
+from datetime import datetime
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, Date, DateTime, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from models.base import Base
 
@@ -81,3 +82,23 @@ class Dispatch(Base):
     __table_args__ = (
         UniqueConstraint('target_date', 'timetable_id', name='uq_dispatch_date_timetable'),
     )
+
+
+class RouteSegment(Base):
+    """
+    노선 구간 및 구간별 소요 시간 마스터 모델
+    - 노선명(route_name) 단위로 정류장/구간 순번(seq)과 소요 시간(duration_min)을 관리합니다.
+    """
+    __tablename__ = "route_segment"
+
+    id = Column(Integer, primary_key=True)
+    route_name = Column(String(100), nullable=False, index=True)
+    route_master_id = Column(Integer, ForeignKey("route_master.id", ondelete="SET NULL"), nullable=True, index=True)
+    seq = Column(Integer, nullable=False)
+    segment_name = Column(String(100), nullable=False)
+    start_stop = Column(String(100), nullable=True)
+    end_stop = Column(String(100), nullable=True)
+    duration_min = Column(Integer, default=0, nullable=False)
+    distance_km = Column(String(20), nullable=True)
+    memo = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=datetime.now)

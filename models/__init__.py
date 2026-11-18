@@ -46,6 +46,7 @@ from models.board import (
 from models.dispatch import (
     RouteMaster,
     RouteTimetable,
+    RouteSegment,
     Dispatch,
 )
 
@@ -105,6 +106,7 @@ __all__ = [
     # Dispatch
     "RouteMaster",
     "RouteTimetable",
+    "RouteSegment",
     "Dispatch",
     # Others
     "DayOff",
