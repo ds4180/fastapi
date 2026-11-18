@@ -177,6 +177,8 @@ async def media_process_upload(
         results.append(asset)
 
     db.commit() # 모든 파일 처리 후 최종 커밋
+    for item in results:
+        db.refresh(item)
     return results
 
 def delete_asset(db: Session, asset_id: int):
@@ -364,4 +366,6 @@ def media_publish_assets(
         results.append(new_asset)
 
     db.commit()
+    for item in results:
+        db.refresh(item)
     return results

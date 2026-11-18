@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from database import get_db
@@ -6,6 +6,7 @@ from models import BoardConfig, Post, Menu, User
 from domain.v1.board import board_schema, board_crud
 from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker
 from core.permission import can_access_board
+from core.view_counter import should_count_view
 from typing import List, Optional
 
 router = APIRouter(
@@ -117,6 +118,8 @@ def get_board_posts(
 @router.get("/post/{post_id}")
 def get_post_detail(
     post_id: int,
+    request: Request,
+    count_view: bool = True,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
@@ -142,9 +145,11 @@ def get_post_detail(
         if user_rank < 4:
             raise HTTPException(status_code=403, detail="이 게시판은 상세 보기가 비활성화되어 있습니다.")
 
-    # 3. 조회수 증가 (단순 증가)
-    post.view_count += 1
-    db.commit()
+    # 3. 조회수 증가 (Redis 24시간 TTL 중복 방지 + 원자적 증가)
+    if count_view and should_count_view("post", post.id, request, current_user):
+        db.query(Post).filter(Post.id == post.id).update({Post.view_count: Post.view_count + 1})
+        db.commit()
+        db.refresh(post)
     
     # 4. 읽음 처리 (로그인 유저인 경우)
     if current_user:

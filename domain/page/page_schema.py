@@ -54,6 +54,7 @@ class PageSimpleResponse(BaseModel):
     content_json: Optional[Any] = None # [v1.0.5] 본문 JSON 추가
     status: str
     is_active: bool = True
+    view_count: int = 0
     published_at: datetime
 
     class Config:

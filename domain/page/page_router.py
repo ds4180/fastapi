@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from database import get_db
 from domain.page import page_schema, page_crud
 from domain.user.user_router import get_current_user, get_current_user_optional, check_rank
 from core.deps import require_app_permission
 from core.permission import can_access_page
+from core.view_counter import should_count_view
 from models import User
 from typing import List, Optional
 from datetime import datetime
@@ -88,6 +89,8 @@ def get_public_pages(
 @router.get("/detail/{slug}", response_model=page_schema.PageResponse)
 def get_page_detail(
     slug: str,
+    request: Request,
+    count_view: bool = True,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
@@ -117,7 +120,8 @@ def get_page_detail(
     if db_page.published_at > datetime.now():
         raise HTTPException(status_code=403, detail="공개 예정인 페이지입니다.")
         
-    # 조회수 증가
-    page_crud.increment_view_count(db, db_page)
+    # 조회수 증가 (편집 모드 제외 + Redis 24시간 TTL 중복 방지)
+    if count_view and should_count_view("page", db_page.slug, request, current_user):
+        page_crud.increment_view_count(db, db_page)
     
     return db_page

@@ -62,7 +62,8 @@ def delete_page(db: Session, db_page: Page):
     db.commit()
 
 def increment_view_count(db: Session, db_page: Page):
-    """조회수 증가"""
-    db_page.view_count += 1
+    """조회수 원자적 증가 (동시성 누락 방지)"""
+    db.query(Page).filter(Page.id == db_page.id).update({Page.view_count: Page.view_count + 1})
     db.commit()
+    db.refresh(db_page)
     return db_page
