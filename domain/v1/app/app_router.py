@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from database import get_db
 from models import AppRegistry, ServiceInstance, BoardConfig, Post, Page
@@ -14,9 +14,11 @@ router = APIRouter(prefix="/v1/app", tags=["App Engine"])
 def get_app_data(
     app_id: str,
     slug: str,
+    request: Request,
     page: int = 0,
     size: int = 10,
     keyword: str = "",
+    sort: str = "latest",
     db: Session = Depends(get_db),
     current_user: Optional[Any] = Depends(get_current_user_optional)
 ):
@@ -80,6 +82,12 @@ def get_app_data(
                 post_id = int(parts[1])
                 post = db.query(Post).filter(Post.id == post_id, Post.board_id == board.id).first()
                 if post:
+                    from core.view_counter import should_count_view
+                    if should_count_view("post", post.id, request, current_user):
+                        db.query(Post).filter(Post.id == post.id).update({Post.view_count: Post.view_count + 1})
+                        db.commit()
+                        db.refresh(post)
+                    setattr(post, "user_name", (post.user.real_name or post.user.username) if post.user else "탈퇴한 사용자")
                     result["instance"] = post
                     # 서비스 바인딩 해결
                     if board.service_instance_id:
@@ -87,7 +95,7 @@ def get_app_data(
             else:
                 # 목록 조회 모드 (전달받은 앱 쿼리 파라미터 적용)
                 from domain.v1.board import board_crud
-                total, posts = board_crud.get_post_list(db, board_id=board.id, skip=page*size, limit=size, keyword=keyword)
+                total, posts = board_crud.get_post_list(db, board_id=board.id, skip=page*size, limit=size, keyword=keyword, sort=sort)
                 result["instance"] = {"posts": posts, "total": total}
                 # 목록에서도 바인딩이 필요하다면 추가 (필요시)
                 if board.service_instance_id:

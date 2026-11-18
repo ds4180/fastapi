@@ -5,7 +5,7 @@ from models import Post, BoardConfig, User, PostRead, Comment, PostReaction, Med
 from domain.v1.board.board_schema import PostCreate, PostUpdate
 from typing import List, Optional
 
-def get_post_list(db: Session, board_id: int, skip: int = 0, limit: int = 10, user: User = None, keyword: str = ""):
+def get_post_list(db: Session, board_id: int, skip: int = 0, limit: int = 10, user: User = None, keyword: str = "", sort: str = "latest"):
     query = db.query(Post).filter(
         Post.board_id == board_id,
         Post.is_deleted == False
@@ -23,7 +23,14 @@ def get_post_list(db: Session, board_id: int, skip: int = 0, limit: int = 10, us
         ).distinct()
 
     total = query.count()
-    posts = query.order_by(Post.create_date.desc()).offset(skip).limit(limit).all()
+    if sort == "views":
+        order_clause = Post.view_count.desc()
+    elif sort == "oldest":
+        order_clause = Post.create_date.asc()
+    else:
+        order_clause = Post.create_date.desc()
+
+    posts = query.order_by(order_clause, Post.id.desc()).offset(skip).limit(limit).all()
 
     result_posts = []
     for post in posts:
@@ -111,8 +118,19 @@ def update_post(db: Session, db_post: Post, post_in: PostUpdate):
     return db_post
 
 def delete_post(db: Session, db_post: Post):
-    """게시물 삭제 (Soft Delete)"""
+    """게시물 삭제 (Soft Delete + 연결된 MediaAsset 소프트 삭제 및 격리 큐 예약)"""
+    from domain.media import media_service
+
     db_post.is_deleted = True
     db_post.delete_date = datetime.now()
+
+    linked_assets = db.query(MediaAsset).filter(
+        MediaAsset.app_id == "board",
+        MediaAsset.target_id == str(db_post.id),
+        MediaAsset.is_deleted == False
+    ).all()
+    for asset in linked_assets:
+        media_service.delete_asset(db, asset.id)
+
     db.commit()
     return True

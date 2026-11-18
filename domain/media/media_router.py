@@ -317,6 +317,8 @@ async def media_publish(
         resource_id=str(req.asset_ids),
         message=f"개인 자산 {len(published)}건을 [{target_tier}] 영역으로 배포 복사했습니다."
     )
+    for item in published:
+        db.refresh(item)
     return published
 
 @router.get("/admin/list")

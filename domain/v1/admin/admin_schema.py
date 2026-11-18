@@ -361,6 +361,10 @@ class BoardConfigBase(BaseModel):
     fields_def: List[Any] = []
     options: Dict[str, Any] = {}
     service_instance_id: Optional[int] = None # 서비스 번들 바인딩
+    min_read_rank: int = Field(default=0, ge=0, le=9)
+    min_write_rank: int = Field(default=2, ge=0, le=9)
+    allow_groups: Any = []
+    deny_groups: Any = []
     is_active: bool = True
 
 class BoardConfigCreate(BoardConfigBase):
@@ -375,6 +379,10 @@ class BoardConfigUpdate(BaseModel):
     fields_def: Optional[List[Any]] = None
     options: Optional[Dict[str, Any]] = None
     service_instance_id: Optional[int] = None
+    min_read_rank: Optional[int] = Field(default=None, ge=0, le=9)
+    min_write_rank: Optional[int] = Field(default=None, ge=0, le=9)
+    allow_groups: Optional[Any] = None
+    deny_groups: Optional[Any] = None
     is_active: Optional[bool] = None
 
 class BoardConfigAdminSchema(BoardConfigBase):

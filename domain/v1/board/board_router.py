@@ -86,6 +86,7 @@ def get_board_posts(
     page: int = 0,
     size: int = 10,
     keyword: str = "",
+    sort: str = "latest",
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
@@ -110,7 +111,7 @@ def get_board_posts(
             raise HTTPException(status_code=403, detail="이 게시판은 목록 조회가 비활성화되어 있습니다.")
         
     total, posts = board_crud.get_post_list(
-        db, board_id=board.id, skip=page * size, limit=size, user=current_user, keyword=keyword
+        db, board_id=board.id, skip=page * size, limit=size, user=current_user, keyword=keyword, sort=sort
     )
     
     return {"total": total, "posts": posts, "board": board}
@@ -162,6 +163,11 @@ def get_post_detail(
         if not read_history:
             db.add(PostRead(post_id=post.id, user_id=current_user.id))
             db.commit()
+
+    if post.user:
+        setattr(post, "user_name", post.user.real_name or post.user.username)
+    else:
+        setattr(post, "user_name", "탈퇴한 사용자")
 
     return post
 
