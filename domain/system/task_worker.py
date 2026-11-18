@@ -32,42 +32,45 @@ def register_handler(task_type: str):
 @register_handler("MEDIA_ISOLATE")
 async def handle_media_isolate(task: SystemTask, db: Session):
     """
-    [v3.1] 미디어 격리 처리기 (원본 + 썸네일 세트 격리)
-    규칙: DEL_{YYYYMMDD}_{기존파일명}
+    [v3.5] 미디어 격리 처리기 (원본 + 썸네일 세트 격리, has_original=False 복제본 대응)
+    규칙: .DEL_{YYYYMMDD}_{기존파일명}
     """
     file_path = task.payload.get("file_path")
     asset_id = task.payload.get("asset_id")
-    
-    if not file_path or not os.path.exists(file_path):
-        raise FileNotFoundError(f"파일을 찾을 수 없습니다: {file_path}")
+    if not file_path:
+        raise FileNotFoundError("file_path가 비어 있습니다.")
 
-    asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id).first()
     today_str = datetime.now().strftime("%Y%m%d")
-
-    # 1. 원본 파일 격리
     dir_name = os.path.dirname(file_path)
     base_name = os.path.basename(file_path)
-    
-    if not base_name.startswith(config.PREFIX['DELETE']):
-        new_name = f"{config.PREFIX['DELETE']}{today_str}_{base_name}"
-        new_path = os.path.join(dir_name, new_name)
-        os.rename(file_path, new_path)
-        logger.info(f"🛡️ 원본 격리 완료: {new_name}")
+    isolated_count = 0
 
-    # 2. 썸네일 세트 격리 (이미지인 경우)
+    # 1. 원본 파일 격리 (복제본 등 원본 미포함 자산은 건너뜀)
+    if os.path.exists(file_path):
+        if not base_name.startswith(config.PREFIX['DELETE']):
+            new_name = f"{config.PREFIX['DELETE']}{today_str}_{base_name}"
+            new_path = os.path.join(dir_name, new_name)
+            os.rename(file_path, new_path)
+            isolated_count += 1
+            logger.info(f"🛡️ 원본 격리 완료: {new_name}")
+
+    # 2. 썸네일 세트 격리 (IMG_ 접두사 제거 후 UUID 매칭)
     thumb_dir = os.path.join(dir_name, config.THUMB_FOLDER_NAME)
     if os.path.exists(thumb_dir):
-        unique_id = os.path.splitext(base_name)[0]
+        uuid_key = os.path.splitext(base_name)[0]
+        if uuid_key.startswith(config.PREFIX['IMAGE']):
+            uuid_key = uuid_key[len(config.PREFIX['IMAGE']):]
         for t_file in os.listdir(thumb_dir):
-            # 해당 원본의 썸네일들만 골라서 격리
-            if unique_id in t_file and not t_file.startswith(config.PREFIX['DELETE']):
+            if uuid_key and uuid_key in t_file and not t_file.startswith(config.PREFIX['DELETE']):
                 old_t_path = os.path.join(thumb_dir, t_file)
                 new_t_path = os.path.join(thumb_dir, f"{config.PREFIX['DELETE']}{today_str}_{t_file}")
                 os.rename(old_t_path, new_t_path)
-        logger.info(f"🛡️ 썸네일 세트 격리 완료")
+                isolated_count += 1
+        if isolated_count > 0:
+            logger.info(f"🛡️ 썸네일 세트 격리 완료 (asset_id={asset_id})")
 
     task.progress_pct = 100
-    return {"status": "isolated", "date": today_str}
+    return {"status": "isolated" if isolated_count > 0 else "already_absent", "isolated_count": isolated_count, "date": today_str}
 
 @register_handler("THUMB_GEN")
 async def handle_thumb_gen(task: SystemTask, db: Session):
