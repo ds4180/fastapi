@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from database import get_db
 from models import AppRegistry, ServiceInstance, BoardConfig, Post, Page
-from domain.v1.admin.service_service import resolve_service_instance
+from domain.v1.admin.service_service import resolve_service_instance, resolve_board_services
 from core.deps import get_current_user_optional
 from core.permission import can_access_app, can_access_board, can_access_page
 from core.exceptions import CoreException, AccessDeniedError, ResourceNotFoundError
@@ -31,9 +31,16 @@ def get_app_data(
     if not app_info:
         raise ResourceNotFoundError(f"등록되지 않은 앱입니다: '{app_id}'", resource="app", resource_id=app_id)
 
-    # 1-1. 🛡️ [4단계 권한 입구 검문] (1.root(9) ➔ 2.deny_groups ➔ 3.allow_groups ➔ 4.min_read_rank)
-    # can_access_app 함수는 (user, app_obj, action) 시그니처를 사용하여 AppRegistry 객체를 직접 검증합니다.
-    if not can_access_app(
+    # 1-1. 🛡️ 앱 활성 여부 및 권한 검문
+    # - board/boards/page/pages 같은 인스턴스형 앱은 AppRegistry 랭크가 '인스턴스 생성/관리' 권한이므로
+    #   개별 게시물/페이지 열람은 아래 각 인스턴스(can_access_board / can_access_page)의 4단계 권한으로 판단합니다.
+    if not app_info.is_active:
+        raise AccessDeniedError(
+            f"비활성화된 앱('{app_info.title or app_id}')입니다.",
+            resource="app",
+            resource_id=app_id
+        )
+    if app_id not in ("board", "boards", "page", "pages") and not can_access_app(
         user=current_user,
         app_obj=app_info,
         action="read",
@@ -89,17 +96,14 @@ def get_app_data(
                         db.refresh(post)
                     setattr(post, "user_name", (post.user.real_name or post.user.username) if post.user else "탈퇴한 사용자")
                     result["instance"] = post
-                    # 서비스 바인딩 해결
-                    if board.service_instance_id:
-                        result["bindings"] = resolve_service_instance(db, board.service_instance_id)
+                    # 서비스 바인딩 해결 (게시판 직접 지정 우선 -> 공통 번들)
+                    result["bindings"] = resolve_board_services(db, board)
             else:
                 # 목록 조회 모드 (전달받은 앱 쿼리 파라미터 적용)
                 from domain.v1.board import board_crud
                 total, posts = board_crud.get_post_list(db, board_id=board.id, skip=page*size, limit=size, keyword=keyword, sort=sort)
                 result["instance"] = {"posts": posts, "total": total}
-                # 목록에서도 바인딩이 필요하다면 추가 (필요시)
-                if board.service_instance_id:
-                    result["bindings"] = resolve_service_instance(db, board.service_instance_id)
+                result["bindings"] = resolve_board_services(db, board)
 
         elif app_id == "page" or app_id == "pages":
             # 페이지 로직: slug = "about-us"

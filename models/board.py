@@ -32,6 +32,7 @@ class BoardConfig(Base):
     description = Column(String, nullable=True)
     layout_type = Column(String, default="list")
     service_instance_id = Column(Integer, ForeignKey("service_instance.id"), nullable=True)
+    service_app_ids = Column(JSONType, default=list)
     
     items_per_page = Column(Integer, default=10)
     fields_def = Column(JSONType, default=list) 

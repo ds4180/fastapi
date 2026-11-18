@@ -1543,6 +1543,17 @@ def create_service_registry(data: admin_schema.ServiceRegistryCreate, db: Sessio
     db.refresh(db_obj)
     return db_obj
 
+@router.put("/service-registries/{registry_id}", response_model=admin_schema.ServiceRegistrySchema)
+def update_service_registry(registry_id: str, data: admin_schema.ServiceRegistryUpdate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
+    db_obj = db.query(ServiceRegistry).filter(ServiceRegistry.id == registry_id).first()
+    if not db_obj:
+        raise HTTPException(status_code=404, detail="레지스트리를 찾을 수 없습니다.")
+    for k, v in data.dict(exclude_unset=True).items():
+        setattr(db_obj, k, v)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
 @router.delete("/service-registries/{registry_id}")
 def delete_service_registry(registry_id: str, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = db.query(ServiceRegistry).filter(ServiceRegistry.id == registry_id).first()
@@ -1560,6 +1571,17 @@ def list_service_engines(db: Session = Depends(get_db), admin: User = Depends(ch
 def create_service_engine(data: admin_schema.ServiceEngineCreate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
     db_obj = ServiceEngine(**data.dict())
     db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+@router.put("/service-engines/{engine_id}", response_model=admin_schema.ServiceEngineSchema)
+def update_service_engine(engine_id: str, data: admin_schema.ServiceEngineUpdate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
+    db_obj = db.query(ServiceEngine).filter(ServiceEngine.id == engine_id).first()
+    if not db_obj:
+        raise HTTPException(status_code=404, detail="구현 엔진을 찾을 수 없습니다.")
+    for k, v in data.dict(exclude_unset=True).items():
+        setattr(db_obj, k, v)
     db.commit()
     db.refresh(db_obj)
     return db_obj

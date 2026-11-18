@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, cast, String
 from models import Post, BoardConfig, User, PostRead, Comment, PostReaction, MediaAsset
 from domain.v1.board.board_schema import PostCreate, PostUpdate
 from typing import List, Optional
@@ -12,13 +12,14 @@ def get_post_list(db: Session, board_id: int, skip: int = 0, limit: int = 10, us
     )
 
     if keyword:
-        search = f"%%{keyword}%%"
+        search = f"%{keyword}%"
         query = query.outerjoin(User).filter(
             or_(
                 Post.title.ilike(search),
                 Post.content.ilike(search),
                 User.username.ilike(search),
-                User.real_name.ilike(search)
+                User.real_name.ilike(search),
+                cast(Post.extra_data, String).ilike(search)
             )
         ).distinct()
 

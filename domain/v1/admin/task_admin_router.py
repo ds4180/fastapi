@@ -68,6 +68,7 @@ def get_tasks_summary(
     running_count = db.query(func.count(SystemTask.id)).filter(SystemTask.status == "RUNNING").scalar() or 0
     failed_count = db.query(func.count(SystemTask.id)).filter(SystemTask.status == "FAILED").scalar() or 0
     scheduler_count = db.query(func.count(SystemTask.id)).filter(
+        SystemTask.status.in_(["PENDING", "RUNNING"]),
         or_(SystemTask.cron_expression.is_not(None), SystemTask.repeat_interval.is_not(None))
     ).scalar() or 0
 
