@@ -61,3 +61,9 @@ class MiniappCountsResponse(BaseModel):
     MEMO: int = 0
     ALARM: int = 0
     TOTAL: int = 0
+
+
+class MiniappSummaryResponse(BaseModel):
+    """카운트 + 피드 목록 단일 통합 응답 (HTTP/DB 왕복 최소화)"""
+    counts: MiniappCountsResponse
+    items: List[MiniappItemResponse] = []

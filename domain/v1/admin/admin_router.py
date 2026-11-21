@@ -112,13 +112,14 @@ def get_dashboard_summary(
     app_count = db.query(AppRegistry).count()
 
     # 6. 실시간 시스템/비즈니스 앱 권한 메타데이터 (AppRegistry 실시간 연동)
-    all_registered_apps = db.query(AppRegistry).all()
+    all_registered_apps = db.query(AppRegistry).order_by(AppRegistry.app_id.asc()).all()
     apps_meta = [
         {
             "app_id": a.app_id,
             "name": a.name,
             "title": a.title,
             "description": a.description,
+            "app_type": a.app_type or "CUSTOM",
             "icon_default": a.icon_default,
             "frontend_route": a.frontend_route,
             "min_read_rank": a.min_read_rank if a.min_read_rank is not None else 4,

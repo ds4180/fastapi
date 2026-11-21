@@ -19,17 +19,71 @@ router = APIRouter(
 )
 
 
+def _serialize_miniapp_item(item, computed_status: str, confirmed_at) -> miniapp_schema.MiniappItemResponse:
+    sender_name = None
+    if item.sender:
+        sender_name = getattr(item.sender, "real_name", None) or getattr(item.sender, "name", None) or getattr(item.sender, "username", None)
+
+    extra_payload = dict(item.extra_payload or {})
+    if confirmed_at and "confirmed_at" not in extra_payload:
+        extra_payload["confirmed_at"] = confirmed_at.isoformat() if hasattr(confirmed_at, "isoformat") else str(confirmed_at)
+
+    return miniapp_schema.MiniappItemResponse(
+        id=item.id,
+        sender_id=item.sender_id,
+        sender_name=sender_name,
+        receiver_id=item.receiver_id,
+        category=item.category,
+        title=item.title,
+        content=item.content,
+        status=computed_status,
+        target_time=item.target_time,
+        link=item.link,
+        extra_payload=extra_payload,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
 @router.get("/counts", response_model=miniapp_schema.MiniappCountsResponse)
 def get_miniapp_counts(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    [상단 헤더 뱃지 & 동적 폼 슬라이더 실시간 카운트 API]
-    - 헤더 동적 폼 버튼에 띄울 미결 총합(TOTAL) 및 카테고리별(NOTIFICATION, INSTRUCTION 등) 미확인 건수를 반환합니다.
+    [상단 헤더 뱃지 & 동적 폼 슬라이더 미결 카운트 API]
     """
     counts = miniapp_crud.get_user_miniapp_counts(db, current_user.id)
     return miniapp_schema.MiniappCountsResponse(**counts)
+
+
+@router.get("/summary", response_model=miniapp_schema.MiniappSummaryResponse)
+def get_miniapp_summary(
+    category: Optional[str] = Query(None, description="MEMO, ALARM, INSTRUCTION, MESSAGE, NOTIFICATION"),
+    status: Optional[str] = Query(None, description="PENDING, ONGOING, COMPLETED, READ"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    [미니앱 카운트 + 피드 목록 단일 통합 조회]
+    - 1회 DB 세션 및 1회 HTTP 요청으로 카운트와 피드 목록을 동시에 반환해 부하를 줄입니다.
+    """
+    counts = miniapp_crud.get_user_miniapp_counts(db, current_user.id)
+    items_with_status = miniapp_crud.get_user_miniapp_items(
+        db=db,
+        user_id=current_user.id,
+        category=category,
+        status=status,
+        skip=skip,
+        limit=limit,
+    )
+    items = [_serialize_miniapp_item(item, st, cat) for item, st, cat in items_with_status]
+    return miniapp_schema.MiniappSummaryResponse(
+        counts=miniapp_schema.MiniappCountsResponse(**counts),
+        items=items,
+    )
 
 
 @router.get("", response_model=List[miniapp_schema.MiniappItemResponse])
@@ -43,8 +97,6 @@ def get_miniapp_items(
 ):
     """
     [미니앱 단일 액션 피드 목록 조회 (SQL 1:N 확인 서명 격리 반영)]
-    로그인한 사원에게 할당된 알림, 지시사항, 메시지, 개인 메모를 최신순으로 반환합니다.
-    전사 공지(receiver_id IS NULL)는 MiniappRead 확인 서명 여부에 따라 사원별 status가 동적으로 결정됩니다.
     """
     items_with_status = miniapp_crud.get_user_miniapp_items(
         db=db,
@@ -55,35 +107,7 @@ def get_miniapp_items(
         limit=limit
     )
 
-    # 사원별 격리된 상태 및 발신자 이름 주입
-    res_list = []
-    for item, computed_status, confirmed_at in items_with_status:
-        sender_name = None
-        if item.sender:
-            sender_name = getattr(item.sender, "name", None) or getattr(item.sender, "username", None)
-
-        extra_payload = dict(item.extra_payload or {})
-        if confirmed_at and "confirmed_at" not in extra_payload:
-            extra_payload["confirmed_at"] = confirmed_at.isoformat() if hasattr(confirmed_at, "isoformat") else str(confirmed_at)
-
-        item_dict = {
-            "id": item.id,
-            "sender_id": item.sender_id,
-            "sender_name": sender_name,
-            "receiver_id": item.receiver_id,
-            "category": item.category,
-            "title": item.title,
-            "content": item.content,
-            "status": computed_status,  # 🌟 사원별 계산된 격리 상태 반영!
-            "target_time": item.target_time,
-            "link": item.link,
-            "extra_payload": extra_payload,
-            "created_at": item.created_at,
-            "updated_at": item.updated_at,
-        }
-        res_list.append(miniapp_schema.MiniappItemResponse(**item_dict))
-
-    return res_list
+    return [_serialize_miniapp_item(item, computed_status, confirmed_at) for item, computed_status, confirmed_at in items_with_status]
 
 
 @router.post("", response_model=miniapp_schema.MiniappItemResponse, status_code=status.HTTP_201_CREATED)
