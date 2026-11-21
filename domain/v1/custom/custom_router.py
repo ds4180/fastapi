@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from database import get_db
-from models import RouteMaster, RouteTimetable, Dispatch, User
+from models import RouteMaster, RouteTimetable, Dispatch, User, DayOff
 from core.deps import get_current_user
 from domain.v1.admin import admin_schema
 from domain.v1.admin.admin_router import load_drivers_metadata, load_vehicles_metadata
@@ -96,12 +96,50 @@ def get_my_dispatch_briefing(
             )
             tomorrow_dispatches = _serialize(tomorrow_rows)
 
+    # 오늘 / 내일 본인 승인(APPROVED) 휴무 조회 -> 근무일 / 휴무일 구분용
+    dayoff_rows = (
+        db.query(DayOff)
+        .filter(
+            DayOff.user_id == current_user.id,
+            DayOff.is_deleted == False,
+            DayOff.status == "APPROVED",
+            DayOff.date.in_([today, tomorrow]),
+        )
+        .all()
+    )
+    today_dayoff_obj = next((d for d in dayoff_rows if d.date == today), None)
+    tomorrow_dayoff_obj = next((d for d in dayoff_rows if d.date == tomorrow), None)
+
+    def _serialize_dayoff(d: Optional[DayOff]) -> Optional[dict]:
+        if not d:
+            return None
+        return {
+            "id": d.id,
+            "date": str(d.date),
+            "type": d.type,
+            "status": d.status,
+            "memo": d.memo,
+        }
+
+    today_dayoff = _serialize_dayoff(today_dayoff_obj)
+    tomorrow_dayoff = _serialize_dayoff(tomorrow_dayoff_obj) if is_after_17 else None
+
+    if today_dayoff:
+        today_work_status = "DAYOFF"      # 휴무일
+    elif today_dispatches:
+        today_work_status = "WORK"        # 근무일 (배차 있음)
+    else:
+        today_work_status = "UNASSIGNED"  # 배차 미배정/대기
+
     return {
         "today": str(today),
         "tomorrow": str(tomorrow),
         "now_hhmm": now_hhmm,
         "is_after_17": is_after_17,
         "driver_name": getattr(current_user, "real_name", None) or current_user.username,
+        "today_work_status": today_work_status,
+        "today_dayoff": today_dayoff,
+        "tomorrow_dayoff": tomorrow_dayoff,
         "today_dispatches": today_dispatches,
         "tomorrow_dispatches": tomorrow_dispatches,
     }
