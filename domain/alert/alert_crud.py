@@ -135,6 +135,13 @@ async def create_alert(
                 target_uids.append(int(uid_s.strip()))
 
     send_push_flag = bool(getattr(alert_create, "send_web_push", False))
+    if not send_push_flag and cat in ("INSTRUCTION", "NOTICE", "URGENT_NOTICE"):
+        try:
+            from domain.push.push_service import is_push_domain_enabled
+            if is_push_domain_enabled(db, "alert_instruction"):
+                send_push_flag = True
+        except Exception:
+            pass
 
     from core.notify import safe_notify
     safe_notify(

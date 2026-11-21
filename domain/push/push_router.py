@@ -1,13 +1,49 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from database import get_db
 from core.audit import safe_log_audit
+from core.deps import require_app_permission
 from domain.user.user_router import get_current_user # To get current user and its ID
 from . import schemas # Assuming schemas.py will define PushSubscriptionCreate
 from . import push_service # Now importing the service
 from models import User # To use models.User for Depends(get_current_user)
 
 router = APIRouter(prefix="/push", tags=["Push Notifications"]) # Changed tag to active
+
+check_push_read = require_app_permission("pushs", action="read")
+check_push_write = require_app_permission("pushs", action="write")
+
+
+@router.get("/options", status_code=status.HTTP_200_OK)
+def get_push_domain_options(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_push_read),
+):
+    """도메인별 Web Push 자동 발송 옵션을 조회합니다."""
+    return {"options": push_service.get_push_domain_options(db)}
+
+
+@router.put("/options", status_code=status.HTTP_200_OK)
+def update_push_domain_options(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_push_write),
+):
+    """도메인별 Web Push 자동 발송 옵션을 저장합니다."""
+    raw_options = payload.get("options") if isinstance(payload.get("options"), dict) else payload
+    updated = push_service.update_push_domain_options(db, raw_options)
+    safe_log_audit(
+        db=db,
+        app_id="pushs",
+        log_type="CHANGE",
+        action="PUSH_DOMAIN_OPTIONS_UPDATE",
+        title="도메인별 Web Push 발송 옵션 변경",
+        user=admin,
+        resource_type="system_config",
+        resource_id=push_service.PUSH_DOMAIN_OPTIONS_KEY,
+        message=f"관리자 '{admin.username}'이(가) 도메인 푸시 옵션을 변경했습니다.",
+    )
+    return {"message": "saved", "options": updated}
 
 # Endpoint to subscribe to push notifications
 @router.post("/subscribe", status_code=status.HTTP_200_OK)

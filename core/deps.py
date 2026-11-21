@@ -180,6 +180,9 @@ def require_app_permission(app_id: str, action: str = "read"):
         db: Session = Depends(get_db)
     ) -> User:
         app_meta = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
+        if not app_meta and app_id in ("board", "boards"):
+            alt_id = "boards" if app_id == "board" else "board"
+            app_meta = db.query(AppRegistry).filter(AppRegistry.app_id == alt_id).first()
         if not app_meta:
             raise ResourceNotFoundError(
                 message=f"등록되지 않은 시스템 앱입니다: '{app_id}'",

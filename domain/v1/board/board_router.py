@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from database import get_db
-from models import BoardConfig, Post, Menu, User
+from models import BoardConfig, Post, User
 from domain.v1.board import board_schema, board_crud
-from domain.user.user_router import get_current_user, get_current_user_optional, RankChecker
-from core.permission import can_access_board
+from core.deps import get_current_user, get_current_user_optional
+from core.permission import can_access_board, get_user_rank
 from core.view_counter import should_count_view
 from typing import List, Optional
 
@@ -13,69 +13,6 @@ router = APIRouter(
     prefix="/v1/board",
     tags=["board_v1"]
 )
-
-# --- [지능형 보안 유틸리티] ---
-def verify_access_by_menu(path: str, db: Session, current_user: Optional[User]):
-    """
-    [지능형 권한 상속: 최장 전방 일치(Longest Prefix Match)]
-    1. 최고 관리자(Rank 4)는 무조건 통과합니다.
-    2. 요청 경로가 메뉴의 URL로 시작하는지 확인하여 권한을 상속받습니다.
-    3. 여러 메뉴가 겹칠 경우 가장 긴(구체적인) 경로의 설정을 따릅니다.
-    """
-    user_rank = current_user.rank() if (current_user and callable(current_user.rank)) else (current_user.rank if current_user else 0)
-
-    # 0. 최고 관리자(Rank 4) 예외 처리
-    if user_rank >= 4:
-        return
-
-    # 1. 경로 정규화 및 변환 (API 경로 -> 공개 경로 및 표준 인스턴스 경로)
-    # 앞뒤 슬래시를 제거하여 비교하기 쉬운 형태로 만듦
-    p = path.strip('/')
-    p_public = p.replace("v1/board/list/", "board/").replace("create/", "board/").replace("/write", "")
-    # 표준 인스턴스 라우팅(/v1/app/board/{slug}) 경로도 매칭 대상에 추가
-    p_instance = f"v1/app/{p_public.lstrip('/')}"
-    
-    # 비교를 위해 다시 앞 슬래시를 붙인 정규화된 경로들
-    targets = [f"/{p}", f"/{p_public}", f"/{p_instance}"]
-
-    # 2. 모든 메뉴를 가져와서 '전방 일치' 또는 (app_id, target_slug) 일치 여부 확인
-    # 문자열 길이가 긴 순서대로 정렬하여 가장 구체적인 메뉴를 먼저 찾음
-    menus = db.query(Menu).order_by(Menu.id.asc()).all()
-    
-    matched_menu = None
-    for m in menus:
-        # 2-1. external_url 전방 일치 확인
-        if m.external_url:
-            m_url = m.external_url.strip('/')
-            m_url_slash = f"/{m_url}"
-            for t in targets:
-                if t.startswith(m_url_slash):
-                    matched_menu = m
-                    break
-        # 2-2. 표준 INSTANCE 메뉴(app_id + target_slug) 조합 일치 확인
-        if not matched_menu and m.app_id in ("board", "boards") and m.target_slug:
-            inst_url_slash = f"/v1/app/{m.app_id}/{m.target_slug.strip('/')}"
-            for t in targets:
-                if t.startswith(inst_url_slash):
-                    matched_menu = m
-                    break
-        if matched_menu:
-            break
-
-    if matched_menu:
-        # 매칭된 메뉴의 권한 체크
-        if user_rank < matched_menu.min_rank:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"'{matched_menu.title}' 접근 권한 부족 (필요: Rank {matched_menu.min_rank}, 현재: {user_rank})"
-            )
-    else:
-        # 3. 메뉴에 없으면 기본 보안 정책 (Rank 3 이상)
-        if user_rank < 3:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="등록되지 않은 페이지이거나 접근 권한이 부족합니다. (관리자 문의)"
-            )
 
 
 # --- API Endpoints ---
@@ -90,9 +27,7 @@ def get_board_posts(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
-    """게시판 목록 조회 (지능형 권한 체크 + 페이징 + 검색)"""
-    verify_access_by_menu(f"/v1/board/list/{slug}", db, current_user)
-    
+    """게시판 목록 조회 (4단계 권한 체크 + 페이징 + 검색)"""
     board = db.query(BoardConfig).filter(BoardConfig.slug == slug).first()
     if not board:
         raise HTTPException(status_code=404, detail="존재하지 않는 게시판입니다.")
@@ -106,8 +41,7 @@ def get_board_posts(
     
     # 기능 활성화 체크 (List)
     if not board.options.get("use_list", True):
-        user_rank = current_user.rank() if (current_user and callable(current_user.rank)) else (current_user.rank if current_user else 0)
-        if user_rank < 4:
+        if get_user_rank(current_user) < 4:
             raise HTTPException(status_code=403, detail="이 게시판은 목록 조회가 비활성화되어 있습니다.")
         
     total, posts = board_crud.get_post_list(
@@ -137,13 +71,9 @@ def get_post_detail(
             detail=f"'{post.board.name}' 게시물 열람 권한이 없습니다."
         )
     
-    # 2. 지능형 보안 체크 (해당 게시판의 리스트 접근 권한이 있는지 확인)
-    verify_access_by_menu(f"/board/{post.board.slug}", db, current_user)
-    
-    # 2-1. 상세 보기 비활성화 체크
+    # 2. 상세 보기 비활성화 체크
     if not post.board.options.get("use_view", True):
-        user_rank = current_user.rank() if (current_user and callable(current_user.rank)) else (current_user.rank if current_user else 0)
-        if user_rank < 4:
+        if get_user_rank(current_user) < 4:
             raise HTTPException(status_code=403, detail="이 게시판은 상세 보기가 비활성화되어 있습니다.")
 
     # 3. 조회수 증가 (Redis 24시간 TTL 중복 방지 + 원자적 증가)
@@ -178,11 +108,8 @@ def post_create(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """게시물 생성 (보안 체크 + 에디터 타입 검증)"""
-    # 1. 지능형 보안 체크 (글쓰기 페이지 권한 상속)
-    verify_access_by_menu(f"/board/{slug}/write", db, current_user)
-    
-    # 2. 게시판 설정 조회
+    """게시물 생성 (4단계 권한 체크 + 에디터 타입 검증)"""
+    # 1. 게시판 설정 조회
     board = db.query(BoardConfig).filter(BoardConfig.slug == slug).first()
     if not board:
         raise HTTPException(status_code=404, detail="게시판을 찾을 수 없습니다.")
@@ -194,13 +121,12 @@ def post_create(
             detail=f"'{board.name}' 게시판 글 작성 권한이 없습니다."
         )
         
-    # 3. 글쓰기 허용 여부 체크
+    # 2. 글쓰기 허용 여부 체크
     if board.options.get("editor_type") == "none":
         raise HTTPException(status_code=403, detail="이 게시판은 글쓰기가 허용되지 않습니다.")
 
     if not board.options.get("use_write", True):
-        user_rank = current_user.rank() if (current_user and callable(current_user.rank)) else (current_user.rank if current_user else 0)
-        if user_rank < 4:
+        if get_user_rank(current_user) < 4:
             raise HTTPException(status_code=403, detail="이 게시판은 글 작성이 비활성화되어 있습니다.")
         
     # 4. 생성 실행
@@ -208,7 +134,7 @@ def post_create(
     from core.audit import safe_log_audit
     safe_log_audit(
         db=db,
-        app_id="boards",
+        app_id="board",
         log_type="CHANGE",
         action="POST_CREATE",
         title=f"[{board.name}] 게시글 작성: {post_in.title}",
@@ -216,6 +142,24 @@ def post_create(
         resource_type="board_post",
         resource_id=str(getattr(created, "id", "")),
     )
+
+    # 5. 🔔 게시판 푸시 옵션(push_on_post) 활성화 시 열람 권한자 대상 비동기 Web Push 발송
+    from domain.push.push_service import (
+        dispatch_push_async,
+        is_push_option_enabled,
+        send_push_to_board_readers,
+    )
+    if is_push_option_enabled(board.options, "push_on_post"):
+        author_name = current_user.real_name or current_user.username
+        dispatch_push_async(
+            send_push_to_board_readers,
+            board_id=board.id,
+            title=f"[{board.name}] 새 게시글",
+            body=f"{post_in.title} · {author_name}",
+            url=f"/v1/app/board/{slug}/{created.id}",
+            exclude_user_id=current_user.id,
+        )
+
     return created
 
 @router.put("/update/{post_id}")
@@ -234,16 +178,15 @@ def post_update(
     if not can_access_board(current_user, db_post.board, action="write"):
         raise HTTPException(status_code=403, detail="이 게시판에 대한 글 수정 권한이 없습니다.")
 
-    # 권한 체크: 작성자 본인이거나 Rank 4 이상(최고 관리자)
-    user_rank = current_user.rank() if callable(current_user.rank) else getattr(current_user, "rank", 0)
-    if db_post.user_id != current_user.id and user_rank < 4:
+    # 권한 체크: 작성자 본인이거나 운영 관리자(Rank 4 이상)
+    if db_post.user_id != current_user.id and get_user_rank(current_user) < 4:
         raise HTTPException(status_code=403, detail="본인이 작성한 글만 수정할 수 있습니다.")
         
     updated = board_crud.update_post(db, db_post=db_post, post_in=post_in)
     from core.audit import safe_log_audit
     safe_log_audit(
         db=db,
-        app_id="boards",
+        app_id="board",
         log_type="CHANGE",
         action="POST_UPDATE",
         title=f"게시글 수정 (#{post_id})",
@@ -268,16 +211,15 @@ def post_delete(
     if not can_access_board(current_user, db_post.board, action="write"):
         raise HTTPException(status_code=403, detail="이 게시판에 대한 글 삭제 권한이 없습니다.")
 
-    # 권한 체크: 작성자 본인이거나 Rank 4 이상(최고 관리자)
-    user_rank = current_user.rank() if callable(current_user.rank) else getattr(current_user, "rank", 0)
-    if db_post.user_id != current_user.id and user_rank < 4:
+    # 권한 체크: 작성자 본인이거나 운영 관리자(Rank 4 이상)
+    if db_post.user_id != current_user.id and get_user_rank(current_user) < 4:
         raise HTTPException(status_code=403, detail="본인이 작성한 글만 삭제할 수 있습니다.")
         
     board_crud.delete_post(db, db_post=db_post)
     from core.audit import safe_log_audit
     safe_log_audit(
         db=db,
-        app_id="boards",
+        app_id="board",
         log_type="CHANGE",
         action="POST_DELETE",
         title=f"게시글 삭제 (#{post_id})",
@@ -293,11 +235,15 @@ def get_landing_info(
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
     """랜딩 페이지 정보"""
-    verify_access_by_menu("/v1/board/landing", db, current_user)
-    
     landing_config = db.query(BoardConfig).filter(BoardConfig.slug == "landing").first()
     if not landing_config:
         return {"message": "landing config not found"}
+
+    if not can_access_board(current_user, landing_config, action="read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="랜딩 게시판 열람 권한이 없습니다."
+        )
 
     landing_post = db.query(Post).filter(
         Post.board_id == landing_config.id,

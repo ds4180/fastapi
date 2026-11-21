@@ -29,7 +29,28 @@ def create_comment(
     if not post:
         raise HTTPException(status_code=404, detail="게시물을 찾을 수 없습니다.")
     
-    return comment_crud.create_comment(db, post_id=post_id, user_id=current_user.id, comment_in=comment_in)
+    created = comment_crud.create_comment(db, post_id=post_id, user_id=current_user.id, comment_in=comment_in)
+
+    # 🔔 게시판 푸시 옵션(push_on_comment) 활성화 시 게시글 작성자 본인에게 비동기 Web Push 발송
+    board = post.board
+    if board and post.user_id and post.user_id != current_user.id:
+        from domain.push.push_service import (
+            dispatch_push_async,
+            is_push_option_enabled,
+            send_push_to_user,
+        )
+        if is_push_option_enabled(board.options, "push_on_comment"):
+            commenter = current_user.real_name or current_user.username
+            preview = (comment_in.content or "").strip().replace("\n", " ")[:60]
+            dispatch_push_async(
+                send_push_to_user,
+                user_id=post.user_id,
+                title=f"[{board.name}] 새 댓글",
+                body=f"{commenter}: {preview}",
+                url=f"/v1/app/board/{board.slug}/{post.id}",
+            )
+
+    return created
 
 @router.put("/{comment_id}", response_model=comment_schema.Comment)
 def update_comment(

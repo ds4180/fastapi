@@ -15,6 +15,7 @@ from core.deps import (
 )
 from core.audit import safe_log_audit
 from core.permission import can_access_app, evaluate_permission, get_user_rank, ROOT_RANK
+from domain.system.app_service import migrate_boards_to_board
 from domain.v1.admin import admin_schema
 from typing import List, Optional, Any
 from datetime import date, datetime, timedelta
@@ -37,8 +38,8 @@ check_app_admin = require_app_permission("apps")
 check_menu_admin_read = require_app_permission("menu", action="read")
 check_menu_admin_write = require_app_permission("menu", action="write")
 check_menu_admin = check_menu_admin_read # 하위 호환 보존
-check_board_admin = require_app_permission("boards", action="read")
-check_board_admin_write = require_app_permission("boards", action="write")
+check_board_admin = require_app_permission("board", action="read")
+check_board_admin_write = require_app_permission("board", action="write")
 check_service_admin = require_app_permission("services", action="read")
 check_service_admin_write = require_app_permission("services", action="write")
 check_dayoff_admin = require_app_permission("dayoff", action="read")
@@ -62,6 +63,7 @@ def get_dashboard_summary(
     [코어 통합 관제탑 대시보드 요약 정보]
     시스템 코어 엔진(자율신경계 태스크, 관제/감사로그, 세션/근무, 지시사항 인지율) 종합 지표
     """
+    migrate_boards_to_board(db)
     now = datetime.now()
     today = now.date()
     yesterday = now - timedelta(hours=24)
@@ -115,6 +117,10 @@ def get_dashboard_summary(
         {
             "app_id": a.app_id,
             "name": a.name,
+            "title": a.title,
+            "description": a.description,
+            "icon_default": a.icon_default,
+            "frontend_route": a.frontend_route,
             "min_read_rank": a.min_read_rank if a.min_read_rank is not None else 4,
             "min_write_rank": a.min_write_rank if a.min_write_rank is not None else 4,
             "allow_groups": a.allow_groups or [],
@@ -458,46 +464,31 @@ def update_admin_register_mode(
 @router.get("/apps", response_model=List[admin_schema.AppRegistrySchema])
 def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_app_admin)):
     """시스템에 등록된 모든 App 엔진 목록 조회 (관리자용)"""
-    from domain.system.app_service import DEFAULT_SYSTEM_APPS
-
-    # 시스템 앱의 공식 명칭(title, name, icon) 및 시스템 앱 타입(SYSTEM, CUSTOM, INSTANCE) 동기화
-    sys_map = {a["app_id"]: a for a in DEFAULT_SYSTEM_APPS}
-    all_apps = db.query(AppRegistry).order_by(AppRegistry.app_id).all()
-    needs_commit = False
-    for app in all_apps:
-        meta = sys_map.get(app.app_id)
-        if meta:
-            if meta.get("title") and app.title != meta["title"]:
-                app.title = meta["title"]
-                needs_commit = True
-            if meta.get("name") and app.name != meta["name"]:
-                app.name = meta["name"]
-                needs_commit = True
-            if meta.get("icon_default") and app.icon_default != meta["icon_default"]:
-                app.icon_default = meta["icon_default"]
-                needs_commit = True
-            # 시스템 앱의 경우 기본 app_type(SYSTEM, CUSTOM, INSTANCE) 동기화
-            if meta.get("app_type") and app.app_type != meta["app_type"]:
-                app.app_type = meta["app_type"]
-                needs_commit = True
-    if needs_commit:
-        db.commit()
-        all_apps = db.query(AppRegistry).order_by(AppRegistry.app_id).all()
-
-    return all_apps
+    migrate_boards_to_board(db)
+    return db.query(AppRegistry).order_by(AppRegistry.app_id).all()
 
 @router.get("/apps/{app_id}", response_model=admin_schema.AppRegistrySchema)
 def get_app_detail(
-    app_id: str, 
+    app_id: str,
     db: Session = Depends(get_db),
-    admin: User = Depends(check_app_admin)
+    current_user: User = Depends(get_current_user)
 ):
     """
-    [특정 앱의 메타데이터 및 설정 스키마 상세 조회]
-    - 인가 가드: admin_apps 전용 인가 가드(check_app_admin, Rank 9) 적용
-    - 내부 권한 그룹(allow/deny_groups) 및 설정 스키마의 무단 노출을 방지하기 위해 관리자 권한 필수
+    [특정 앱의 메타데이터 및 권한 정보 상세 조회]
+    - SSR 라우트 가드(/v1/admin/+layout.server.ts)에서 Lv.8 이하 로그인 사용자도
+      진입 대상 앱의 4단계 권한 규칙(allow/deny_groups, min_read_rank)을 판별할 수 있어야 하므로
+      get_current_user를 요구합니다.
+    - 하위 호환을 위해 'admin_' 접두사가 붙은 app_id 조회 시 접두사를 제거한 식별자도 fallback 탐색합니다.
     """
+    migrate_boards_to_board(db)
     db_app = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
+    if not db_app and app_id.startswith("admin_"):
+        db_app = db.query(AppRegistry).filter(
+            AppRegistry.app_id == app_id.removeprefix("admin_")
+        ).first()
+    if not db_app and app_id in ("board", "boards"):
+        alt_id = "boards" if app_id == "board" else "board"
+        db_app = db.query(AppRegistry).filter(AppRegistry.app_id == alt_id).first()
     if not db_app:
         raise HTTPException(status_code=404, detail="등록되지 않은 앱 엔진입니다.")
     return db_app
@@ -661,11 +652,13 @@ def delete_app(app_id: str, db: Session = Depends(get_db), admin: User = Depends
 
 # --- Menu Management (지능형 메뉴 관리) ---
 
-# 📄 PAGES 레이어로 이관된 순수 정적/데모 페이지 경로 매핑
+# 📄 정적 PAGES 이관 및 구버전 URL 정규화 경로 매핑
 MIGRATED_PAGES_MAP = {
     "/v1/custom/chart": "/v1/pages/chart",
     "/v1/custom/canvas": "/v1/pages/canvas",
     "/v1/custom/uploadfile": "/v1/pages/uploadfile",
+    "/v1/app/boards": "/v1/app/board",
+    "/v1/admin/boards": "/v1/admin/board",
 }
 
 def _build_menu_lookup_cache(db: Session) -> dict:
@@ -705,9 +698,8 @@ def resolve_menu_url(
     1. 고정 URL / 폴더 / 구분선: URL 또는 '#'
     2. 관리자 기능이 필요한 모든 경우: 무조건 /v1/admin/{clean_id} (CUSTOM/INSTANCE 불문 관리자 직행)
     3. 사용자 화면:
-       - CUSTOM: /v1/custom/{clean_id}
-       - INSTANCE: /v1/app/{clean_id}/{slug}
-       - PAGES / PAGE: /v1/pages/{slug or page_id}
+       - CUSTOM (page): /v1/custom/page 또는 /v1/custom/page/{slug}
+       - INSTANCE (board): /v1/app/board 또는 /v1/app/board/{slug}
     """
     # 1. 🔗 수동 입력 URL 및 폴더/구분선
     if menu.link_type == "URL":
@@ -747,30 +739,39 @@ def resolve_menu_url(
 
         if is_admin_mode:
             if app_reg and app_reg.frontend_route:
-                return app_reg.frontend_route
+                return (
+                    "/v1/admin/board"
+                    if app_reg.frontend_route == "/v1/admin/boards"
+                    else app_reg.frontend_route
+                )
             if clean_id in ["dashboard", ""]:
                 return f"{API_VERSION_PREFIX}/admin"
+            if clean_id in ("board", "boards"):
+                return f"{API_VERSION_PREFIX}/admin/board"
             return f"{API_VERSION_PREFIX}/admin/{clean_id}"
 
-        # 👤 [사용자 화면]: 각 앱의 타입에 맞는 전용 거처로 1:1 직행 (CUSTOM은 예외 없이 /v1/custom/{clean_id})
+        # 👤 [사용자 화면]: 각 앱의 타입에 맞는 전용 거처로 1:1 직행
         if menu.link_type == "CUSTOM":
+            if clean_id == "page":
+                slug = resolved_slug if resolved_slug is not None else get_instance_slug(menu, db, lookup_cache)
+                if slug and slug != "-1":
+                    return f"{API_VERSION_PREFIX}/custom/page/{slug}"
+                return f"{API_VERSION_PREFIX}/custom/page"
             return f"{API_VERSION_PREFIX}/custom/{clean_id}"
 
         if menu.link_type in ["INSTANCE", "APP"]:
             slug = resolved_slug if resolved_slug is not None else get_instance_slug(menu, db, lookup_cache)
-            # 게시판 등 다중 인스턴스: 특정 개체는 단수형(/v1/app/board/{slug}), 허브는 복수형(/v1/app/boards)
+            app_prefix = "board" if clean_id in ("board", "boards") else clean_id
             if slug and slug != "-1":
-                instance_prefix = clean_id.rstrip("s") if clean_id.endswith("s") else clean_id
-                return f"{API_VERSION_PREFIX}/app/{instance_prefix}/{slug}"
-            return f"{API_VERSION_PREFIX}/app/{clean_id}"
+                return f"{API_VERSION_PREFIX}/app/{app_prefix}/{slug}"
+            return f"{API_VERSION_PREFIX}/app/{app_prefix}"
 
-    # 3. 📄 정적 콘텐츠 레이어 (PAGE / PAGES 직접 링크)
+    # 3. 📄 DB 기반 페이지(Page) 직접 링크 (/v1/custom/page/{slug})
     if menu.link_type in ["PAGE", "PAGES"] and (menu.page_id or menu.app_id):
-        target = menu.page_id or menu.app_id
         slug = resolved_slug if resolved_slug is not None else get_instance_slug(menu, db, lookup_cache)
         if slug and slug != "-1":
-            return f"{API_VERSION_PREFIX}/pages/{slug}"
-        return f"{API_VERSION_PREFIX}/pages"
+            return f"{API_VERSION_PREFIX}/custom/page/{slug}"
+        return f"{API_VERSION_PREFIX}/custom/page"
 
     return menu.external_url or "#"
 
@@ -781,13 +782,13 @@ def get_instance_slug(
 ) -> Optional[str]:
     """
     [인스턴스 ID -> 슬러그(Slug) 변환 헬퍼 (PostgreSQL 타입 안전 가드)]
-    - INSTANCE 앱(board, page 등)에 연결된 인스턴스 식별자를 슬러그(slug)로 변환합니다.
+    - INSTANCE(board) / CUSTOM(page) 앱에 연결된 인스턴스 식별자를 슬러그(slug)로 변환합니다.
     - menu.app_instance_id가 정수형 ID인 경우 DB 조회, 이미 문자열 슬러그인 경우 즉시 반환하여
       PostgreSQL 'invalid input syntax for type integer' 예외(500 에러)를 원천 차단합니다.
     """
-    if menu.app_instance_id is None:
+    raw_val = menu.app_instance_id if menu.app_instance_id is not None else menu.page_id
+    if raw_val is None:
         return None
-    raw_val = menu.app_instance_id
     if raw_val == -1 or str(raw_val) == "-1":
         return "-1"
 
@@ -811,7 +812,7 @@ def get_instance_slug(
         return str(raw_val)
 
     # 3. 페이지(Page) 인스턴스 슬러그 역추적
-    if clean_id in ['page', 'pages'] or menu.link_type in ['PAGE', 'PAGES']:
+    if clean_id == 'page' or menu.link_type in ['PAGE', 'PAGES']:
         if int_id is not None:
             if lookup_cache is not None and "page_slugs" in lookup_cache:
                 slug_val = lookup_cache["page_slugs"].get(int_id)
@@ -886,6 +887,7 @@ def get_public_menus(
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
     """일반 사용자용 공개 메뉴 조회 (4단계 그룹/랭킹 권한 필터링 및 지능형 URL 생성 포함)"""
+    migrate_boards_to_board(db)
     # 📌 SQL 단계에서 min_rank로 미리 자르지 않고(그룹 허용 예외 반영을 위해),
     #    가시성(is_visible=True)이 켜진 루트 메뉴를 모두 가져온 뒤 4단계 권한 엔진(filter_menu_tree)으로 판별합니다.
     root_menus = (
@@ -901,7 +903,8 @@ def get_public_menus(
 
 @router.get("/menu", response_model=List[admin_schema.MenuSchema])
 def get_all_menus(db: Session = Depends(get_db), admin: User = Depends(check_menu_admin_read)):
-    """관리자용 전체 메뉴 트리 (admin_menu 거버넌스 연동)"""
+    """관리자용 전체 메뉴 트리 (menu 거버넌스 연동)"""
+    migrate_boards_to_board(db)
     legacy_menus = db.query(Menu).filter(Menu.link_type == "APP").all()
     if legacy_menus:
         for lm in legacy_menus:
@@ -1423,6 +1426,28 @@ def admin_update_dayoff_status(
         db_dayoff.status = new_status
         
     db.commit()
+
+    # 🔔 [Web Push] 관리자 휴무 승인/반려 시 신청 사원 본인에게 결과 푸시 발송
+    if new_status in ("APPROVED", "REJECTED"):
+        try:
+            from domain.push.push_service import (
+                is_push_domain_enabled,
+                dispatch_push_async,
+                send_push_to_user,
+            )
+            if is_push_domain_enabled(db, "dayoff_result"):
+                status_label = "승인" if new_status == "APPROVED" else "반려"
+                date_label = str(db_dayoff.date) if getattr(db_dayoff, "date", None) else "신청일"
+                dispatch_push_async(
+                    send_push_to_user,
+                    user_id=db_dayoff.user_id,
+                    title=f"휴무 신청이 {status_label}되었습니다",
+                    body=f"{date_label} 휴무 신청 건이 {status_label} 처리되었습니다.",
+                    url="/v1/custom/dayoff",
+                )
+        except Exception:
+            pass
+
     return {"message": "success", "new_status": new_status}
 
 @router.get("/dayoff-policy")
@@ -2041,6 +2066,135 @@ def load_vehicles_metadata():
         return DEFAULT_VEHICLES_METADATA
 
 
+def query_active_routes_for_date(db: Session, target_date: date) -> List[dict]:
+    """지정된 날짜(target_date) 기준 운행 중인 노선 마스터 목록을 반환합니다."""
+    masters = db.query(RouteMaster).filter(
+        RouteMaster.start_date <= target_date,
+        (RouteMaster.end_date == None) | (RouteMaster.end_date >= target_date)
+    ).order_by(RouteMaster.route_name.asc()).all()
+
+    return [
+        {
+            "id": m.id,
+            "route_name": m.route_name,
+            "route_type": m.route_type,
+            "start_date": str(m.start_date),
+            "end_date": str(m.end_date) if m.end_date else None,
+            "vehicle_count": m.vehicle_count,
+            "version": m.version,
+            "is_regular_duty": m.is_regular_duty
+        }
+        for m in masters
+    ]
+
+
+def build_daily_dispatch_rows(db: Session, target_date: date, route_master_id: int) -> List[dict]:
+    """
+    지정된 날짜와 노선 마스터 ID에 해당하는 일일 배차 행 목록을 계산해 반환합니다.
+    (당연근무 연속 탑승, 어제 기사 자동 상속 및 노선별 전담차량 목데이터 풀 적용)
+    """
+    master = db.query(RouteMaster).filter(RouteMaster.id == route_master_id).first()
+    if not master:
+        raise HTTPException(status_code=404, detail="해당 노선 마스터를 찾을 수 없습니다.")
+
+    timetables = db.query(RouteTimetable).filter(
+        RouteTimetable.route_master_id == route_master_id
+    ).order_by(RouteTimetable.seq.asc()).all()
+
+    if not timetables:
+        return []
+
+    N = len(timetables)
+    delta_days = max(0, (target_date - master.start_date).days)
+
+    # 드라이버 & 차량 메타데이터 로드 (차량 번호 목데이터 풀 유지)
+    load_drivers_metadata()
+    vehicles_dict = load_vehicles_metadata()
+
+    route_name = master.route_name or ""
+    if "121" in route_name or "122" in route_name:
+        target_fleet = vehicles_dict.get("121/122", [])
+    elif "291" in route_name or "292" in route_name or "293" in route_name:
+        target_fleet = vehicles_dict.get("291/292/293", [])
+    else:
+        target_fleet = vehicles_dict.get("121/122", []) + vehicles_dict.get("291/292/293", [])
+
+    timetable_ids = [t.id for t in timetables]
+
+    def _load_dispatch_map(d_date: date) -> dict:
+        rows = db.query(models.Dispatch).filter(
+            models.Dispatch.target_date == d_date,
+            models.Dispatch.timetable_id.in_(timetable_ids)
+        ).all()
+        return {row.timetable_id: row for row in rows}
+
+    dispatch_map = _load_dispatch_map(target_date)
+    tomorrow_map = _load_dispatch_map(target_date + timedelta(days=1))
+    yesterday_map = _load_dispatch_map(target_date - timedelta(days=1))
+
+    result = []
+    for i, t in enumerate(timetables):
+        ref_t = timetables[(i + delta_days) % N]
+        ref_t_yesterday = timetables[(i + delta_days - 1) % N]
+        ref_t_tomorrow = timetables[(i + delta_days + 1) % N]
+
+        is_yesterday_regular_duty = ref_t_yesterday.is_regular_duty
+        is_tomorrow_regular_duty = ref_t_tomorrow.is_regular_duty
+
+        yesterday_disp = yesterday_map.get(t.id)
+        yesterday_driver_name = (
+            yesterday_disp.driver_name if (yesterday_disp and yesterday_disp.driver_name) else None
+        )
+
+        d = dispatch_map.get(t.id)
+        if d is not None:
+            driver_name = d.driver_name or ""
+            is_inherited = False
+        elif is_yesterday_regular_duty and yesterday_driver_name:
+            driver_name = yesterday_driver_name
+            is_inherited = True
+        else:
+            driver_name = ""
+            is_inherited = False
+
+        default_vehicle = target_fleet[i] if i < len(target_fleet) else ""
+        vehicle_no = d.vehicle_no if (d and d.vehicle_no) else default_vehicle
+
+        td_d = tomorrow_map.get(t.id)
+        if td_d and td_d.driver_name and td_d.driver_name.strip():
+            tomorrow_driver_name = td_d.driver_name
+            is_tomorrow_inherited = False
+        elif ref_t.is_regular_duty and driver_name and driver_name.strip():
+            tomorrow_driver_name = driver_name
+            is_tomorrow_inherited = True
+        else:
+            tomorrow_driver_name = ""
+            is_tomorrow_inherited = False
+
+        result.append({
+            "id": d.id if d else None,
+            "timetable_id": t.id,
+            "seq": ref_t.seq,
+            "start_time": (d.start_time if d else None) or ref_t.start_time,
+            "end_time": ref_t.end_time,
+            "start_location": ref_t.start_location,
+            "end_location": ref_t.end_location,
+            "driver_name": driver_name,
+            "tomorrow_driver_name": tomorrow_driver_name,
+            "yesterday_driver_name": yesterday_driver_name,
+            "vehicle_no": vehicle_no,
+            "status": d.status if d else "DRAFT",
+            "memo": (d.memo if d else "") or "",
+            "is_regular_duty": ref_t.is_regular_duty,
+            "is_tomorrow_regular_duty": is_tomorrow_regular_duty,
+            "is_yesterday_regular_duty": is_yesterday_regular_duty,
+            "is_inherited": is_inherited,
+            "is_tomorrow_inherited": is_tomorrow_inherited
+        })
+
+    return result
+
+
 @router.get("/dispatch/active-routes", response_model=List[dict])
 def list_active_routes_for_date(
     target_date: date,
@@ -2051,25 +2205,7 @@ def list_active_routes_for_date(
     지정된 날짜(target_date) 기준으로 운행(활성) 중인 노선 마스터 목록을 조회합니다.
     """
     try:
-        # start_date <= target_date <= end_date (or end_date is null)
-        masters = db.query(RouteMaster).filter(
-            RouteMaster.start_date <= target_date,
-            (RouteMaster.end_date == None) | (RouteMaster.end_date >= target_date)
-        ).order_by(RouteMaster.route_name.asc()).all()
-
-        return [
-            {
-                "id": m.id,
-                "route_name": m.route_name,
-                "route_type": m.route_type,
-                "start_date": str(m.start_date),
-                "end_date": str(m.end_date) if m.end_date else None,
-                "vehicle_count": m.vehicle_count,
-                "version": m.version,
-                "is_regular_duty": m.is_regular_duty
-            }
-            for m in masters
-        ]
+        return query_active_routes_for_date(db, target_date)
     except Exception as e:
         print(f"❌ [AdminDispatch] Error listing active routes: {e}")
         raise HTTPException(status_code=500, detail="활성 노선 정보를 조회하는 중 오류가 발생하였습니다.")
@@ -2084,166 +2220,9 @@ def get_daily_dispatch(
 ):
     """
     지정된 날짜와 노선 마스터 ID에 해당하는 배차 목록을 조회합니다.
-    - 당연근무일 경우 전날 실제 기사 승계 추천
-    - 그 외의 미저장 칸은 빈 칸("") 처리
-    - "어제 실제 운행했던 기사 이름(yesterday_driver_name)"을 반환하여 프론트엔드 자동 채우기 연산 지원
     """
     try:
-        master = db.query(RouteMaster).filter(RouteMaster.id == route_master_id).first()
-        if not master:
-            raise HTTPException(status_code=404, detail="해당 노선 마스터를 찾을 수 없습니다.")
-
-        timetables = db.query(RouteTimetable).filter(
-            RouteTimetable.route_master_id == route_master_id
-        ).order_by(RouteTimetable.seq.asc()).all()
-
-        if not timetables:
-            return []
-
-        N = len(timetables)
-
-        delta_days = (target_date - master.start_date).days
-        if delta_days < 0:
-            delta_days = 0
-
-        # 드라이버 & 차량 메타데이터 로드
-        role_map, vehicle_map, vehicle_drivers = load_drivers_metadata()
-        vehicles_dict = load_vehicles_metadata()
-
-        # 노선별 기본 전담차량 풀 구성
-        route_name = master.route_name or ""
-        target_fleet = []
-        if "121" in route_name or "122" in route_name:
-            target_fleet = vehicles_dict.get("121/122", [])
-        elif "291" in route_name or "292" in route_name or "293" in route_name:
-            target_fleet = vehicles_dict.get("291/292/293", [])
-        else:
-            target_fleet = vehicles_dict.get("121/122", []) + vehicles_dict.get("291/292/293", [])
-
-        # 대상 시간표 ID 필터로 금일 배차 맵 구하기
-        timetable_ids = [t.id for t in timetables]
-        existing_dispatches = db.query(models.Dispatch).filter(
-            models.Dispatch.target_date == target_date,
-            models.Dispatch.timetable_id.in_(timetable_ids)
-        ).all()
-        dispatch_map = {d.timetable_id: d for d in existing_dispatches}
-
-        # 내일 날짜 산출 및 배차 맵 구하기
-        tomorrow_date = target_date + timedelta(days=1)
-        tomorrow_dispatches = db.query(models.Dispatch).filter(
-            models.Dispatch.target_date == tomorrow_date,
-            models.Dispatch.timetable_id.in_(timetable_ids)
-        ).all()
-        tomorrow_map = {td.timetable_id: td for td in tomorrow_dispatches}
-
-        # 어제 날짜 산출 및 배차 맵 구하기 (어제 실제 운행 기사 조회용)
-        yesterday_date = target_date - timedelta(days=1)
-        yesterday_dispatches = db.query(models.Dispatch).filter(
-            models.Dispatch.target_date == yesterday_date,
-            models.Dispatch.timetable_id.in_(timetable_ids)
-        ).all()
-        yesterday_map = {yd.timetable_id: yd for yd in yesterday_dispatches}
-
-        # 1단계: 오늘 각 물리적 행에 대응하는 기사 정보 pre-calculation (동일 물리적 행에서의 승계 처리)
-        today_drivers = []
-        for i, t in enumerate(timetables):
-            shifted_index = (i + delta_days) % N
-            ref_t = timetables[shifted_index]
-
-            # 어제(전일) 이 물리적 행에 대응되었던 시간표의 당연근무 여부 산출
-            yesterday_shifted_index = (i + delta_days - 1) % N
-            ref_t_yesterday = timetables[yesterday_shifted_index]
-            is_yesterday_regular_duty = ref_t_yesterday.is_regular_duty
-
-            # 당연근무 여부와 관계없이, 주기사/보조기사의 물리적 행(t.id)은 고정이므로 어제 동일 행의 배차 조회
-            yesterday_disp = yesterday_map.get(t.id)
-            yesterday_driver_name = yesterday_disp.driver_name if (yesterday_disp and yesterday_disp.driver_name) else None
-
-            d = dispatch_map.get(t.id)
-            driver_name = ""
-            is_inherited = False
-
-            if d is not None:
-                driver_name = d.driver_name or ""
-                is_inherited = False
-            else:
-                # 오늘 배차 레코드가 없는 경우, 어제 당연근무(1로번)에 해당했다면 어제 동일 행의 기사명을 상속 (연속 근무)
-                if is_yesterday_regular_duty:
-                    if yesterday_driver_name:
-                        driver_name = yesterday_driver_name
-                        is_inherited = True
-
-            today_drivers.append({
-                "driver_name": driver_name,
-                "is_inherited": is_inherited,
-                "yesterday_driver_name": yesterday_driver_name,
-                "is_yesterday_regular_duty": is_yesterday_regular_duty
-            })
-
-        # 2단계: 내일 당연근무를 수행할 기사 예측을 포함한 최종 결과 목록 구성
-        result = []
-        for i, t in enumerate(timetables):
-            shifted_index = (i + delta_days) % N
-            ref_t = timetables[shifted_index]
-
-            # 내일 날짜의 shifted_index 및 당연근무 여부 산출
-            tomorrow_shifted_index = (i + delta_days + 1) % N
-            ref_t_tomorrow = timetables[tomorrow_shifted_index]
-            is_tomorrow_regular_duty = ref_t_tomorrow.is_regular_duty
-
-            default_vehicle = target_fleet[i] if i < len(target_fleet) else ""
-
-            today_info = today_drivers[i]
-            driver_name = today_info["driver_name"]
-            is_inherited = today_info["is_inherited"]
-            yesterday_driver_name = today_info["yesterday_driver_name"]
-
-            d = dispatch_map.get(t.id)
-            vehicle_no = default_vehicle
-            if d and d.vehicle_no:
-                vehicle_no = d.vehicle_no
-
-            # 3. 내일 날짜 기사 및 상속 여부 결정
-            td_d = tomorrow_map.get(t.id)
-            tomorrow_driver_name = ""
-            is_tomorrow_inherited = False
-
-            if td_d and td_d.driver_name and td_d.driver_name.strip():
-                tomorrow_driver_name = td_d.driver_name
-                is_tomorrow_inherited = False
-            else:
-                # 오늘 당연근무(1로번)인 경우: 오늘과 내일 연속 근무이므로 교대 로테이션 없이 오늘 기사를 내일 기사로 그대로 유지
-                if ref_t.is_regular_duty:
-                    if driver_name and driver_name.strip():
-                        tomorrow_driver_name = driver_name
-                        is_tomorrow_inherited = True
-                else:
-                    # 일반 로테이션 추천은 프론트엔드에서 수동/자동으로만 관리하므로 백엔드는 예측 공란 처리
-                    tomorrow_driver_name = ""
-                    is_tomorrow_inherited = False
-
-            result.append({
-                "id": d.id if d else None,
-                "timetable_id": t.id,
-                "seq": ref_t.seq,
-                "start_time": (d.start_time if d else None) or ref_t.start_time,
-                "end_time": ref_t.end_time,
-                "start_location": ref_t.start_location,
-                "end_location": ref_t.end_location,
-                "driver_name": driver_name,
-                "tomorrow_driver_name": tomorrow_driver_name,
-                "yesterday_driver_name": yesterday_driver_name,
-                "vehicle_no": vehicle_no,
-                "status": d.status if d else "DRAFT",
-                "memo": (d.memo if d else "") or "",
-                "is_regular_duty": ref_t.is_regular_duty,
-                "is_tomorrow_regular_duty": is_tomorrow_regular_duty,
-                "is_yesterday_regular_duty": today_info["is_yesterday_regular_duty"],
-                "is_inherited": is_inherited,
-                "is_tomorrow_inherited": is_tomorrow_inherited
-            })
-
-        return result
+        return build_daily_dispatch_rows(db, target_date, route_master_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -2330,6 +2309,56 @@ def save_daily_dispatch(
                     db_dispatch_tomorrow.status = payload.status
 
         db.commit()
+
+        # 🔔 [Web Push] 배차 확정(CONFIRMED) 저장 시 배정된 운전원들에게 노선 확정 푸시 발송
+        if payload.status == "CONFIRMED":
+            try:
+                from sqlalchemy import or_
+                from domain.push.push_service import (
+                    is_push_domain_enabled,
+                    dispatch_push_async,
+                    send_push_to_user,
+                )
+                if is_push_domain_enabled(db, "dispatch_confirmed"):
+                    timetable_ids = list({r.timetable_id for r in payload.rows if r.timetable_id})
+                    route_map = {}
+                    if timetable_ids:
+                        tt_rows = (
+                            db.query(models.RouteTimetable.id, models.RouteMaster.route_name)
+                            .join(models.RouteMaster, models.RouteTimetable.master_id == models.RouteMaster.id)
+                            .filter(models.RouteTimetable.id.in_(timetable_ids))
+                            .all()
+                        )
+                        route_map = {tid: rname for tid, rname in tt_rows if rname}
+
+                    driver_routes: dict[str, list[str]] = {}
+                    for r in payload.rows:
+                        dname = (r.driver_name or "").strip()
+                        if not dname:
+                            continue
+                        rname = route_map.get(r.timetable_id, "")
+                        bucket = driver_routes.setdefault(dname, [])
+                        if rname and rname not in bucket:
+                            bucket.append(rname)
+
+                    if driver_routes:
+                        driver_names = list(driver_routes.keys())
+                        matched_users = db.query(User).filter(
+                            or_(User.real_name.in_(driver_names), User.username.in_(driver_names))
+                        ).all()
+                        for u in matched_users:
+                            routes = driver_routes.get(u.real_name or "") or driver_routes.get(u.username) or []
+                            route_prefix = f"{', '.join(routes)} 노선 " if routes else ""
+                            dispatch_push_async(
+                                send_push_to_user,
+                                user_id=u.id,
+                                title=f"{route_prefix}배차가 확정되었습니다",
+                                body=f"{payload.target_date} 배차가 확정되었습니다. 배차표를 확인해 주세요.",
+                                url="/v1/custom/dispatch",
+                            )
+            except Exception:
+                pass
+
         return {"message": "success"}
     except Exception as e:
         db.rollback()

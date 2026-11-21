@@ -194,14 +194,24 @@ def notify(
 
     if should_send_push:
         try:
-            from domain.push.push_service import send_push_to_all
+            from domain.push.push_service import send_push_to_all, send_push_to_users
             push_title = title or ("🚨 [긴급 공지]" if level >= 4 else "📢 [사내 알림]")
-            if background_tasks:
+            push_url = link or "/"
+            if resolved_uids:
+                if background_tasks:
+                    background_tasks.add_task(
+                        send_push_to_users,
+                        user_ids=list(resolved_uids),
+                        title=push_title,
+                        body=message,
+                        url=push_url,
+                    )
+            elif background_tasks:
                 background_tasks.add_task(
                     send_push_to_all,
                     title=push_title,
                     body=message,
-                    url=link or "/"
+                    url=push_url,
                 )
         except Exception as e:
             logger.warning(f"⚠️ [core.notify] Web Push 발송 예약 실패 (무시됨): {e}")

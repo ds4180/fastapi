@@ -50,6 +50,40 @@ def dayoff_create(
         message=f"'{current_user.username}'이(가) {_dayoff_create.type.value} 휴무 {len(_dayoff_create.dates)}일을 신청했습니다.",
     )
 
+    # 🔔 [Web Push] 허가제(APPROVAL -> PENDING) 휴무 신청 시 담당 관리자/사무실 직원에게 푸시 발송
+    try:
+        from models import DayOff
+        from domain.push.push_service import (
+            is_push_domain_enabled,
+            dispatch_push_async,
+            send_push_to_app_users,
+        )
+        if _dayoff_create.dates and is_push_domain_enabled(db, "dayoff_request"):
+            has_pending = (
+                db.query(DayOff.id)
+                .filter(
+                    DayOff.user_id == current_user.id,
+                    DayOff.date.in_(_dayoff_create.dates),
+                    DayOff.status == "PENDING",
+                    DayOff.is_deleted == False,
+                )
+                .first()
+                is not None
+            )
+            if has_pending:
+                applicant_name = current_user.real_name or current_user.username
+                dispatch_push_async(
+                    send_push_to_app_users,
+                    app_id="dayoff",
+                    title="새 휴무·결근계 승인 요청",
+                    body=f"{applicant_name}님이 {_dayoff_create.type.value} 휴무 {len(_dayoff_create.dates)}일을 신청했습니다.",
+                    url="/v1/admin/dayoff",
+                    action="write",
+                    exclude_user_id=current_user.id,
+                )
+    except Exception:
+        pass
+
 @router.get("/list", response_model=dayoff_schema.DayOffListResponse)
 def dayoff_list(
     skip: int = 0,

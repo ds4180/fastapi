@@ -18,7 +18,7 @@ logger = logging.getLogger("app_service")
 # 🏛️ 시스템 등록 앱 18종 3대 분류 정의 (순수 도메인 app_id 사용, /admin/+page.svelte 공식 명칭과 완전 동기화)
 # 1. SYSTEM (13종): 사용자 화면이 없는 순수 시스템 필수 관제/운영 앱 (메뉴, 권한, 환경설정 등; 정적 /v1/pages 는 독립 레이어로 제외)
 # 2. CUSTOM (4종): 단독 비즈니스/도메인 앱 (배차, 노선 마스터, 결근계, 페이지 엔진 'page')
-# 3. INSTANCE (1종): 다중 인스턴스 추상화 기본형 앱 (게시판 인스턴스 관리 'boards')
+# 3. INSTANCE (1종): 다중 인스턴스 추상화 기본형 앱 (게시판 인스턴스 관리 'board')
 DEFAULT_SYSTEM_APPS = [
     {
         "app_id": "dashboard",
@@ -138,12 +138,12 @@ DEFAULT_SYSTEM_APPS = [
         "deny_groups": [],
     },
     {
-        "app_id": "boards",
+        "app_id": "board",
         "name": "게시판 인스턴스 관리",
         "title": "게시판 인스턴스 관리",
         "app_type": "INSTANCE",
         "description": "추상화 다중 게시판(공지, 자유 등) 슬러그 생성 및 레이아웃 정책 설정 (다중 인스턴스 엔진)",
-        "frontend_route": "/v1/admin/boards",
+        "frontend_route": "/v1/admin/board",
         "main_component": "BoardEngine",
         "icon_default": "mdi:clipboard-text-outline",
         "min_read_rank": 4,
@@ -271,12 +271,89 @@ DEFAULT_SYSTEM_APPS = [
 ]
 
 
+def migrate_boards_to_board(db: Session) -> bool:
+    """
+    [FK 무결성 안전 이관: app_id 'boards' -> 'board' 및 경로 단수 통일]
+    Menu.app_id -> app_registry.app_id 외래키(menu_app_id_fkey) 제약 조건을 위반하지 않도록:
+    1) 신규 'board' AppRegistry INSERT + flush
+    2) Menu.app_id == 'boards' 및 구형 external_url(/v1/admin/boards, /v1/app/boards) UPDATE + flush
+    3) 구 'boards' AppRegistry DELETE + commit
+    순서로 멱등하게 이관합니다.
+    """
+    from models.system import Menu
+
+    try:
+        legacy = db.query(AppRegistry).filter(AppRegistry.app_id == "boards").first()
+        canonical = db.query(AppRegistry).filter(AppRegistry.app_id == "board").first()
+        changed = False
+
+        if legacy:
+            if not canonical:
+                allow_val = legacy.allow_groups
+                deny_val = legacy.deny_groups
+                canonical = AppRegistry(
+                    app_id="board",
+                    name=legacy.name,
+                    title=legacy.title,
+                    description=legacy.description,
+                    app_type=legacy.app_type or "INSTANCE",
+                    frontend_route="/v1/admin/board",
+                    main_component=legacy.main_component or "BoardEngine",
+                    icon_default=legacy.icon_default or "mdi:clipboard-text-outline",
+                    min_read_rank=legacy.min_read_rank,
+                    min_write_rank=legacy.min_write_rank,
+                    allow_groups=dict(allow_val) if isinstance(allow_val, dict) else list(allow_val or []),
+                    deny_groups=dict(deny_val) if isinstance(deny_val, dict) else list(deny_val or []),
+                    admin_ids=list(legacy.admin_ids or []),
+                    config_schema=dict(legacy.config_schema or {}),
+                    is_active=legacy.is_active if legacy.is_active is not None else True,
+                )
+                db.add(canonical)
+                db.flush()
+            elif canonical.frontend_route == "/v1/admin/boards":
+                canonical.frontend_route = "/v1/admin/board"
+                db.flush()
+
+            for m in db.query(Menu).filter(Menu.app_id == "boards").all():
+                m.app_id = "board"
+                if m.external_url == "/v1/admin/boards":
+                    m.external_url = "/v1/admin/board"
+                elif m.external_url == "/v1/app/boards":
+                    m.external_url = "/v1/app/board"
+            db.flush()
+
+            db.delete(legacy)
+            changed = True
+        elif canonical and canonical.frontend_route == "/v1/admin/boards":
+            canonical.frontend_route = "/v1/admin/board"
+            changed = True
+
+        url_map = {
+            "/v1/admin/boards": "/v1/admin/board",
+            "/v1/app/boards": "/v1/app/board",
+        }
+        for sm in db.query(Menu).filter(Menu.external_url.in_(list(url_map.keys()))).all():
+            sm.external_url = url_map[sm.external_url]
+            changed = True
+
+        if changed:
+            db.commit()
+            logger.info("✨ [AppService] 'boards' -> 'board' 식별자 및 메뉴 URL 안전 이관 완료")
+        return changed
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"⚠️ [AppService] 'boards' -> 'board' 이관 중 오류 (롤백됨): {e}")
+        return False
+
+
 def bootstrap_system_apps(db: Session) -> dict:
     """
     [시스템 앱 자율 부트스트랩 엔진]
-    - DB에 없는 18종 시스템 앱(`admin_*`)을 멱등(Idempotent)하게 자동 등록합니다.
-    - 기존에 등록된 앱의 아이콘 및 공식 명칭(title, name, description)을 안전하게 동기화합니다.
+    - DB에 없는 18종 시스템 앱을 멱등(Idempotent)하게 자동 등록합니다.
+    - 구버전 'boards' 식별자는 외래키 무결성을 보장하며 'board'로 안전 이관합니다.
     """
+    migrate_boards_to_board(db)
+
     created_count = 0
     updated_count = 0
     skipped_count = 0
@@ -285,34 +362,18 @@ def bootstrap_system_apps(db: Session) -> dict:
         existing = db.query(AppRegistry).filter(AppRegistry.app_id == app_meta["app_id"]).first()
         if existing:
             updated = False
-            # 기본 아이콘이 변경된 경우 안전하게 동기화 보정
-            if app_meta.get("icon_default") and existing.icon_default != app_meta["icon_default"]:
-                existing.icon_default = app_meta["icon_default"]
-                updated = True
-            # 제목(title) 또는 명칭(name)이 변경된 경우 동기화 보정
-            if app_meta.get("title") and existing.title != app_meta["title"]:
-                existing.title = app_meta["title"]
-                updated = True
-            if app_meta.get("name") and existing.name != app_meta["name"]:
-                existing.name = app_meta["name"]
-                updated = True
-            if app_meta.get("description") and existing.description != app_meta["description"]:
-                existing.description = app_meta["description"]
-                updated = True
-
-            # 컴포넌트(main_component) 동기화 보정
-            if "main_component" in app_meta and existing.main_component != app_meta["main_component"]:
-                existing.main_component = app_meta["main_component"]
-                updated = True
-
-            # 3대 분류(app_type: SYSTEM, CUSTOM, INSTANCE) 동기화 보정
-            expected_type = app_meta.get("app_type", "SYSTEM")
-            if existing.app_type != expected_type:
-                existing.app_type = expected_type
+            # 관리자가 admin/apps에서 수정한 명칭·설명·아이콘은 보존하고, 비어 있는 필수 메타 필드만 보충합니다.
+            for field in ("icon_default", "title", "name", "description", "frontend_route", "app_type", "main_component"):
+                default_val = app_meta.get(field)
+                current_val = getattr(existing, field, None)
+                if default_val and not current_val:
+                    setattr(existing, field, default_val)
+                    updated = True
+            if existing.app_id == "board" and existing.frontend_route == "/v1/admin/boards":
+                existing.frontend_route = "/v1/admin/board"
                 updated = True
 
             if updated:
-                db.commit()
                 updated_count += 1
             else:
                 skipped_count += 1

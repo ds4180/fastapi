@@ -99,7 +99,7 @@ BACKUP_APP_SPECS: Dict[str, Dict[str, Any]] = {
             {"key": "is_regular_duty", "label": "당연근무", "default": False},
         ],
     },
-    "boards": {
+    "board": {
         "model": Post,
         "date_field": "create_date",
         "is_datetime": True,
@@ -281,6 +281,7 @@ SENSITIVE_COLUMNS = {
 APP_TABLE_ALIASES: Dict[str, str] = {
     "observability": "audit_logs",
     "audit_log": "audit_logs",
+    "board": "post",
     "boards": "post",
     "media": "media_assets",
     "user_manage": "users",

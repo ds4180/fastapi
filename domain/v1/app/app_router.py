@@ -10,6 +10,7 @@ from typing import Optional, Any, Dict
 
 router = APIRouter(prefix="/v1/app", tags=["App Engine"])
 
+
 @router.get("/data/{app_id}/{slug:path}")
 def get_app_data(
     app_id: str,
@@ -26,29 +27,33 @@ def get_app_data(
     [Data-Driven] 범용 앱 데이터 제공 API
     AppRegistry의 설정에 따라 동적으로 모델을 탐색하고 서비스 바인딩을 조립합니다.
     """
-    # 1. 앱 레지스트리 정보 확인
-    app_info = db.query(AppRegistry).filter(AppRegistry.app_id == app_id).first()
+    canonical_app_id = "board" if app_id in ("board", "boards") else app_id
+
+    # 1. 앱 레지스트리 정보 확인 (board 정규 ID 우선, 기존 DB 'boards' 레코드 하위 호환 조회)
+    app_info = db.query(AppRegistry).filter(AppRegistry.app_id == canonical_app_id).first()
+    if not app_info and canonical_app_id == "board":
+        app_info = db.query(AppRegistry).filter(AppRegistry.app_id == "boards").first()
     if not app_info:
         raise ResourceNotFoundError(f"등록되지 않은 앱입니다: '{app_id}'", resource="app", resource_id=app_id)
 
     # 1-1. 🛡️ 앱 활성 여부 및 권한 검문
-    # - board/boards/page/pages 같은 인스턴스형 앱은 AppRegistry 랭크가 '인스턴스 생성/관리' 권한이므로
-    #   개별 게시물/페이지 열람은 아래 각 인스턴스(can_access_board / can_access_page)의 4단계 권한으로 판단합니다.
+    # - board / page 처럼 개별 인스턴스(BoardConfig, Page)가 자체 권한을 가지는 앱은
+    #   AppRegistry 랭크가 '관리자 화면 진입' 기준이므로 아래 인스턴스별 4단계 권한으로 판단합니다.
     if not app_info.is_active:
         raise AccessDeniedError(
-            f"비활성화된 앱('{app_info.title or app_id}')입니다.",
+            f"비활성화된 앱('{app_info.title or canonical_app_id}')입니다.",
             resource="app",
-            resource_id=app_id
+            resource_id=canonical_app_id
         )
-    if app_id not in ("board", "boards", "page", "pages") and not can_access_app(
+    if canonical_app_id not in ("board", "page") and not can_access_app(
         user=current_user,
         app_obj=app_info,
         action="read",
     ):
         raise AccessDeniedError(
-            f"해당 앱('{app_info.title or app_id}')에 접근할 권한이 없습니다.",
+            f"해당 앱('{app_info.title or canonical_app_id}')에 접근할 권한이 없습니다.",
             resource="app",
-            resource_id=app_id
+            resource_id=canonical_app_id
         )
 
     # 2. 경로 분석 (slug: board_slug/id or just id)
@@ -66,7 +71,7 @@ def get_app_data(
     # TODO: 향후 config_schema의 instance_info 메타데이터를 100% 활용하도록 고도화
     
     try:
-        if app_id == "board" or app_id == "boards":
+        if canonical_app_id == "board":
             # 1. 경로 분석 (slug: board_slug/id or just board_slug)
             board_slug = parts[0]
             board = db.query(BoardConfig).filter(BoardConfig.slug == board_slug).first()
@@ -105,7 +110,7 @@ def get_app_data(
                 result["instance"] = {"posts": posts, "total": total}
                 result["bindings"] = resolve_board_services(db, board)
 
-        elif app_id == "page" or app_id == "pages":
+        elif canonical_app_id == "page":
             # 페이지 로직: slug = "about-us"
             page_slug = parts[0]
             page = db.query(Page).filter(Page.slug == page_slug).first()
