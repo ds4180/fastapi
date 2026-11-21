@@ -123,13 +123,15 @@ def update_comment(db: Session, db_comment: Comment, comment_in: CommentUpdate):
 def delete_comment(db: Session, db_comment: Comment):
     from domain.media import media_service
 
-    linked_assets = db.query(MediaAsset).filter(
-        MediaAsset.app_id == "comment",
-        MediaAsset.target_id == str(db_comment.id),
-        MediaAsset.is_deleted == False,
-    ).all()
-    for asset in linked_assets:
-        media_service.delete_asset(db, asset.id)
+    target_ids = _collect_comment_ids([db_comment])
+    if target_ids:
+        linked_assets = db.query(MediaAsset).filter(
+            MediaAsset.app_id == "comment",
+            MediaAsset.target_id.in_(target_ids),
+            MediaAsset.is_deleted == False,
+        ).all()
+        for asset in linked_assets:
+            media_service.delete_asset(db, asset.id)
 
     db.delete(db_comment)
     db.commit()

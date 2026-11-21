@@ -1632,10 +1632,15 @@ def create_service_instance(data: admin_schema.ServiceInstanceCreate, db: Sessio
 
 @router.put("/service-instances/{instance_id}", response_model=admin_schema.ServiceInstanceSchema)
 def update_service_instance(instance_id: int, data: admin_schema.ServiceInstanceUpdate, db: Session = Depends(get_db), admin: User = Depends(check_service_admin_write)):
+    from sqlalchemy.orm.attributes import flag_modified
     db_obj = db.query(ServiceInstance).filter(ServiceInstance.id == instance_id).first()
     if not db_obj: raise HTTPException(status_code=404)
-    for k, v in data.dict(exclude_unset=True).items():
+    update_fields = data.model_dump(exclude_unset=True)
+    for k, v in update_fields.items():
         setattr(db_obj, k, v)
+        if k == "service_app_ids":
+            # JSONB/JSON 컬럼 내부 구조 변경을 SQLAlchemy가 누락하지 않도록 명시적 마킹
+            flag_modified(db_obj, "service_app_ids")
     db.commit()
     db.refresh(db_obj)
     return db_obj
@@ -1968,13 +1973,32 @@ import json
 import os
 from datetime import timedelta
 
+DEFAULT_VEHICLES_METADATA = {
+    "121/122": ["3164", "3118", "3103", "3145"],
+    "291/292/293": [
+        "3139", "3121", "3128", "3151", "3146", "3137",
+        "3125", "3111", "3158", "3160", "3150", "3144"
+    ]
+}
+
+def _resolve_shared_data_path(filename: str) -> Optional[str]:
+    candidates = [
+        f"/app/shared_data/{filename}",
+        f"/app/data/{filename}",
+        f"/home/lee/uv-code/svelte5/src/lib/data/{filename}",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
 def load_drivers_metadata():
     """
     Svelte 프론트엔드의 drivers.json 파일을 읽어서 기사 메타데이터를 구조화합니다.
     """
     try:
-        path = "/home/lee/uv-code/svelte5/src/lib/data/drivers.json"
-        if os.path.exists(path):
+        path = _resolve_shared_data_path("drivers.json")
+        if path:
             with open(path, "r", encoding="utf-8") as f:
                 drivers = json.load(f)
                 role_map = {}
@@ -2001,17 +2025,20 @@ def load_drivers_metadata():
 def load_vehicles_metadata():
     """
     Svelte 프론트엔드의 vehicles.json 파일을 읽어서 노선별 차량 풀을 가져옵니다.
+    (컨테이너 미마운트 환경에서는 기본 전담차량 풀로 폴백)
     """
     try:
-        path = "/home/lee/uv-code/svelte5/src/lib/data/vehicles.json"
-        if os.path.exists(path):
+        path = _resolve_shared_data_path("vehicles.json")
+        if path:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data.get("vehicles", {})
-        return {}
+                vehicles = data.get("vehicles", {})
+                if vehicles:
+                    return vehicles
+        return DEFAULT_VEHICLES_METADATA
     except Exception as e:
         print(f"⚠️ [load_vehicles_metadata] Error: {e}")
-        return {}
+        return DEFAULT_VEHICLES_METADATA
 
 
 @router.get("/dispatch/active-routes", response_model=List[dict])

@@ -535,8 +535,21 @@ def get_monthly_quota_status(
     ref_date = today if (year == today.year and month == today.month) else start_d
     summary_policy = resolve_policy_for_date(policy_rows, ref_date)
     today_policy = resolve_policy_for_date(policy_rows, today)
-    request_window = compute_request_window(today_policy, today)
     user_is_fcfs = is_fcfs_user(current_user, summary_policy) if current_user else False
+
+    # 💡 [자동승인 vs 허가제 분리]
+    # - 자동승인(FCFS): D+X ~ D+Y 신청 가능 기간 및 정원/횟수 제한 적용
+    # - 허가제(APPROVAL): 관리자 검토·승인 방식이므로 날짜 제한(min_date/max_date) 미적용
+    if user_is_fcfs:
+        request_window = compute_request_window(today_policy, today)
+    else:
+        request_window = {
+            "today": str(today),
+            "min_advance_days": 0,
+            "max_advance_days": 0,
+            "min_date": None,
+            "max_date": None,
+        }
 
     monthly_used = (
         get_user_monthly_request_count(db, current_user.id, year, month)
@@ -548,6 +561,7 @@ def get_monthly_quota_status(
         "today_policy": today_policy,
         "request_window": request_window,
         "user_mode": "FCFS" if user_is_fcfs else "APPROVAL",
+        "enforce_limits": user_is_fcfs,
         "user_primary_group": current_user.primary_group if current_user else None,
         "user_rank_level": get_user_rank_val(current_user),
         "monthly_used_count": monthly_used,

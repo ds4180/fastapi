@@ -95,15 +95,9 @@ class User(Base):
 
     @property
     def role(self) -> str:
-        """역할 문자열 반환 (ROLE_GUEST, ROLE_ROOT, ROLE_ADMIN, ROLE_STAFF_L*)"""
-        r = self.rank()
-        if r == 0:
-            return "ROLE_GUEST"
-        if r == 9:
-            return "ROLE_ROOT"
-        if r == 4:
-            return "ROLE_ADMIN"
-        return f"ROLE_STAFF_L{r}"
+        """표준 역할 문자열 반환 (0~9 RANK_ROLE_MAP 기반)"""
+        from core.permission import get_role_name
+        return get_role_name(self.rank())
 
 
 class UserProfile(Base):

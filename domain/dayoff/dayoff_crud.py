@@ -58,33 +58,38 @@ def create_dayoff_list(db: Session, dayoff_create: DayOffCreate, user_id: int):
     end_str = sorted_dates[-1].strftime('%Y%m%d')
     group_id = f"{start_str}-{end_str}"
 
-    # 0. 결근계 사용 가능 날짜 범위(D+X ~ D+Y) 및 1회 신청 최대 일수 검사
+    # 0. 사용자 운영 방식(자동승인 FCFS vs 허가제 APPROVAL) 판별
+    # 💡 자동승인(운전직 선착순) 대상자에게만 날짜 제한(D+X ~ D+Y), 1회 최대 일수, 월 최대 횟수, 일일 정원을 적용하고,
+    #    허가제(사무직 승인제) 대상자는 관리자 검토를 거치므로 날짜/횟수 제한 없이 자유 신청을 허용합니다.
     today = date.today()
     today_policy = resolve_policy_for_date(policy_rows, today)
-    req_window = compute_request_window(today_policy, today)
-    min_adv = req_window["min_advance_days"]
-    max_adv = req_window["max_advance_days"]
-
-    for date_item in sorted_dates:
-        days_ahead = (date_item - today).days
-        if days_ahead < min_adv:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{date_item}은(는) 신청 가능 최소일(오늘 기준 D+{min_adv}일, {req_window['min_date']}부터) 이전이라 신청할 수 없습니다."
-            )
-        if max_adv > 0 and days_ahead > max_adv:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{date_item}은(는) 신청 가능 최대일(오늘 기준 D+{max_adv}일, {req_window['max_date']}까지)을 초과하여 신청할 수 없습니다."
-            )
-
     req_policy = resolve_policy_for_date(policy_rows, sorted_dates[0])
-    max_days = int(req_policy.get("max_days_per_request") or 0)
-    if max_days > 0 and len(sorted_dates) > max_days:
-        raise HTTPException(
-            status_code=400,
-            detail=f"1회 결근계 최대 신청 일수({max_days}일)를 초과할 수 없습니다. (선택: {len(sorted_dates)}일)"
-        )
+    is_fcfs_applicant = is_fcfs_user(user, req_policy)
+
+    max_days = int(req_policy.get("max_days_per_request") or 0) if is_fcfs_applicant else 0
+    if is_fcfs_applicant:
+        req_window = compute_request_window(today_policy, today)
+        min_adv = req_window["min_advance_days"]
+        max_adv = req_window["max_advance_days"]
+
+        for date_item in sorted_dates:
+            days_ahead = (date_item - today).days
+            if days_ahead < min_adv:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{date_item}은(는) 자동승인 신청 가능 최소일(오늘 기준 D+{min_adv}일, {req_window['min_date']}부터) 이전이라 신청할 수 없습니다."
+                )
+            if max_adv > 0 and days_ahead > max_adv:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{date_item}은(는) 자동승인 신청 가능 최대일(오늘 기준 D+{max_adv}일, {req_window['max_date']}까지)을 초과하여 신청할 수 없습니다."
+                )
+
+        if max_days > 0 and len(sorted_dates) > max_days:
+            raise HTTPException(
+                status_code=400,
+                detail=f"1회 결근계 최대 신청 일수({max_days}일)를 초과할 수 없습니다. (선택: {len(sorted_dates)}일)"
+            )
 
     # 1. 본인 중복 신청 검사 및 일자별 정책 기준 선착순 정원 검사
     target_Dates_to_insert: List[tuple] = []
@@ -119,27 +124,28 @@ def create_dayoff_list(db: Session, dayoff_create: DayOffCreate, user_id: int):
     if not target_Dates_to_insert:
         raise HTTPException(status_code=409, detail="선택하신 날짜는 이미 휴무가 신청되어 있습니다.")
 
-    # 1-2. 1회 신청 일수 재확인 & 월별 최대 사용 횟수 검사
-    if max_days > 0 and len(target_Dates_to_insert) > max_days:
-        raise HTTPException(
-            status_code=400,
-            detail=f"1회 결근계 최대 신청 일수({max_days}일)를 초과할 수 없습니다."
-        )
+    # 1-2. 자동승인(선착순) 전용: 1회 신청 일수 재확인 & 월별 최대 사용 횟수 검사
+    if is_fcfs_applicant:
+        if max_days > 0 and len(target_Dates_to_insert) > max_days:
+            raise HTTPException(
+                status_code=400,
+                detail=f"1회 결근계 최대 신청 일수({max_days}일)를 초과할 수 없습니다."
+            )
 
-    dates_by_month: Dict[tuple, List[date]] = {}
-    for d_item, _ in target_Dates_to_insert:
-        dates_by_month.setdefault((d_item.year, d_item.month), []).append(d_item)
+        dates_by_month: Dict[tuple, List[date]] = {}
+        for d_item, _ in target_Dates_to_insert:
+            dates_by_month.setdefault((d_item.year, d_item.month), []).append(d_item)
 
-    for (y, m), m_dates in dates_by_month.items():
-        m_policy = resolve_policy_for_date(policy_rows, m_dates[0])
-        max_monthly = int(m_policy.get("max_monthly_count") or 0)
-        if max_monthly > 0:
-            used_cnt = get_user_monthly_request_count(db, user_id, y, m)
-            if used_cnt >= max_monthly:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{y}년 {m}월 결근계 최대 사용 횟수({max_monthly}회)를 모두 사용했습니다. (현재 {used_cnt}회)"
-                )
+        for (y, m), m_dates in dates_by_month.items():
+            m_policy = resolve_policy_for_date(policy_rows, m_dates[0])
+            max_monthly = int(m_policy.get("max_monthly_count") or 0)
+            if max_monthly > 0:
+                used_cnt = get_user_monthly_request_count(db, user_id, y, m)
+                if used_cnt >= max_monthly:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{y}년 {m}월 결근계 최대 사용 횟수({max_monthly}회)를 모두 사용했습니다. (현재 {used_cnt}회)"
+                    )
 
     # 2. 운전직(선착순)은 즉시 APPROVED 확정, 사무직(승인제)은 REQUESTED 대기로 저장
     created_count = 0

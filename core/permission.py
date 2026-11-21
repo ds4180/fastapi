@@ -23,6 +23,28 @@ from models import User
 # 📌 시스템 최고 절대 권한(root) 랭킹 상수
 ROOT_RANK = 9
 
+# 📌 부그룹(allow_groups) 전용 앱 잠금 구간 (사용자 직접 부여 비권장)
+GROUP_ONLY_RANKS = (6, 7)
+
+# 📌 전역 권한 랭킹(0~9) 표준 Role 매핑 (보안_권한_랭크_표준.md SSOT)
+RANK_ROLE_MAP = {
+    0: "ROLE_GUEST",           # 비로그인 / 손님 / 미승인
+    1: "ROLE_USER",            # 일반 정회원
+    2: "ROLE_DRIVER",          # 운전원 (승무직)
+    3: "ROLE_STAFF",           # 현장직·사무 내근직 (주임/대리)
+    4: "ROLE_MANAGER",         # 사무 내근직 (과장/차장/부장)
+    5: "ROLE_EXECUTIVE",       # 사무 내근직 (임원)
+    6: "ROLE_GROUP_ONLY_L1",   # 특수 잠금 1 (부그룹 전용)
+    7: "ROLE_GROUP_ONLY_L2",   # 특수 잠금 2 (고보안 부그룹 전용)
+    8: "ROLE_CORE",            # 코어마스터 (시스템 관리자)
+    9: "ROLE_ROOT",            # 최고 관리자 (Root)
+}
+
+
+def get_role_name(rank_level: int) -> str:
+    """정수형 랭킹(0~9)에 대응하는 표준 Role 문자열 반환"""
+    return RANK_ROLE_MAP.get(int(rank_level), f"ROLE_CUSTOM_L{int(rank_level)}")
+
 
 def get_user_rank(user: Optional[User]) -> int:
     """

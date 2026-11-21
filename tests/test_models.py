@@ -59,15 +59,20 @@ def test_user_model_role_logic():
     guest_user.profile = UserProfile(rank_level=0)
     assert guest_user.role == "ROLE_GUEST", "등급 0은 ROLE_GUEST여야 합니다."
 
-    # 2. 가상의 최고관리자 생성 (등급 4)
-    admin_user = User(username="admin_test", email="admin@test.com")
-    admin_user.profile = UserProfile(rank_level=4)
-    assert admin_user.role == "ROLE_ADMIN", "등급 4는 ROLE_ADMIN이어야 합니다."
+    # 2. 가상의 중간관리자 생성 (등급 4: 사무 과장/차장/부장)
+    manager_user = User(username="admin_test", email="admin@test.com")
+    manager_user.profile = UserProfile(rank_level=4)
+    assert manager_user.role == "ROLE_MANAGER", "등급 4는 ROLE_MANAGER여야 합니다."
 
-    # 3. 가상의 직원 생성 (등급 2)
-    staff_user = User(username="staff_test", email="staff@test.com")
-    staff_user.profile = UserProfile(rank_level=2)
-    assert staff_user.role == "ROLE_STAFF_L2", "등급 2는 ROLE_STAFF_L2여야 합니다."
+    # 3. 가상의 운전원 생성 (등급 2)
+    driver_user = User(username="staff_test", email="staff@test.com")
+    driver_user.profile = UserProfile(rank_level=2)
+    assert driver_user.role == "ROLE_DRIVER", "등급 2는 ROLE_DRIVER여야 합니다."
+
+    # 4. 가상의 최고관리자 생성 (등급 9)
+    root_user = User(username="root_test", email="root@test.com")
+    root_user.profile = UserProfile(rank_level=9)
+    assert root_user.role == "ROLE_ROOT", "등급 9는 ROLE_ROOT여야 합니다."
 
 
 def test_cross_db_json_type_models():

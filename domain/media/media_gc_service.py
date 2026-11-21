@@ -202,10 +202,34 @@ class MediaGCService:
 
         return {"status": "success", "deleted_count": deleted_count}
 
+    @staticmethod
+    def _is_del_entry_expired(name: str, abs_path: str, limit_date: datetime) -> bool:
+        """격리 파일/폴더명(.DEL_YYYYMMDD_... 또는 .DEL_ORIG_YYYYMMDD_...) 또는 mtime 기준 만료 여부 판정"""
+        clean_name = name.lstrip(".")
+        parts = clean_name.split("_")
+        try:
+            file_date = None
+            if len(parts) >= 4 and parts[1] == "ORIG" and len(parts[2]) == 8 and parts[2].isdigit():
+                file_date = datetime.strptime(parts[2], "%Y%m%d")
+            elif len(parts) >= 3 and len(parts[1]) == 8 and parts[1].isdigit():
+                file_date = datetime.strptime(parts[1], "%Y%m%d")
+            if file_date and file_date < limit_date:
+                return True
+        except Exception:
+            pass
+
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(abs_path))
+            if mtime < limit_date:
+                return True
+        except Exception:
+            pass
+        return False
+
     def cleanup_retention(self, days=30):
         """
         [작업 4] 보관 기한 만료 폴더 및 개별 격리 파일 영구 삭제
-        DEL_ 폴더 및 하위 격리 파일 중 설정 기간(기본 30일)이 지난 항목 영구 파기
+        루트 및 하위 티어 내 .DEL_ / DEL_ 격리 폴더·파일 중 설정 기간(기본 30일)이 지난 항목 영구 파기
         """
         deleted_folders = []
         deleted_files = []
@@ -217,49 +241,40 @@ class MediaGCService:
             if not os.path.isdir(item_path): continue
             
             if item.startswith(".DEL_") or item.startswith("DEL_"):
-                # 생성 시간 또는 이름의 날짜 기반 체크
-                mtime = datetime.fromtimestamp(os.path.getmtime(item_path))
-                if mtime < limit_date:
+                if self._is_del_entry_expired(item, item_path, limit_date):
                     shutil.rmtree(item_path)
                     deleted_folders.append(item)
 
-        # 2. 하위 티어 내 보관 기한이 지난 개별 격리 파일(.DEL_ / DEL_) 영구 삭제
+        # 2. 하위 티어 내 보관 기한이 지난 격리 폴더 및 개별 격리 파일(.DEL_ / DEL_) 영구 삭제
         tiers = ["PUBLIC", "SYSTEM", "PROTECTED", "PRIVATE"]
         for tier in tiers:
             tier_root = os.path.join(config.MEDIA_ROOT, tier)
             if not os.path.exists(tier_root): continue
 
             for root, dirs, files in os.walk(tier_root):
+                # 2-A. 하위 티어 내 격리 폴더(.DEL_YYYYMMDD_폴더명 등) 검사 및 만료 시 통째로 영구 파기
+                remaining_dirs = []
+                for d in dirs:
+                    if d.startswith(".DEL_") or d.startswith("DEL_"):
+                        d_path = os.path.join(root, d)
+                        if self._is_del_entry_expired(d, d_path, limit_date):
+                            try:
+                                shutil.rmtree(d_path)
+                                rel = os.path.relpath(d_path, config.MEDIA_ROOT)
+                                deleted_folders.append(rel)
+                                logger.info(f"🗑️ [보관 만료 파기] 하위 격리 폴더 영구 삭제: {d_path}")
+                            except Exception as e:
+                                logger.error(f"하위 격리 폴더 삭제 실패 ({d_path}): {e}")
+                        # 격리 폴더 내부는 별도 재귀 탐색 불필요
+                        continue
+                    remaining_dirs.append(d)
+                dirs[:] = remaining_dirs
+
+                # 2-B. 개별 격리 파일(.DEL_ / DEL_) 검사 및 만료 시 영구 파기
                 for f in files:
                     if f.startswith(".DEL_") or f.startswith("DEL_"):
                         f_path = os.path.join(root, f)
-                        is_expired = False
-                        
-                        # 2-1. 파일명 날짜 기반 체크 (.DEL_YYYYMMDD_... 또는 .DEL_ORIG_YYYYMMDD_...)
-                        clean_name = f.lstrip(".")
-                        parts = clean_name.split("_")
-                        try:
-                            file_date = None
-                            if len(parts) >= 4 and parts[1] == "ORIG" and len(parts[2]) == 8 and parts[2].isdigit():
-                                file_date = datetime.strptime(parts[2], "%Y%m%d")
-                            elif len(parts) >= 3 and len(parts[1]) == 8 and parts[1].isdigit():
-                                file_date = datetime.strptime(parts[1], "%Y%m%d")
-                            
-                            if file_date and file_date < limit_date:
-                                is_expired = True
-                        except Exception:
-                            pass
-                        
-                        # 2-2. 파일명 날짜 파싱 불가 시 수정시간(mtime) 체크
-                        if not is_expired:
-                            try:
-                                mtime = datetime.fromtimestamp(os.path.getmtime(f_path))
-                                if mtime < limit_date:
-                                    is_expired = True
-                            except Exception:
-                                pass
-                        
-                        if is_expired:
+                        if self._is_del_entry_expired(f, f_path, limit_date):
                             try:
                                 os.remove(f_path)
                                 rel = os.path.relpath(f_path, config.MEDIA_ROOT)

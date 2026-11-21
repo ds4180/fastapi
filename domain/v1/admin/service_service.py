@@ -2,16 +2,68 @@ from sqlalchemy.orm import Session
 from models import ServiceInstance, ServiceApp, ServiceEngine, ServiceRegistry
 from typing import List, Dict, Any
 
-def resolve_service_apps(db: Session, service_app_ids: List[int]) -> List[Dict[str, Any]]:
+VALID_DISPLAYS = {"block", "inline", "grid-2"}
+VALID_ALIGNS = {"start", "between", "end"}
+
+
+def _normalize_service_entry(entry: Any, fallback_row: int) -> tuple[int | None, Dict[str, Any]]:
     """
-    [App-Driven] 서비스 앱 ID 리스트를 순서대로 해석하여
+    service_app_ids 배열의 개별 항목을 정규화합니다.
+    - 레거시 정수(int): 단독 block 행으로 자동 변환 (100% 하위 호환)
+    - 확장 객체(dict): { app_id, row, display('block'|'inline'|'grid-2'), wrap(bool), align('start'|'between'|'end') }
+    """
+    if isinstance(entry, int):
+        return entry, {
+            "row": fallback_row,
+            "display": "block",
+            "wrap": True,
+            "align": "start",
+        }
+    if isinstance(entry, dict):
+        raw_id = entry.get("app_id")
+        try:
+            app_id = int(raw_id) if raw_id is not None else None
+        except (ValueError, TypeError):
+            app_id = None
+        display = str(entry.get("display") or "block").lower()
+        if display not in VALID_DISPLAYS:
+            display = "block"
+        align = str(entry.get("align") or "start").lower()
+        if align not in VALID_ALIGNS:
+            align = "start"
+        try:
+            row_idx = int(entry.get("row")) if entry.get("row") is not None else fallback_row
+        except (ValueError, TypeError):
+            row_idx = fallback_row
+        wrap = bool(entry.get("wrap", True))
+        return app_id, {
+            "row": row_idx,
+            "display": display,
+            "wrap": wrap,
+            "align": align,
+        }
+    return None, {
+        "row": fallback_row,
+        "display": "block",
+        "wrap": True,
+        "align": "start",
+    }
+
+
+def resolve_service_apps(db: Session, service_app_ids: List[Any]) -> List[Dict[str, Any]]:
+    """
+    [App-Driven] 서비스 앱 ID(또는 레이아웃 확장 객체) 리스트를 순서대로 해석하여
     프론트엔드용 명세(ResolvedServiceBinding) 리스트로 반환합니다.
     """
     if not service_app_ids:
         return []
 
     resolved_list = []
-    for app_id in service_app_ids:
+    for idx, raw_entry in enumerate(service_app_ids):
+        app_id, layout = _normalize_service_entry(raw_entry, fallback_row=idx)
+        if app_id is None:
+            continue
+
         app = db.query(ServiceApp).filter(ServiceApp.id == app_id).first()
         if not app or not app.is_active:
             continue
@@ -21,10 +73,12 @@ def resolve_service_apps(db: Session, service_app_ids: List[int]) -> List[Dict[s
             continue
 
         resolved_list.append({
+            "app_id": app.id,
             "service_id": engine.registry_id,
             "engine_id": engine.id,
             "service_component": engine.frontend_plugin,
-            "config": app.config
+            "config": app.config,
+            "layout": layout,
         })
 
     return resolved_list

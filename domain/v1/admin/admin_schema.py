@@ -312,7 +312,8 @@ class ServiceAppSchema(ServiceAppBase):
 # --- Service Instance 스키마 (완성된 서비스 덩어리) ---
 class ServiceInstanceBase(BaseModel):
     name: str                           # "자유게시판용 패키지" 등
-    service_app_ids: Optional[List[int]] = [] # 조립될 서비스 앱 ID 리스트 (순서 중요)
+    # 💡 하위 호환(List[int]) + 레이아웃 확장(List[{app_id, row, display, wrap, align}]) 동시 수용
+    service_app_ids: Optional[List[Any]] = []
     is_active: bool = True
 
 class ServiceInstanceCreate(ServiceInstanceBase):
@@ -320,7 +321,7 @@ class ServiceInstanceCreate(ServiceInstanceBase):
 
 class ServiceInstanceUpdate(BaseModel):
     name: Optional[str] = None
-    service_app_ids: Optional[List[int]] = None
+    service_app_ids: Optional[List[Any]] = None
     is_active: Optional[bool] = None
 
 class ServiceInstanceSchema(ServiceInstanceBase):
@@ -333,10 +334,12 @@ class ServiceInstanceSchema(ServiceInstanceBase):
 # --- Frontend 전달용 Resolved Service Binding ---
 class ResolvedServiceBinding(BaseModel):
     """프론트엔드 엔진에 전달할 최종 조립된 서비스 명세"""
+    app_id: Optional[int] = None        # ServiceApp.id
     service_id: str                     # service_registry.id (e.g., "comment")
     engine_id: str                      # service_engine.id (e.g., "basic_comment_v1")
     service_component: str              # service_engine.frontend_plugin
     config: Dict[str, Any]              # ServiceApp.config
+    layout: Optional[Dict[str, Any]] = None  # 행/블록/인라인/카드묶음 배치 정보
 
 # --- 게시판/포스트 공통 스키마 ---
 class BoardSimpleSchema(BaseModel):
@@ -361,8 +364,8 @@ class BoardConfigBase(BaseModel):
     fields_def: List[Any] = []
     options: Dict[str, Any] = {}
     service_instance_id: Optional[int] = None
-    service_app_ids: Optional[List[int]] = None # 서비스 번들 바인딩
-    service_app_ids: List[int] = []           # 게시판 개별 서비스 모듈 직접 지정
+    # 💡 하위 호환(List[int]) + 레이아웃 확장(List[{app_id, row, display, wrap, align}]) 동시 수용
+    service_app_ids: List[Any] = []
     min_read_rank: int = Field(default=0, ge=0, le=9)
     min_write_rank: int = Field(default=2, ge=0, le=9)
     allow_groups: Any = []
@@ -381,7 +384,7 @@ class BoardConfigUpdate(BaseModel):
     fields_def: Optional[List[Any]] = None
     options: Optional[Dict[str, Any]] = None
     service_instance_id: Optional[int] = None
-    service_app_ids: Optional[List[int]] = None
+    service_app_ids: Optional[List[Any]] = None
     min_read_rank: Optional[int] = Field(default=None, ge=0, le=9)
     min_write_rank: Optional[int] = Field(default=None, ge=0, le=9)
     allow_groups: Optional[Any] = None

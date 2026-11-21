@@ -119,7 +119,7 @@ def update_post(db: Session, db_post: Post, post_in: PostUpdate):
     return db_post
 
 def delete_post(db: Session, db_post: Post):
-    """게시물 삭제 (Soft Delete + 연결된 MediaAsset 소프트 삭제 및 격리 큐 예약)"""
+    """게시물 삭제 (Soft Delete + 게시물 및 소속 댓글의 MediaAsset 소프트 삭제 및 격리 큐 예약)"""
     from domain.media import media_service
 
     db_post.is_deleted = True
@@ -132,6 +132,18 @@ def delete_post(db: Session, db_post: Post):
     ).all()
     for asset in linked_assets:
         media_service.delete_asset(db, asset.id)
+
+    comment_ids = [
+        str(cid) for (cid,) in db.query(Comment.id).filter(Comment.post_id == db_post.id).all()
+    ]
+    if comment_ids:
+        comment_assets = db.query(MediaAsset).filter(
+            MediaAsset.app_id == "comment",
+            MediaAsset.target_id.in_(comment_ids),
+            MediaAsset.is_deleted == False
+        ).all()
+        for asset in comment_assets:
+            media_service.delete_asset(db, asset.id)
 
     db.commit()
     return True
