@@ -2089,6 +2089,80 @@ def query_active_routes_for_date(db: Session, target_date: date) -> List[dict]:
     ]
 
 
+def build_dispatch_work_rates(db: Session, base_date: date, days: int = 10) -> List[dict]:
+    """D+1 ~ D+days 기간의 일별 전체 배차 작업률(%)을 계산합니다."""
+    days = max(1, min(days, 30))
+    d_start = base_date + timedelta(days=1)
+    d_end = base_date + timedelta(days=days)
+
+    masters = db.query(RouteMaster).filter(
+        RouteMaster.start_date <= d_end,
+        (RouteMaster.end_date == None) | (RouteMaster.end_date >= d_start)
+    ).all()
+
+    master_ids = [m.id for m in masters]
+    master_to_tids: dict[int, set[int]] = {}
+    all_tids: list[int] = []
+    if master_ids:
+        timetables = db.query(RouteTimetable.id, RouteTimetable.route_master_id).filter(
+            RouteTimetable.route_master_id.in_(master_ids)
+        ).all()
+        for tid, mid in timetables:
+            master_to_tids.setdefault(mid, set()).add(tid)
+            all_tids.append(tid)
+
+    assigned_by_date: dict[date, set[int]] = {}
+    if all_tids:
+        dispatches = db.query(
+            models.Dispatch.target_date,
+            models.Dispatch.timetable_id,
+            models.Dispatch.driver_name
+        ).filter(
+            models.Dispatch.target_date >= d_start,
+            models.Dispatch.target_date <= d_end,
+            models.Dispatch.timetable_id.in_(all_tids)
+        ).all()
+        for t_date, tid, driver_name in dispatches:
+            if driver_name and driver_name.strip():
+                assigned_by_date.setdefault(t_date, set()).add(tid)
+
+    items: List[dict] = []
+    for offset in range(1, days + 1):
+        target_d = base_date + timedelta(days=offset)
+        active_tids: set[int] = set()
+        for m in masters:
+            if m.start_date <= target_d and (m.end_date is None or m.end_date >= target_d):
+                active_tids.update(master_to_tids.get(m.id, set()))
+
+        total = len(active_tids)
+        assigned = len(active_tids & assigned_by_date.get(target_d, set()))
+        rate = round((assigned / total) * 100, 1) if total > 0 else 0.0
+        items.append({
+            "offset": offset,
+            "label": f"D+{offset}",
+            "date": str(target_d),
+            "assigned": assigned,
+            "total": total,
+            "rate": rate
+        })
+
+    has_real_dispatch = any(item["assigned"] > 0 for item in items)
+    if not has_real_dispatch:
+        mock_rates = [100.0, 95.0, 88.0, 76.0, 64.0, 52.0, 40.0, 28.0, 15.0, 5.0]
+        for idx, item in enumerate(items):
+            sample_rate = mock_rates[idx % len(mock_rates)]
+            sample_total = item["total"] if item["total"] > 0 else 20
+            item["total"] = sample_total
+            item["assigned"] = round(sample_total * sample_rate / 100.0)
+            item["rate"] = round((item["assigned"] / sample_total) * 100, 1)
+            item["is_mock"] = True
+    else:
+        for item in items:
+            item["is_mock"] = False
+
+    return items
+
+
 def build_daily_dispatch_rows(db: Session, target_date: date, route_master_id: int) -> List[dict]:
     """
     지정된 날짜와 노선 마스터 ID에 해당하는 일일 배차 행 목록을 계산해 반환합니다.
@@ -2194,6 +2268,20 @@ def build_daily_dispatch_rows(db: Session, target_date: date, route_master_id: i
         })
 
     return result
+
+
+@router.get("/dispatch/work-rates", response_model=List[dict])
+def get_dispatch_work_rates(
+    days: int = 10,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_admin)
+):
+    """D+1 ~ D+10 향후 배차 작업률(%)을 반환합니다."""
+    try:
+        return build_dispatch_work_rates(db, datetime.now().date(), days=days)
+    except Exception as e:
+        print(f"❌ [AdminDispatch] Error calculating dispatch work rates: {e}")
+        raise HTTPException(status_code=500, detail="배차 작업률 통계를 계산하는 중 오류가 발생하였습니다.")
 
 
 @router.get("/dispatch/active-routes", response_model=List[dict])

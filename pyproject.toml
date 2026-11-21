@@ -20,6 +20,7 @@ dependencies = [
     "redis>=7.2.1",
     "sqlalchemy>=2.0.43",
     "uvicorn[standard]>=0.34.2",
+    "webauthn>=3.0.1",
     "wheel>=0.45.1",
     "xlsxwriter>=3.2.0",
 ]

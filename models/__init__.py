@@ -65,6 +65,7 @@ from models.blackbox import (
     BlackboxRequest,
 )
 from models.survey import SurveyCampaign, SurveyResponse
+from models.passkey import UserPasskey, BiometricAuthLog
 
 # 📌 8. 전역 감사로그 및 보안 관제 코어
 from models.audit import AuditLog, SENSITIVE_FIELDS
@@ -123,6 +124,8 @@ __all__ = [
     "BlackboxRequest",
     "SurveyCampaign",
     "SurveyResponse",
+    "UserPasskey",
+    "BiometricAuthLog",
     "AuditLog",
     "SENSITIVE_FIELDS",
     "MiniappItem",

@@ -124,7 +124,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 user_id,
                                 "🔐 [긴급] 중요 문서 지문 승인 요청",
                                 f"데스크톱에서 '{doc_title}' 열람 지문 승인을 요청했습니다. 터치하여 지문을 인증해 주세요.",
-                                "/v1/pages/device-test",
+                                "/v1/pages/biometric",
                             )
                         )
                     except Exception:

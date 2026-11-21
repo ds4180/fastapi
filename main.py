@@ -104,6 +104,7 @@ from domain.v1.app import app_router as v1_app_router
 from domain.v1.custom import custom_router as v1_custom_router
 from domain.v1.custom.blackbox import router as blackbox_router # [블랙박스 비디오 관리 라우터]
 from domain.v1.custom.survey import router as survey_router, admin_router as survey_admin_router # [현장 조사·설문 라우터]
+from domain.v1.biometric import router as biometric_router # [생체 인증 / Passkey 통합 라우터]
 from domain.v1.schedule import router as schedule_router # [통합 일정 관리 라우터]
 from domain.v1.comment import comment_router
 from domain.v1.reaction import reaction_router
@@ -359,6 +360,7 @@ app.include_router(v1_custom_router.router)
 app.include_router(blackbox_router) # [블랙박스 비디오 관리 라우터]
 app.include_router(survey_router) # [현장 조사·설문 사용자/서비스앱 라우터]
 app.include_router(survey_admin_router) # [현장 조사·설문 관리자 라우터]
+app.include_router(biometric_router) # [생체 인증 / Passkey 통합 라우터]
 app.include_router(schedule_router) # [통합 일정 관리 라우터]
 app.include_router(comment_router.router)
 app.include_router(reaction_router.router)
