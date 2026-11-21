@@ -379,6 +379,7 @@ DEFAULT_PUSH_DOMAIN_OPTIONS = {
     "dayoff_result": True,
     "blackbox_request": True,
     "alert_instruction": True,
+    "survey_request": True,
 }
 
 

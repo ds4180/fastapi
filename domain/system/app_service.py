@@ -138,6 +138,19 @@ DEFAULT_SYSTEM_APPS = [
         "deny_groups": [],
     },
     {
+        "app_id": "survey",
+        "name": "현장 조사·설문 관리",
+        "title": "현장 조사·설문 관리",
+        "app_type": "CUSTOM",
+        "description": "JSONB 동적 양식 기반 현장 점검·조사 배포, 미제출자 독촉, 통계 보고 및 과거 이력 조회",
+        "frontend_route": "/v1/admin/survey",
+        "icon_default": "mdi:clipboard-list-outline",
+        "min_read_rank": 4,
+        "min_write_rank": 4,
+        "allow_groups": [],
+        "deny_groups": [],
+    },
+    {
         "app_id": "board",
         "name": "게시판 인스턴스 관리",
         "title": "게시판 인스턴스 관리",
@@ -403,9 +416,72 @@ def bootstrap_system_apps(db: Session) -> dict:
     else:
         logger.info(f"🛡️ [AppService] 시스템 앱 {len(DEFAULT_SYSTEM_APPS)}개 모두 최신 상태 유지 (변경 없음)")
 
+    bootstrap_survey_service(db)
+
     return {
         "created": created_count,
         "updated": updated_count,
         "skipped": skipped_count,
         "total": len(DEFAULT_SYSTEM_APPS)
     }
+
+
+def bootstrap_survey_service(db: Session) -> None:
+    """
+    [조사·설문 서비스 앱 레고 블록 자동 등록]
+    - ServiceRegistry('survey') -> ServiceEngine('basic_survey_v1') -> ServiceApp -> ServiceInstance
+      4단계를 멱등(Idempotent)하게 보장합니다.
+    """
+    from models import ServiceRegistry, ServiceEngine, ServiceApp, ServiceInstance
+
+    changed = False
+    reg = db.query(ServiceRegistry).filter(ServiceRegistry.id == "survey").first()
+    if not reg:
+        reg = ServiceRegistry(
+            id="survey",
+            name="설문조사",
+            description="JSONB 동적 양식 기반 현장 조사·설문 수집 모듈",
+        )
+        db.add(reg)
+        db.flush()
+        changed = True
+
+    eng = db.query(ServiceEngine).filter(ServiceEngine.id == "basic_survey_v1").first()
+    if not eng:
+        eng = ServiceEngine(
+            id="basic_survey_v1",
+            registry_id="survey",
+            version="1.0.0",
+            frontend_plugin="SurveyServiceEngine",
+            config_schema={"campaign_code": "", "campaign_id": None, "compact": True},
+            is_active=True,
+        )
+        db.add(eng)
+        db.flush()
+        changed = True
+
+    svc_app = db.query(ServiceApp).filter(ServiceApp.engine_id == "basic_survey_v1").first()
+    if not svc_app:
+        svc_app = ServiceApp(
+            name="기본 설문조사 서비스",
+            engine_id="basic_survey_v1",
+            config={"campaign_code": "", "compact": True},
+            is_active=True,
+        )
+        db.add(svc_app)
+        db.flush()
+        changed = True
+
+    inst = db.query(ServiceInstance).filter(ServiceInstance.name == "기본 설문조사").first()
+    if not inst:
+        inst = ServiceInstance(
+            name="기본 설문조사",
+            service_app_ids=[svc_app.id],
+            is_active=True,
+        )
+        db.add(inst)
+        changed = True
+
+    if changed:
+        db.commit()
+        logger.info("🧩 [AppService] 'survey' 서비스 엔진·앱·인스턴스 기본 등록 완료")
