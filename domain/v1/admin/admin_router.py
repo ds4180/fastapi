@@ -1232,6 +1232,8 @@ def _ensure_default_board_options(raw_options: Optional[dict]) -> dict:
         }
     if "new_hours" not in opts:
         opts["new_hours"] = 24
+    if "categories" not in opts:
+        opts["categories"] = ["공지", "긴급", "필독", "안전", "정비", "일반"]
     if "view_meta_keys" not in opts:
         opts["view_meta_keys"] = list(DEFAULT_BOARD_META_KEYS)
     if "write_meta_keys" not in opts:

@@ -85,7 +85,7 @@ def get_post_detail(
         if get_user_rank(current_user) < 4:
             raise HTTPException(status_code=403, detail="이 게시판은 상세 보기가 비활성화되어 있습니다.")
 
-    if not board_crud.can_view_post(post, current_user):
+    if not board_crud.can_view_post(post, current_user, post.board, db=db):
         raise HTTPException(status_code=403, detail="이 게시물을 열람할 권한이 없거나 게시 기간이 아닙니다.")
 
     # 3. 조회수 증가 (Redis 24시간 TTL 중복 방지 + 원자적 증가)
@@ -106,7 +106,7 @@ def get_post_detail(
             db.add(PostRead(post_id=post.id, user_id=current_user.id))
             db.commit()
 
-    setattr(post, "user_name", board_crud.mask_post_author_name(post, current_user))
+    setattr(post, "user_name", board_crud.mask_post_author_name(post, current_user, post.board, db=db))
 
     return post
 
@@ -139,7 +139,7 @@ def post_create(
             raise HTTPException(status_code=403, detail="이 게시판은 글 작성이 비활성화되어 있습니다.")
         
     # 3. 메타데이터 권한 필터링 및 생성 실행
-    post_in.extra_data = board_crud.sanitize_post_extra_data(post_in.extra_data, current_user)
+    post_in.extra_data = board_crud.sanitize_post_extra_data(post_in.extra_data, current_user, board=board, db=db)
     created = board_crud.create_post(db, board_id=board.id, user_id=current_user.id, post_in=post_in)
     from core.audit import safe_log_audit
     safe_log_audit(
@@ -160,7 +160,7 @@ def post_create(
         send_push_to_board_readers,
     )
     should_push = is_push_option_enabled(board.options, "push_on_post") or bool(
-        get_user_rank(current_user) >= 4 and (created.extra_data or {}).get("push_on_create")
+        board_crud.is_board_admin(current_user, board, db=db) and (created.extra_data or {}).get("push_on_create")
     )
     if should_push:
         author_name = current_user.real_name or current_user.username
@@ -191,12 +191,12 @@ def post_update(
     if not can_access_board(current_user, db_post.board, action="write"):
         raise HTTPException(status_code=403, detail="이 게시판에 대한 글 수정 권한이 없습니다.")
 
-    # 권한 체크: 작성자 본인이거나 운영 관리자(Rank 4 이상)
-    if db_post.user_id != current_user.id and get_user_rank(current_user) < 4:
+    # 권한 체크: 작성자 본인이거나 운영/게시판 전용 관리자
+    if db_post.user_id != current_user.id and not board_crud.is_board_admin(current_user, db_post.board, db=db):
         raise HTTPException(status_code=403, detail="본인이 작성한 글만 수정할 수 있습니다.")
 
     if post_in.extra_data is not None:
-        post_in.extra_data = board_crud.sanitize_post_extra_data(post_in.extra_data, current_user)
+        post_in.extra_data = board_crud.sanitize_post_extra_data(post_in.extra_data, current_user, board=db_post.board, db=db)
 
     updated = board_crud.update_post(db, db_post=db_post, post_in=post_in)
     from core.audit import safe_log_audit
@@ -227,8 +227,8 @@ def post_delete(
     if not can_access_board(current_user, db_post.board, action="write"):
         raise HTTPException(status_code=403, detail="이 게시판에 대한 글 삭제 권한이 없습니다.")
 
-    # 권한 체크: 작성자 본인이거나 운영 관리자(Rank 4 이상)
-    if db_post.user_id != current_user.id and get_user_rank(current_user) < 4:
+    # 권한 체크: 작성자 본인이거나 운영/게시판 전용 관리자
+    if db_post.user_id != current_user.id and not board_crud.is_board_admin(current_user, db_post.board, db=db):
         raise HTTPException(status_code=403, detail="본인이 작성한 글만 삭제할 수 있습니다.")
         
     board_crud.delete_post(db, db_post=db_post)

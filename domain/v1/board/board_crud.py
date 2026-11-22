@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, func, cast, String
-from models import Post, BoardConfig, User, PostRead, Comment, PostReaction, MediaAsset
+from sqlalchemy import or_, func, cast, String, text
+from models import AppRegistry, Post, BoardConfig, User, PostRead, Comment, PostReaction, MediaAsset
 from domain.v1.board.board_schema import PostCreate, PostUpdate
 from core.permission import get_user_rank
 from typing import Any, Dict, List, Optional
@@ -37,11 +37,72 @@ def _parse_iso_dt(val: Any) -> Optional[datetime]:
         return None
 
 
-def sanitize_post_extra_data(raw_extra: Optional[Dict[str, Any]], user: Optional[User]) -> Dict[str, Any]:
-    """작성자 권한에 따라 허용된 게시물 메타데이터만 정제해 반환합니다."""
+def _parse_group_list(raw: Any) -> set[str]:
+    if isinstance(raw, (list, set, tuple)):
+        return {str(g).strip() for g in raw if str(g).strip()}
+    if isinstance(raw, str) and raw.strip():
+        return {s.strip() for s in raw.split(",") if s.strip()}
+    return set()
+
+
+def get_board_admin_rank(db: Optional[Session] = None) -> int:
+    """상위 앱('board')의 min_write_rank를 게시판 관리자 기준 랭크로 조회합니다 (기본 4)."""
+    if db is not None:
+        row = db.query(AppRegistry.min_write_rank).filter(AppRegistry.app_id == "board").first()
+        if row and row[0] is not None:
+            return int(row[0])
+        return 4
+    try:
+        from database import SessionLocal
+        with SessionLocal() as tmp_db:
+            row = tmp_db.query(AppRegistry.min_write_rank).filter(AppRegistry.app_id == "board").first()
+            if row and row[0] is not None:
+                return int(row[0])
+    except Exception:
+        pass
+    return 4
+
+
+def is_board_admin(
+    user: Optional[User],
+    board: Optional[BoardConfig] = None,
+    db: Optional[Session] = None,
+    admin_rank: Optional[int] = None,
+) -> bool:
+    """상위 앱('board')의 쓰기 랭크(min_write_rank) 이상이거나 게시판 admin_groups 소속이면 True."""
+    if not user:
+        return False
+    required_rank = admin_rank if admin_rank is not None else get_board_admin_rank(db)
+    if get_user_rank(user) >= required_rank:
+        return True
+    if not board:
+        return False
+
+    user_groups = _get_user_group_codes(user)
+    if not user_groups:
+        return False
+
+    opts = getattr(board, "options", None) or {}
+    admin_groups = _parse_group_list(opts.get("admin_groups"))
+
+    allow_groups = getattr(board, "allow_groups", None)
+    if isinstance(allow_groups, dict):
+        admin_groups |= _parse_group_list(allow_groups.get("admin"))
+
+    return bool(admin_groups & user_groups)
+
+
+def sanitize_post_extra_data(
+    raw_extra: Optional[Dict[str, Any]],
+    user: Optional[User],
+    board: Optional[BoardConfig] = None,
+    db: Optional[Session] = None,
+    admin_rank: Optional[int] = None,
+) -> Dict[str, Any]:
+    """작성자 권한(또는 게시판 전용 관리자 그룹)에 따라 허용된 게시물 메타데이터만 정제해 반환합니다."""
     if not isinstance(raw_extra, dict):
         return {}
-    is_admin = get_user_rank(user) >= 4
+    is_admin = is_board_admin(user, board, db=db, admin_rank=admin_rank)
     cleaned: Dict[str, Any] = {}
     for k, v in raw_extra.items():
         if not is_admin and k in PRIVILEGED_META_KEYS:
@@ -71,9 +132,16 @@ def _get_user_group_codes(user: Optional[User]) -> set[str]:
     return codes
 
 
-def can_view_post(post: Post, user: Optional[User]) -> bool:
+def can_view_post(
+    post: Post,
+    user: Optional[User],
+    board: Optional[BoardConfig] = None,
+    db: Optional[Session] = None,
+    admin_rank: Optional[int] = None,
+) -> bool:
     """비밀글, 예약게시, 만료일, 대상 그룹 메타데이터 기반 열람 권한을 판별합니다."""
-    if user and (post.user_id == user.id or get_user_rank(user) >= 4):
+    target_board = board or getattr(post, "board", None)
+    if user and (post.user_id == user.id or is_board_admin(user, target_board, db=db, admin_rank=admin_rank)):
         return True
 
     extra = post.extra_data if isinstance(post.extra_data, dict) else {}
@@ -117,12 +185,19 @@ def is_post_effectively_pinned(post: Post, today_str: Optional[str] = None) -> b
     return True
 
 
-def mask_post_author_name(post: Post, user: Optional[User]) -> str:
+def mask_post_author_name(
+    post: Post,
+    user: Optional[User],
+    board: Optional[BoardConfig] = None,
+    db: Optional[Session] = None,
+    admin_rank: Optional[int] = None,
+) -> str:
     """작성자 비공개(hide_author) 메타 적용 시 작성자명을 마스킹합니다."""
     real_name = (post.user.real_name or post.user.username) if post.user else "탈퇴한 사용자"
     extra = post.extra_data if isinstance(post.extra_data, dict) else {}
+    target_board = board or getattr(post, "board", None)
     if extra.get("hide_author"):
-        if not user or (post.user_id != user.id and get_user_rank(user) < 4):
+        if not user or (post.user_id != user.id and not is_board_admin(user, target_board, db=db, admin_rank=admin_rank)):
             return "비공개"
     return real_name
 
@@ -147,7 +222,10 @@ def get_post_list(
     sort: str = "latest",
     category: str = "",
     use_pin: bool = True,
+    board: Optional[BoardConfig] = None,
 ):
+    if board is None:
+        board = db.query(BoardConfig).filter(BoardConfig.id == board_id).first()
     query = db.query(Post).filter(
         Post.board_id == board_id,
         Post.is_deleted == False
@@ -155,15 +233,17 @@ def get_post_list(
 
     if keyword:
         search = f"%{keyword}%"
-        query = query.outerjoin(User).filter(
-            or_(
-                Post.title.ilike(search),
-                Post.content.ilike(search),
-                User.username.ilike(search),
-                User.real_name.ilike(search),
-                cast(Post.extra_data, String).ilike(search)
-            )
-        ).distinct()
+        kw_clean = keyword.strip()
+        conds = [
+            Post.title.ilike(search),
+            Post.content.ilike(search),
+            User.username.ilike(search),
+            User.real_name.ilike(search),
+            cast(Post.extra_data, String).ilike(search),
+        ]
+        if kw_clean.isdigit():
+            conds.append(Post.board_seq == int(kw_clean))
+        query = query.outerjoin(User).filter(or_(*conds)).distinct()
 
     if sort == "views":
         order_clause = Post.view_count.desc()
@@ -175,9 +255,10 @@ def get_post_list(
     all_posts = query.order_by(order_clause, Post.id.desc()).all()
 
     cat_filter = (category or "").strip()
+    admin_rank = get_board_admin_rank(db)
     visible_posts: List[Post] = []
     for p in all_posts:
-        if not can_view_post(p, user):
+        if not can_view_post(p, user, board, db=db, admin_rank=admin_rank):
             continue
         if cat_filter and cat_filter != "전체":
             p_extra = p.extra_data if isinstance(p.extra_data, dict) else {}
@@ -196,6 +277,7 @@ def get_post_list(
     for post in posts:
         post_data = {
             "id": post.id,
+            "board_seq": post.board_seq,
             "title": post.title,
             "content": post.content,
             "content_json": post.content_json,
@@ -203,7 +285,7 @@ def get_post_list(
             "status": post.status,
             "view_count": post.view_count,
             "create_date": post.create_date,
-            "user_name": mask_post_author_name(post, user),
+            "user_name": mask_post_author_name(post, user, board, db=db, admin_rank=admin_rank),
             "is_read": False,
             "like_count": len(post.reactions),
             "comment_count": len(post.comments)
@@ -221,9 +303,23 @@ def get_post_list(
     return total, result_posts
 
 def create_post(db: Session, board_id: int, user_id: int, post_in: PostCreate):
-    """새 게시물 생성 (MediaAsset 연동 포함)"""
+    """새 게시물 생성 (게시판별 독립 문서번호 채번 + MediaAsset 연동 포함)"""
+    seq_row = db.execute(
+        text(
+            "UPDATE board_config SET next_seq = next_seq + 1 "
+            "WHERE id = :board_id RETURNING next_seq - 1"
+        ),
+        {"board_id": board_id},
+    ).first()
+    if seq_row and seq_row[0] is not None:
+        board_seq = int(seq_row[0])
+    else:
+        max_seq = db.query(func.coalesce(func.max(Post.board_seq), 0)).filter(Post.board_id == board_id).scalar()
+        board_seq = int(max_seq or 0) + 1
+
     db_post = Post(
         board_id=board_id,
+        board_seq=board_seq,
         user_id=user_id,
         title=post_in.title,
         content=post_in.content,

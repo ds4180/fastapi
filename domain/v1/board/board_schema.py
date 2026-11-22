@@ -21,6 +21,7 @@ class BoardConfigSchema(BaseModel):
 
 class PostSimpleSchema(BaseModel):
     id: int
+    board_seq: Optional[int] = None
     title: str
     content: Optional[str] = None # HTML 본문 추가
     content_json: Optional[Any] = None

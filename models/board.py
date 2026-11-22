@@ -35,6 +35,7 @@ class BoardConfig(Base):
     service_app_ids = Column(JSONType, default=list)
     
     items_per_page = Column(Integer, default=10)
+    next_seq = Column(Integer, nullable=False, default=1)
     fields_def = Column(JSONType, default=list) 
     options = Column(JSONType, default=dict)
     
@@ -56,9 +57,13 @@ class BoardConfig(Base):
 class Post(Base):
     """게시글 본문 모델 (TipTap JSON 포맷 포함)"""
     __tablename__ = "post"
+    __table_args__ = (
+        UniqueConstraint("board_id", "board_seq", name="uq_post_board_seq"),
+    )
 
     id = Column(Integer, primary_key=True)
     board_id = Column(Integer, ForeignKey("board_config.id"), nullable=False, index=True)
+    board_seq = Column(Integer, nullable=False, default=1, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String, nullable=False)
     content = Column(Text, nullable=True)

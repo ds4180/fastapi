@@ -95,7 +95,7 @@ def get_app_data(
                 post = db.query(Post).filter(Post.id == post_id, Post.board_id == board.id, Post.is_deleted == False).first()
                 if post:
                     from domain.v1.board import board_crud
-                    if not board_crud.can_view_post(post, current_user):
+                    if not board_crud.can_view_post(post, current_user, board):
                         raise AccessDeniedError(
                             "이 게시물을 열람할 권한이 없거나 게시 기간이 아닙니다.",
                             resource="board",
@@ -106,7 +106,7 @@ def get_app_data(
                         db.query(Post).filter(Post.id == post.id).update({Post.view_count: Post.view_count + 1})
                         db.commit()
                         db.refresh(post)
-                    setattr(post, "user_name", board_crud.mask_post_author_name(post, current_user))
+                    setattr(post, "user_name", board_crud.mask_post_author_name(post, current_user, board))
                     result["instance"] = post
                     # 서비스 바인딩 해결 (게시판 직접 지정 우선 -> 공통 번들)
                     result["bindings"] = resolve_board_services(db, board)
