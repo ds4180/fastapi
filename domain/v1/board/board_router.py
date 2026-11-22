@@ -24,6 +24,7 @@ def get_board_posts(
     size: int = 10,
     keyword: str = "",
     sort: str = "latest",
+    category: str = "",
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
@@ -45,7 +46,15 @@ def get_board_posts(
             raise HTTPException(status_code=403, detail="이 게시판은 목록 조회가 비활성화되어 있습니다.")
         
     total, posts = board_crud.get_post_list(
-        db, board_id=board.id, skip=page * size, limit=size, user=current_user, keyword=keyword, sort=sort
+        db,
+        board_id=board.id,
+        skip=page * size,
+        limit=size,
+        user=current_user,
+        keyword=keyword,
+        sort=sort,
+        category=category,
+        use_pin=board_crud.is_board_pin_enabled(board.options),
     )
     
     return {"total": total, "posts": posts, "board": board}
@@ -71,10 +80,13 @@ def get_post_detail(
             detail=f"'{post.board.name}' 게시물 열람 권한이 없습니다."
         )
     
-    # 2. 상세 보기 비활성화 체크
+    # 2. 상세 보기 비활성화 및 게시물 메타(비밀글/예약/만료/그룹) 체크
     if not post.board.options.get("use_view", True):
         if get_user_rank(current_user) < 4:
             raise HTTPException(status_code=403, detail="이 게시판은 상세 보기가 비활성화되어 있습니다.")
+
+    if not board_crud.can_view_post(post, current_user):
+        raise HTTPException(status_code=403, detail="이 게시물을 열람할 권한이 없거나 게시 기간이 아닙니다.")
 
     # 3. 조회수 증가 (Redis 24시간 TTL 중복 방지 + 원자적 증가)
     if count_view and should_count_view("post", post.id, request, current_user):
@@ -94,10 +106,7 @@ def get_post_detail(
             db.add(PostRead(post_id=post.id, user_id=current_user.id))
             db.commit()
 
-    if post.user:
-        setattr(post, "user_name", post.user.real_name or post.user.username)
-    else:
-        setattr(post, "user_name", "탈퇴한 사용자")
+    setattr(post, "user_name", board_crud.mask_post_author_name(post, current_user))
 
     return post
 
@@ -129,7 +138,8 @@ def post_create(
         if get_user_rank(current_user) < 4:
             raise HTTPException(status_code=403, detail="이 게시판은 글 작성이 비활성화되어 있습니다.")
         
-    # 4. 생성 실행
+    # 3. 메타데이터 권한 필터링 및 생성 실행
+    post_in.extra_data = board_crud.sanitize_post_extra_data(post_in.extra_data, current_user)
     created = board_crud.create_post(db, board_id=board.id, user_id=current_user.id, post_in=post_in)
     from core.audit import safe_log_audit
     safe_log_audit(
@@ -149,7 +159,10 @@ def post_create(
         is_push_option_enabled,
         send_push_to_board_readers,
     )
-    if is_push_option_enabled(board.options, "push_on_post"):
+    should_push = is_push_option_enabled(board.options, "push_on_post") or bool(
+        get_user_rank(current_user) >= 4 and (created.extra_data or {}).get("push_on_create")
+    )
+    if should_push:
         author_name = current_user.real_name or current_user.username
         dispatch_push_async(
             send_push_to_board_readers,
@@ -181,7 +194,10 @@ def post_update(
     # 권한 체크: 작성자 본인이거나 운영 관리자(Rank 4 이상)
     if db_post.user_id != current_user.id and get_user_rank(current_user) < 4:
         raise HTTPException(status_code=403, detail="본인이 작성한 글만 수정할 수 있습니다.")
-        
+
+    if post_in.extra_data is not None:
+        post_in.extra_data = board_crud.sanitize_post_extra_data(post_in.extra_data, current_user)
+
     updated = board_crud.update_post(db, db_post=db_post, post_in=post_in)
     from core.audit import safe_log_audit
     safe_log_audit(

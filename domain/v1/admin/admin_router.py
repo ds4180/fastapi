@@ -1212,11 +1212,40 @@ def run_manual_gc(db: Session = Depends(get_db), admin: User = Depends(check_con
 def get_all_boards(db: Session = Depends(get_db), admin: User = Depends(check_board_admin)):
     return db.query(BoardConfig).order_by(BoardConfig.id).all()
 
+DEFAULT_BOARD_META_KEYS = [
+    "category", "is_pinned", "pin_until", "bg_tone", "title_bold",
+    "title_color", "new_mode", "icon", "require_read_receipt", "publish_at",
+    "expire_at", "target_groups", "push_on_create", "cta_label", "cta_url",
+    "summary_line", "effective_date", "route_no", "vehicle_no",
+    "is_secret", "hide_author", "allow_comment"
+]
+
+
+def _ensure_default_board_options(raw_options: Optional[dict]) -> dict:
+    opts = dict(raw_options or {})
+    if "use_pin" not in opts:
+        opts["use_pin"] = {
+            "label": "상단 고정 사용",
+            "type": "toggle",
+            "description": "공지글 상단 고정 기능 활성화",
+            "value": True,
+        }
+    if "new_hours" not in opts:
+        opts["new_hours"] = 24
+    if "view_meta_keys" not in opts:
+        opts["view_meta_keys"] = list(DEFAULT_BOARD_META_KEYS)
+    if "write_meta_keys" not in opts:
+        opts["write_meta_keys"] = list(DEFAULT_BOARD_META_KEYS)
+    return opts
+
+
 @router.post("/boards", response_model=admin_schema.BoardConfigAdminSchema)
 def create_board_config(board_in: admin_schema.BoardConfigCreate, db: Session = Depends(get_db), admin: User = Depends(check_board_admin_write)):
     if db.query(BoardConfig).filter(BoardConfig.slug == board_in.slug).first():
         raise HTTPException(status_code=400, detail="이미 존재하는 슬러그입니다.")
-    db_board = BoardConfig(**board_in.dict())
+    payload = board_in.dict()
+    payload["options"] = _ensure_default_board_options(payload.get("options"))
+    db_board = BoardConfig(**payload)
     db.add(db_board)
     db.commit()
     db.refresh(db_board)

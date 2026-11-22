@@ -92,21 +92,39 @@ def get_app_data(
             if len(parts) >= 2 and parts[1].isdigit():
                 # 상세 조회 모드
                 post_id = int(parts[1])
-                post = db.query(Post).filter(Post.id == post_id, Post.board_id == board.id).first()
+                post = db.query(Post).filter(Post.id == post_id, Post.board_id == board.id, Post.is_deleted == False).first()
                 if post:
+                    from domain.v1.board import board_crud
+                    if not board_crud.can_view_post(post, current_user):
+                        raise AccessDeniedError(
+                            "이 게시물을 열람할 권한이 없거나 게시 기간이 아닙니다.",
+                            resource="board",
+                            resource_id=str(post_id)
+                        )
                     from core.view_counter import should_count_view
                     if should_count_view("post", post.id, request, current_user):
                         db.query(Post).filter(Post.id == post.id).update({Post.view_count: Post.view_count + 1})
                         db.commit()
                         db.refresh(post)
-                    setattr(post, "user_name", (post.user.real_name or post.user.username) if post.user else "탈퇴한 사용자")
+                    setattr(post, "user_name", board_crud.mask_post_author_name(post, current_user))
                     result["instance"] = post
                     # 서비스 바인딩 해결 (게시판 직접 지정 우선 -> 공통 번들)
                     result["bindings"] = resolve_board_services(db, board)
             else:
                 # 목록 조회 모드 (전달받은 앱 쿼리 파라미터 적용)
                 from domain.v1.board import board_crud
-                total, posts = board_crud.get_post_list(db, board_id=board.id, skip=page*size, limit=size, keyword=keyword, sort=sort)
+                category = request.query_params.get("category", "")
+                total, posts = board_crud.get_post_list(
+                    db,
+                    board_id=board.id,
+                    skip=page * size,
+                    limit=size,
+                    user=current_user,
+                    keyword=keyword,
+                    sort=sort,
+                    category=category,
+                    use_pin=board_crud.is_board_pin_enabled(board.options),
+                )
                 result["instance"] = {"posts": posts, "total": total}
                 result["bindings"] = resolve_board_services(db, board)
 

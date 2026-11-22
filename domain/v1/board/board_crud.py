@@ -3,9 +3,151 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, func, cast, String
 from models import Post, BoardConfig, User, PostRead, Comment, PostReaction, MediaAsset
 from domain.v1.board.board_schema import PostCreate, PostUpdate
-from typing import List, Optional
+from core.permission import get_user_rank
+from typing import Any, Dict, List, Optional
 
-def get_post_list(db: Session, board_id: int, skip: int = 0, limit: int = 10, user: User = None, keyword: str = "", sort: str = "latest"):
+PRIVILEGED_META_KEYS = {
+    "is_pinned",
+    "pin_until",
+    "bg_tone",
+    "title_bold",
+    "title_color",
+    "new_mode",
+    "require_read_receipt",
+    "target_groups",
+    "push_on_create",
+    "publish_at",
+    "expire_at",
+    "cta_url",
+    "cta_label",
+}
+
+
+def _parse_iso_dt(val: Any) -> Optional[datetime]:
+    if not val or not isinstance(val, str):
+        return None
+    s = val.strip()
+    if not s:
+        return None
+    try:
+        if len(s) == 10:
+            return datetime.strptime(s, "%Y-%m-%d")
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def sanitize_post_extra_data(raw_extra: Optional[Dict[str, Any]], user: Optional[User]) -> Dict[str, Any]:
+    """작성자 권한에 따라 허용된 게시물 메타데이터만 정제해 반환합니다."""
+    if not isinstance(raw_extra, dict):
+        return {}
+    is_admin = get_user_rank(user) >= 4
+    cleaned: Dict[str, Any] = {}
+    for k, v in raw_extra.items():
+        if not is_admin and k in PRIVILEGED_META_KEYS:
+            continue
+        if isinstance(v, str):
+            v = v.strip()
+            if v == "":
+                continue
+        if v is False and k in ("is_pinned", "title_bold", "is_secret", "require_read_receipt", "hide_author", "push_on_create"):
+            continue
+        if v is None:
+            continue
+        cleaned[k] = v
+    return cleaned
+
+
+def _get_user_group_codes(user: Optional[User]) -> set[str]:
+    if not user or not getattr(user, "profile", None):
+        return set()
+    codes: set[str] = set()
+    if user.profile.primary_group:
+        codes.add(str(user.profile.primary_group).strip())
+    if isinstance(user.profile.secondary_groups, list):
+        for g in user.profile.secondary_groups:
+            if g:
+                codes.add(str(g).strip())
+    return codes
+
+
+def can_view_post(post: Post, user: Optional[User]) -> bool:
+    """비밀글, 예약게시, 만료일, 대상 그룹 메타데이터 기반 열람 권한을 판별합니다."""
+    if user and (post.user_id == user.id or get_user_rank(user) >= 4):
+        return True
+
+    extra = post.extra_data if isinstance(post.extra_data, dict) else {}
+    if extra.get("is_secret"):
+        return False
+
+    now = datetime.now()
+    publish_dt = _parse_iso_dt(extra.get("publish_at"))
+    if publish_dt and now < publish_dt:
+        return False
+
+    expire_raw = extra.get("expire_at")
+    expire_dt = _parse_iso_dt(expire_raw)
+    if expire_dt:
+        if isinstance(expire_raw, str) and len(expire_raw.strip()) == 10:
+            expire_dt = expire_dt.replace(hour=23, minute=59, second=59)
+        if now > expire_dt:
+            return False
+
+    target_groups = extra.get("target_groups")
+    if isinstance(target_groups, list):
+        normalized = {str(g).strip() for g in target_groups if str(g).strip()}
+        if normalized:
+            user_groups = _get_user_group_codes(user)
+            if not (normalized & user_groups):
+                return False
+
+    return True
+
+
+def is_post_effectively_pinned(post: Post, today_str: Optional[str] = None) -> bool:
+    """상단 고정 및 고정 만료일(pin_until) 유효 여부를 판별합니다."""
+    extra = post.extra_data if isinstance(post.extra_data, dict) else {}
+    if not extra.get("is_pinned"):
+        return False
+    pin_until = str(extra.get("pin_until") or "").strip()
+    if pin_until:
+        today_s = today_str or datetime.now().strftime("%Y-%m-%d")
+        if pin_until[:10] < today_s:
+            return False
+    return True
+
+
+def mask_post_author_name(post: Post, user: Optional[User]) -> str:
+    """작성자 비공개(hide_author) 메타 적용 시 작성자명을 마스킹합니다."""
+    real_name = (post.user.real_name or post.user.username) if post.user else "탈퇴한 사용자"
+    extra = post.extra_data if isinstance(post.extra_data, dict) else {}
+    if extra.get("hide_author"):
+        if not user or (post.user_id != user.id and get_user_rank(user) < 4):
+            return "비공개"
+    return real_name
+
+
+def is_board_pin_enabled(board_options: Optional[Dict[str, Any]]) -> bool:
+    """게시판 options에서 상단 고정 기능(use_pin) 활성화 여부를 반환합니다."""
+    if not isinstance(board_options, dict) or "use_pin" not in board_options:
+        return True
+    raw = board_options.get("use_pin")
+    if isinstance(raw, dict) and "value" in raw:
+        return bool(raw.get("value"))
+    return bool(raw)
+
+
+def get_post_list(
+    db: Session,
+    board_id: int,
+    skip: int = 0,
+    limit: int = 10,
+    user: User = None,
+    keyword: str = "",
+    sort: str = "latest",
+    category: str = "",
+    use_pin: bool = True,
+):
     query = db.query(Post).filter(
         Post.board_id == board_id,
         Post.is_deleted == False
@@ -23,7 +165,6 @@ def get_post_list(db: Session, board_id: int, skip: int = 0, limit: int = 10, us
             )
         ).distinct()
 
-    total = query.count()
     if sort == "views":
         order_clause = Post.view_count.desc()
     elif sort == "oldest":
@@ -31,25 +172,43 @@ def get_post_list(db: Session, board_id: int, skip: int = 0, limit: int = 10, us
     else:
         order_clause = Post.create_date.desc()
 
-    posts = query.order_by(order_clause, Post.id.desc()).offset(skip).limit(limit).all()
+    all_posts = query.order_by(order_clause, Post.id.desc()).all()
+
+    cat_filter = (category or "").strip()
+    visible_posts: List[Post] = []
+    for p in all_posts:
+        if not can_view_post(p, user):
+            continue
+        if cat_filter and cat_filter != "전체":
+            p_extra = p.extra_data if isinstance(p.extra_data, dict) else {}
+            if str(p_extra.get("category") or "").strip() != cat_filter:
+                continue
+        visible_posts.append(p)
+
+    if use_pin:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        visible_posts.sort(key=lambda p: 0 if is_post_effectively_pinned(p, today_str) else 1)
+
+    total = len(visible_posts)
+    posts = visible_posts[skip : skip + limit]
 
     result_posts = []
     for post in posts:
         post_data = {
             "id": post.id,
             "title": post.title,
-            "content": post.content, # 추가
+            "content": post.content,
             "content_json": post.content_json,
-            "extra_data": post.extra_data,
+            "extra_data": post.extra_data or {},
             "status": post.status,
             "view_count": post.view_count,
             "create_date": post.create_date,
-            "user_name": post.user.real_name or post.user.username if post.user else "탈퇴한 사용자",
+            "user_name": mask_post_author_name(post, user),
             "is_read": False,
             "like_count": len(post.reactions),
             "comment_count": len(post.comments)
         }
-        
+
         if user:
             is_read = db.query(PostRead).filter(
                 PostRead.post_id == post.id,

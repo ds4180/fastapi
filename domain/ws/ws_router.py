@@ -101,16 +101,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     data["sender_user_id"] = user_id
                     data["sender_username"] = username
                     data["_ts"] = time.time()
+                    include_self = bool(data.get("includeSelf"))
 
                     # 1) 요청자(user_id) 전용 대기열에 저장
                     manager.pending_coop_requests[user_id] = data
 
-                    # 2) 요청자 본인의 MOBILE 소켓으로만 정밀 타겟 전송 (발신 데스크톱 자신 및 타 사원 제외)
+                    # 2) 요청자 본인의 MOBILE 소켓으로 정밀 타겟 전송 (includeSelf=True면 자기 자신 소켓도 포함)
                     await manager.send_to_user(
                         user_id=user_id,
                         message=data,
                         target_device="MOBILE",
-                        exclude_ws=websocket,
+                        exclude_ws=None if include_self else websocket,
                     )
 
                     # 3) 모바일 PWA가 백그라운드/슬립 상태일 때도 깨울 수 있도록 본인(user_id)에게만 Web Push 발송
@@ -135,12 +136,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     data["sender_username"] = username
                     data["_ts"] = time.time()
 
-                    # 대기열 즉시 정리 후 요청자 본인의 다른 기기(데스크톱 등)로 결과/취소 신호 전달
+                    # 대기열 즉시 정리 후 요청자 본인의 기기로 결과/취소 신호 전달 (모바일 자기 자신 열기 포함)
                     manager.pending_coop_requests.pop(user_id, None)
                     await manager.send_to_user(
                         user_id=user_id,
                         message=data,
-                        exclude_ws=websocket,
+                        exclude_ws=None if data.get("includeSelf") else websocket,
                     )
             except Exception:
                 continue
