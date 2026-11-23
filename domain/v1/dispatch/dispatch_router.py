@@ -124,4 +124,7 @@ def get_custom_dispatch_settings(
         "show_substitute_columns": settings.get("show_substitute_columns", True),
         "route_fleet_rules": settings.get("route_fleet_rules", []),
         "vehicles_by_group": res["vehicles_by_group"],
+        "confirm_d_day_always_open": settings.get("confirm_d_day_always_open", True),
+        "confirm_d1_require_announced": settings.get("confirm_d1_require_announced", True),
+        "preview_allow_draft": settings.get("preview_allow_draft", True),
     }

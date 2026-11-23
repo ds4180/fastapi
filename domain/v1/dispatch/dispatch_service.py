@@ -54,6 +54,13 @@ DEFAULT_DISPATCH_SETTINGS: Dict[str, Any] = {
     "auto_announce_time": "17:00",
     "auto_announce_push": True,
     "auto_announce_skip_if_confirmed": True,
+    "auto_announce_title_template": "[명일 배차 고지] {target_date}",
+    "auto_announce_body_template": "{target_date} 배차가 확정 고지되었습니다. 배차표에서 차량과 로번을 확인해 주세요.",
+    "announce_sender_min_rank": 4,
+    # 2-1. 배차 확인(D-day/D-1) 및 예고(D+2+) 공개 정책 설정
+    "confirm_d_day_always_open": True,
+    "confirm_d1_require_announced": True,
+    "preview_allow_draft": True,
     # 3. 노선-차량 매핑 & 표시·색상 설정
     "route_fleet_rules": DEFAULT_ROUTE_FLEET_RULES,
     "show_substitute_columns": True,
@@ -164,6 +171,18 @@ def get_dispatch_settings(db: Session) -> Dict[str, Any]:
     merged["auto_announce_time"] = _normalize_hhmm(merged.get("auto_announce_time"), "17:00")
     merged["auto_announce_push"] = bool(merged.get("auto_announce_push", True))
     merged["auto_announce_skip_if_confirmed"] = bool(merged.get("auto_announce_skip_if_confirmed", True))
+    merged["auto_announce_title_template"] = (
+        str(merged.get("auto_announce_title_template") or "").strip()
+        or DEFAULT_DISPATCH_SETTINGS["auto_announce_title_template"]
+    )
+    merged["auto_announce_body_template"] = (
+        str(merged.get("auto_announce_body_template") or "").strip()
+        or DEFAULT_DISPATCH_SETTINGS["auto_announce_body_template"]
+    )
+    merged["announce_sender_min_rank"] = _clamp_int(merged.get("announce_sender_min_rank"), 1, 10, 4)
+    merged["confirm_d_day_always_open"] = bool(merged.get("confirm_d_day_always_open", True))
+    merged["confirm_d1_require_announced"] = bool(merged.get("confirm_d1_require_announced", True))
+    merged["preview_allow_draft"] = bool(merged.get("preview_allow_draft", True))
     merged["show_substitute_columns"] = bool(merged.get("show_substitute_columns", True))
     rules = merged.get("route_fleet_rules")
     if not isinstance(rules, list) or len(rules) == 0:
@@ -217,6 +236,18 @@ def save_dispatch_settings(db: Session, payload: Dict[str, Any]) -> Dict[str, An
         "auto_announce_time": _normalize_hhmm(payload.get("auto_announce_time"), "17:00"),
         "auto_announce_push": bool(payload.get("auto_announce_push", True)),
         "auto_announce_skip_if_confirmed": bool(payload.get("auto_announce_skip_if_confirmed", True)),
+        "auto_announce_title_template": (
+            str(payload.get("auto_announce_title_template") or "").strip()
+            or DEFAULT_DISPATCH_SETTINGS["auto_announce_title_template"]
+        ),
+        "auto_announce_body_template": (
+            str(payload.get("auto_announce_body_template") or "").strip()
+            or DEFAULT_DISPATCH_SETTINGS["auto_announce_body_template"]
+        ),
+        "announce_sender_min_rank": _clamp_int(payload.get("announce_sender_min_rank"), 1, 10, 4),
+        "confirm_d_day_always_open": bool(payload.get("confirm_d_day_always_open", True)),
+        "confirm_d1_require_announced": bool(payload.get("confirm_d1_require_announced", True)),
+        "preview_allow_draft": bool(payload.get("preview_allow_draft", True)),
         "route_fleet_rules": clean_rules,
         "show_substitute_columns": bool(payload.get("show_substitute_columns", True)),
         "driver_assign_colors": _normalize_assign_colors(payload.get("driver_assign_colors")),
@@ -302,16 +333,43 @@ def compute_preview_window(settings: Dict[str, Any], now: Optional[datetime] = N
     }
 
 
+def resolve_route_fleet(
+    route_name: str,
+    vehicles_by_group: Dict[str, List[str]],
+    route_fleet_rules: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
+    """노선명과 설정된 route_fleet_rules를 기반으로 전담 차량 풀을 동적 매칭합니다."""
+    r_name = str(route_name or "")
+    rules = route_fleet_rules if isinstance(route_fleet_rules, list) else DEFAULT_ROUTE_FLEET_RULES
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        keywords = [str(k).strip() for k in (rule.get("keywords") or []) if str(k).strip()]
+        fleet_key = str(rule.get("fleet_key") or "").strip()
+        if fleet_key and any(kw in r_name for kw in keywords):
+            matched = vehicles_by_group.get(fleet_key)
+            if isinstance(matched, list):
+                return matched
+    all_vehicles: List[str] = []
+    seen = set()
+    for arr in (vehicles_by_group or {}).values():
+        if isinstance(arr, list):
+            for v in arr:
+                if v not in seen:
+                    seen.add(v)
+                    all_vehicles.append(v)
+    return all_vehicles
+
+
 def verify_custom_preview_access(db: Session, target_date: date) -> None:
-    """일반 사원용 배차 조회 날짜 접근 가능 여부를 검증합니다.
-    - 오늘(D-day) 및 내일(D-1)은 배차 확인 탭 조회를 허용합니다(노출 여부는 status로 통제).
-    - 그 외(D+2 이상)는 preview_window 설정을 따릅니다.
-    """
+    """일반 사원용 배차 조회 날짜 접근 가능 여부를 검증합니다."""
     today = datetime.now().date()
     tomorrow = today + timedelta(days=1)
-    if target_date in (today, tomorrow):
-        return
     settings = get_dispatch_settings(db)
+    if target_date == today and settings.get("confirm_d_day_always_open", True):
+        return
+    if target_date == tomorrow:
+        return
     win = compute_preview_window(settings)
     if win["is_paused"]:
         raise HTTPException(status_code=403, detail=win["reason"])
@@ -410,9 +468,15 @@ def announce_tomorrow_dispatch(
         # 전체 활성 사용자 ID 조회 (dispatch 앱 접근 가능 대상)
         active_users = db.query(User).all()
         target_ids = [u.id for u in active_users if u.profile is None or u.profile.is_active is not False]
-        sender = trigger_user or next((u for u in active_users if u.rank() >= 4), None)
-        title = f"[명일 배차 고지] {tomorrow_str}"
-        msg = f"{tomorrow_str} 배차가 확정 고지되었습니다. 배차표에서 차량과 로번을 확인해 주세요."
+        min_rank = int(settings.get("announce_sender_min_rank", 4))
+        sender = trigger_user or next((u for u in active_users if u.rank() >= min_rank), None)
+        title_tpl = str(settings.get("auto_announce_title_template") or "[명일 배차 고지] {target_date}")
+        body_tpl = str(
+            settings.get("auto_announce_body_template")
+            or "{target_date} 배차가 확정 고지되었습니다. 배차표에서 차량과 로번을 확인해 주세요."
+        )
+        title = title_tpl.replace("{target_date}", tomorrow_str)
+        msg = body_tpl.replace("{target_date}", tomorrow_str)
         if sender and target_ids:
             safe_notify(
                 db=db,

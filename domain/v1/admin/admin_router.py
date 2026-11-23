@@ -2235,17 +2235,16 @@ def build_daily_dispatch_rows(db: Session, target_date: date, route_master_id: i
     start_turn_seq = getattr(master, "start_turn_seq", 1) or 1
     start_offset = next((idx for idx, tt in enumerate(timetables) if tt.seq == start_turn_seq), 0)
 
-    # 드라이버 & 차량 메타데이터 로드 (차량 번호 목데이터 풀 유지)
+    # 드라이버 & 차량 메타데이터 로드 (설정된 route_fleet_rules 기반 동적 매칭)
+    from domain.v1.dispatch.dispatch_service import get_dispatch_settings, resolve_route_fleet
     load_drivers_metadata()
     vehicles_dict = load_vehicles_metadata()
-
-    route_name = master.route_name or ""
-    if "121" in route_name or "122" in route_name:
-        target_fleet = vehicles_dict.get("121/122", [])
-    elif "291" in route_name or "292" in route_name or "293" in route_name:
-        target_fleet = vehicles_dict.get("291/292/293", [])
-    else:
-        target_fleet = vehicles_dict.get("121/122", []) + vehicles_dict.get("291/292/293", [])
+    dispatch_cfg = get_dispatch_settings(db)
+    target_fleet = resolve_route_fleet(
+        master.route_name or "",
+        vehicles_dict,
+        dispatch_cfg.get("route_fleet_rules"),
+    )
 
     timetable_ids = [t.id for t in timetables]
 
