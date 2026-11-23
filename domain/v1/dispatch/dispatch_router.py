@@ -77,6 +77,17 @@ def get_admin_dispatch_driver_stats(
     return service.build_driver_work_stats(db, target_date)
 
 
+@admin_router.get("/driver-detail")
+def get_admin_dispatch_driver_detail(
+    driver_name: str = Query(..., description="기사명"),
+    target_date: date = Query(..., description="조회 기준일 (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_dispatch_admin),
+):
+    """기사 상세 모달용 결근계 내역, 최근 노선 운행 내역 및 당일/명일 투입 여부를 반환합니다."""
+    return service.get_driver_dispatch_detail(db, driver_name, target_date)
+
+
 @admin_router.post("/announce-now")
 def trigger_announce_tomorrow_dispatch(
     db: Session = Depends(get_db),

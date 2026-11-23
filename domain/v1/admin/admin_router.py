@@ -1815,6 +1815,11 @@ def create_route_master(
             
         db.commit()
         db.refresh(db_master)
+        try:
+            from domain.v1.dispatch.dispatch_service import invalidate_timetable_rotation_cache
+            invalidate_timetable_rotation_cache()
+        except Exception:
+            pass
         return {"message": "success", "id": db_master.id}
     except Exception as e:
         db.rollback()
@@ -1880,6 +1885,11 @@ def update_route_master(
                 db.add(db_timetable)
                 
         db.commit()
+        try:
+            from domain.v1.dispatch.dispatch_service import invalidate_timetable_rotation_cache
+            invalidate_timetable_rotation_cache()
+        except Exception:
+            pass
         return {"message": "success"}
     except HTTPException:
         raise
@@ -1905,6 +1915,11 @@ def delete_route_master(
             
         db.delete(db_master)
         db.commit()
+        try:
+            from domain.v1.dispatch.dispatch_service import invalidate_timetable_rotation_cache
+            invalidate_timetable_rotation_cache()
+        except Exception:
+            pass
         return {"message": "success"}
     except HTTPException:
         raise

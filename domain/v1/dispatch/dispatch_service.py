@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from models import DayOff, Dispatch, RouteMaster, RouteTimetable, SystemConfig, User
@@ -25,6 +25,8 @@ except Exception:
 
 DISPATCH_STATS_CACHE_PREFIX = "dispatch:driver_stats:"
 DISPATCH_STATS_CACHE_TTL = 300
+DISPATCH_TIMETABLE_ROTATION_CACHE_KEY = "dispatch:timetable_rotation_map"
+DISPATCH_TIMETABLE_ROTATION_TTL = 1800
 
 DISPATCH_SETTINGS_KEY = "dispatch_settings"
 DISPATCH_AUTO_ANNOUNCE_STATE_KEY = "dispatch_auto_announce_state"
@@ -82,6 +84,16 @@ def invalidate_driver_work_stats_cache() -> None:
             redis_client.delete(*keys)
     except Exception:
         pass
+
+
+def invalidate_timetable_rotation_cache() -> None:
+    """노선 시간표 순환 맵 및 관련 통계 Redis 캐시를 무효화합니다."""
+    if redis_client is not None:
+        try:
+            redis_client.delete(DISPATCH_TIMETABLE_ROTATION_CACHE_KEY)
+        except Exception:
+            pass
+    invalidate_driver_work_stats_cache()
 
 
 def _normalize_hhmm(val: Any, fallback: str = "17:00") -> str:
@@ -478,71 +490,111 @@ def _calc_night_minutes(start_min: int, end_min: int, morning_end_min: int, even
 def build_timetable_rotation_resolver(db: Session):
     """
     Dispatch.timetable_id(기준 슬롯)를 target_date 기준 실제 순환 로번(ref_t) 정보로
-    변환하는 (resolve_fn, max_seq_by_route)를 반환합니다.
+    변환하는 (resolve_fn, max_seq_by_route)를 반환합니다. (Redis 캐시 활용)
     """
-    master_rows = db.query(
-        RouteMaster.id, RouteMaster.start_date, RouteMaster.start_turn_seq
-    ).all()
-    master_info = {
-        rm_id: (rm_start_date, rm_start_turn or 1)
-        for rm_id, rm_start_date, rm_start_turn in master_rows
+    cached_bundle: Optional[Dict[str, Any]] = None
+    if redis_client is not None:
+        try:
+            raw = redis_client.get(DISPATCH_TIMETABLE_ROTATION_CACHE_KEY)
+            if raw:
+                cached_bundle = json.loads(raw)
+        except Exception:
+            cached_bundle = None
+
+    if cached_bundle is None:
+        master_rows = db.query(
+            RouteMaster.id, RouteMaster.start_date, RouteMaster.start_turn_seq
+        ).all()
+        master_info_raw = {
+            str(rm_id): [rm_start_date.isoformat() if rm_start_date else None, rm_start_turn or 1]
+            for rm_id, rm_start_date, rm_start_turn in master_rows
+        }
+
+        tt_rows = (
+            db.query(
+                RouteTimetable.id,
+                RouteTimetable.route_master_id,
+                RouteTimetable.route_name,
+                RouteTimetable.seq,
+                RouteTimetable.start_time,
+                RouteTimetable.end_time,
+                RouteTimetable.start_location,
+                RouteTimetable.end_location,
+            )
+            .order_by(RouteTimetable.route_master_id, RouteTimetable.seq)
+            .all()
+        )
+        timetables_by_rm_raw: Dict[str, List[Dict[str, Any]]] = {}
+        index_by_tt_id_raw: Dict[str, List[Any]] = {}
+        max_seq_raw: Dict[str, int] = {}
+        for tt_id, rm_id, r_name, tt_seq, tt_start, tt_end, s_loc, e_loc in tt_rows:
+            if rm_id is None:
+                continue
+            rm_key = str(rm_id)
+            bucket = timetables_by_rm_raw.setdefault(rm_key, [])
+            index_by_tt_id_raw[str(tt_id)] = [rm_key, len(bucket)]
+            bucket.append({
+                "route_master_id": rm_id,
+                "route_name": r_name or "-",
+                "seq": tt_seq or 0,
+                "start_time": tt_start or "",
+                "end_time": tt_end or "",
+                "start_location": s_loc or "-",
+                "end_location": e_loc or "-",
+            })
+            if tt_seq is not None:
+                prev_max = max_seq_raw.get(rm_key)
+                if prev_max is None or tt_seq > prev_max:
+                    max_seq_raw[rm_key] = tt_seq
+
+        start_offset_raw: Dict[str, int] = {}
+        for rm_key, tts in timetables_by_rm_raw.items():
+            _, s_turn = master_info_raw.get(rm_key, [None, 1])
+            start_offset_raw[rm_key] = next(
+                (idx for idx, item in enumerate(tts) if item["seq"] == s_turn),
+                0,
+            )
+
+        cached_bundle = {
+            "master_info": master_info_raw,
+            "timetables_by_rm": timetables_by_rm_raw,
+            "index_by_tt_id": index_by_tt_id_raw,
+            "max_seq_by_route": max_seq_raw,
+            "start_offset_by_rm": start_offset_raw,
+        }
+        if redis_client is not None:
+            try:
+                redis_client.set(
+                    DISPATCH_TIMETABLE_ROTATION_CACHE_KEY,
+                    json.dumps(cached_bundle, ensure_ascii=False),
+                    ex=DISPATCH_TIMETABLE_ROTATION_TTL,
+                )
+            except Exception:
+                pass
+
+    master_info: Dict[str, tuple] = {}
+    for rm_key, val in (cached_bundle.get("master_info") or {}).items():
+        s_date = date.fromisoformat(val[0]) if val and val[0] else None
+        master_info[rm_key] = (s_date, val[1] if val else 1)
+
+    timetables_by_rm = cached_bundle.get("timetables_by_rm") or {}
+    index_by_tt_id = cached_bundle.get("index_by_tt_id") or {}
+    start_offset_by_rm = cached_bundle.get("start_offset_by_rm") or {}
+    max_seq_by_route: Dict[int, int] = {
+        int(k): v for k, v in (cached_bundle.get("max_seq_by_route") or {}).items()
     }
 
-    tt_rows = (
-        db.query(
-            RouteTimetable.id,
-            RouteTimetable.route_master_id,
-            RouteTimetable.route_name,
-            RouteTimetable.seq,
-            RouteTimetable.start_time,
-            RouteTimetable.end_time,
-            RouteTimetable.start_location,
-            RouteTimetable.end_location,
-        )
-        .order_by(RouteTimetable.route_master_id, RouteTimetable.seq)
-        .all()
-    )
-    timetables_by_rm: Dict[int, List[Dict[str, Any]]] = {}
-    index_by_tt_id: Dict[int, tuple] = {}
-    max_seq_by_route: Dict[int, int] = {}
-    for tt_id, rm_id, r_name, tt_seq, tt_start, tt_end, s_loc, e_loc in tt_rows:
-        if rm_id is None:
-            continue
-        bucket = timetables_by_rm.setdefault(rm_id, [])
-        index_by_tt_id[tt_id] = (rm_id, len(bucket))
-        bucket.append({
-            "route_master_id": rm_id,
-            "route_name": r_name or "-",
-            "seq": tt_seq or 0,
-            "start_time": tt_start or "",
-            "end_time": tt_end or "",
-            "start_location": s_loc or "-",
-            "end_location": e_loc or "-",
-        })
-        if tt_seq is not None:
-            prev_max = max_seq_by_route.get(rm_id)
-            if prev_max is None or tt_seq > prev_max:
-                max_seq_by_route[rm_id] = tt_seq
-
-    start_offset_by_rm: Dict[int, int] = {}
-    for rm_id, tts in timetables_by_rm.items():
-        _, s_turn = master_info.get(rm_id, (None, 1))
-        start_offset_by_rm[rm_id] = next(
-            (idx for idx, item in enumerate(tts) if item["seq"] == s_turn),
-            0,
-        )
-
     def resolve(tt_id: int, d_date: date) -> Optional[Dict[str, Any]]:
-        tt_meta = index_by_tt_id.get(tt_id)
+        tt_meta = index_by_tt_id.get(str(tt_id))
         if not tt_meta:
             return None
-        rm_id, base_idx = tt_meta
-        tts = timetables_by_rm.get(rm_id) or []
+        rm_key, base_idx = tt_meta
+        tts = timetables_by_rm.get(rm_key) or []
         if not tts:
             return None
-        rm_start_date, _ = master_info.get(rm_id, (d_date, 1))
+        rm_start_date, _ = master_info.get(rm_key, (d_date, 1))
         delta_days = max(0, (d_date - rm_start_date).days) if rm_start_date else 0
-        start_offset = start_offset_by_rm.get(rm_id, 0)
+        start_offset = start_offset_by_rm.get(rm_key, 0)
         return tts[(base_idx + delta_days + start_offset) % len(tts)]
 
     return resolve, max_seq_by_route
@@ -634,6 +686,7 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
                 "prev_end_min": None,
                 "prev_end_time": None,
                 "worked_yesterday": False,
+                "last_work_date": None,
                 "dayoff_type": None,
                 "dayoff_status": None,
                 "is_disciplined": False,
@@ -680,6 +733,10 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
 
         if week_start <= d_date <= yesterday:
             entry["week_dates"].add(d_date)
+
+        if d_date <= yesterday:
+            if entry["last_work_date"] is None or d_date > entry["last_work_date"]:
+                entry["last_work_date"] = d_date
 
         if d_date == yesterday:
             entry["worked_yesterday"] = True
@@ -734,6 +791,13 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
                 earliest_today_min = 0
                 earliest_time_str = "00:00"
 
+        if st["worked_yesterday"]:
+            consecutive_off_days = 0
+        elif st["last_work_date"] is not None:
+            consecutive_off_days = max(1, (target_date - st["last_work_date"]).days - 1)
+        else:
+            consecutive_off_days = max(3, (target_date - query_start).days)
+
         result[name] = {
             "name": name,
             "month_work_days": len(st["month_dates"]),
@@ -743,6 +807,7 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
             "month_night_minutes": st["month_night_minutes"],
             "prev_end_time": st["prev_end_time"],
             "worked_yesterday": st["worked_yesterday"],
+            "consecutive_off_days": consecutive_off_days,
             "earliest_today_min": earliest_today_min,
             "earliest_available_time": earliest_time_str,
             "dayoff_type": st["dayoff_type"],
@@ -750,9 +815,25 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
             "is_disciplined": st["is_disciplined"],
         }
 
+    # 당일(target_date) 이미 배정된 기사 목록 (단일 노선 조회 시 타 노선 배정자 제외용)
+    assigned_today_rows = (
+        db.query(Dispatch.driver_name)
+        .filter(
+            Dispatch.target_date == target_date,
+            Dispatch.driver_name.isnot(None),
+            Dispatch.driver_name != "",
+        )
+        .distinct()
+        .all()
+    )
+    assigned_today_drivers = sorted(
+        {str(name).strip() for (name,) in assigned_today_rows if str(name or "").strip()}
+    )
+
     payload = {
         "target_date": target_date.isoformat(),
         "stats": result,
+        "assigned_today_drivers": assigned_today_drivers,
     }
     if cache_key and redis_client is not None:
         try:
@@ -760,3 +841,111 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
         except Exception:
             pass
     return payload
+
+
+def get_driver_dispatch_detail(db: Session, driver_name: str, target_date: date) -> Dict[str, Any]:
+    """
+    기사 상세 모달용 다중 테이블 조회:
+    - 당일/명일 노선 투입 여부 (Dispatch + RouteTimetable 순환 보정)
+    - 최근 30일 노선 운행 내역 및 이번 달 노선별 분포
+    - 결근계·병가 작성 내역 (DayOff + User)
+    """
+    clean_name = str(driver_name or "").strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="기사명을 입력해 주세요.")
+
+    resolve_tt, _ = build_timetable_rotation_resolver(db)
+    month_start = target_date.replace(day=1)
+    recent_start = min(month_start, target_date - timedelta(days=30))
+    tomorrow = target_date + timedelta(days=1)
+
+    disp_rows = (
+        db.query(
+            Dispatch.target_date,
+            Dispatch.timetable_id,
+            Dispatch.vehicle_no,
+            Dispatch.start_time,
+            Dispatch.status,
+            Dispatch.memo,
+        )
+        .filter(
+            Dispatch.driver_name == clean_name,
+            Dispatch.target_date >= recent_start,
+            Dispatch.target_date <= tomorrow,
+        )
+        .order_by(Dispatch.target_date.desc())
+        .all()
+    )
+
+    today_assignments: List[Dict[str, Any]] = []
+    tomorrow_assignments: List[Dict[str, Any]] = []
+    recent_dispatches: List[Dict[str, Any]] = []
+    route_counts: Dict[str, int] = {}
+
+    for d_date, tt_id, vno, disp_start, status_val, memo_val in disp_rows:
+        ref_t = resolve_tt(tt_id, d_date) if tt_id else None
+        item = {
+            "target_date": d_date.isoformat(),
+            "route_name": ref_t["route_name"] if ref_t else "-",
+            "seq": ref_t["seq"] if ref_t else 0,
+            "vehicle_no": vno or "-",
+            "start_time": disp_start or (ref_t["start_time"] if ref_t else ""),
+            "end_time": ref_t["end_time"] if ref_t else "",
+            "status": status_val or "DRAFT",
+            "memo": memo_val or "",
+        }
+        if d_date == target_date:
+            today_assignments.append(item)
+        elif d_date == tomorrow:
+            tomorrow_assignments.append(item)
+        else:
+            if len(recent_dispatches) < 12:
+                recent_dispatches.append(item)
+            if month_start <= d_date < target_date and item["route_name"] != "-":
+                route_counts[item["route_name"]] = route_counts.get(item["route_name"], 0) + 1
+
+    route_breakdown = [
+        {"route_name": rname, "count": cnt}
+        for rname, cnt in sorted(route_counts.items(), key=lambda x: (-x[1], x[0]))
+    ]
+
+    # 결근계 · 병가 작성 내역 (최근 60일 ~ 향후 30일)
+    matched_users = (
+        db.query(User.id)
+        .filter(or_(User.real_name == clean_name, User.username == clean_name))
+        .all()
+    )
+    user_ids = [u_id for (u_id,) in matched_users]
+    dayoff_history: List[Dict[str, Any]] = []
+    if user_ids:
+        do_rows = (
+            db.query(DayOff)
+            .filter(
+                DayOff.user_id.in_(user_ids),
+                DayOff.is_deleted == False,
+                DayOff.date >= target_date - timedelta(days=60),
+                DayOff.date <= target_date + timedelta(days=30),
+            )
+            .order_by(DayOff.date.desc())
+            .limit(15)
+            .all()
+        )
+        for do in do_rows:
+            dayoff_history.append({
+                "id": do.id,
+                "date": do.date.isoformat() if do.date else "",
+                "type": do.type,
+                "status": do.status,
+                "memo": do.memo or "",
+                "create_date": do.create_date.strftime("%Y-%m-%d %H:%M") if do.create_date else "",
+            })
+
+    return {
+        "driver_name": clean_name,
+        "target_date": target_date.isoformat(),
+        "today_assignments": today_assignments,
+        "tomorrow_assignments": tomorrow_assignments,
+        "recent_dispatches": recent_dispatches,
+        "route_breakdown": route_breakdown,
+        "dayoff_history": dayoff_history,
+    }
