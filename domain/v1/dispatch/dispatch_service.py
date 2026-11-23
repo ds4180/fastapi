@@ -63,14 +63,12 @@ DEFAULT_DISPATCH_SETTINGS: Dict[str, Any] = {
     "weekly_basis": "calendar_week",
     "min_rest_hours": 8,
     "night_metric_mode": "turn_count",
-    "night_turn_seqs": [1],
-    "night_include_last_turn": True,
+    "night_route_turn_rules": [],
     "night_morning_end": "06:00",
     "night_evening_start": "21:00",
     "stats_include_draft": True,
     "enable_validation_blink": True,
     "warn_prev_day_work": True,
-    "disciplined_drivers": [],
 }
 
 
@@ -130,11 +128,29 @@ def _normalize_assign_colors(raw: Any) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def _normalize_night_route_rules(raw: Any) -> List[Dict[str, Any]]:
+    clean: List[Dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return clean
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kw = str(item.get("route_keyword") or "").strip()
+        seqs = sorted(
+            {int(x) for x in (item.get("turn_seqs") or []) if str(x).strip().isdigit() and int(x) > 0}
+        )
+        if kw and seqs:
+            clean.append({"route_keyword": kw, "turn_seqs": seqs})
+    return clean
+
+
 def get_dispatch_settings(db: Session) -> Dict[str, Any]:
     """배차 앱 전역 설정을 SystemConfig에서 조회합니다."""
     row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_SETTINGS_KEY).first()
     raw = row.value if row and isinstance(row.value, dict) else {}
     merged = {**DEFAULT_DISPATCH_SETTINGS, **raw}
+    for legacy_key in ("night_turn_seqs", "night_include_last_turn", "disciplined_drivers"):
+        merged.pop(legacy_key, None)
     merged["preview_enabled"] = bool(merged.get("preview_enabled", True))
     merged["preview_force_open"] = bool(merged.get("preview_force_open", False))
     merged["preview_start_offset"] = _clamp_int(merged.get("preview_start_offset"), 0, 30, 3)
@@ -161,21 +177,14 @@ def get_dispatch_settings(db: Session) -> Dict[str, Any]:
     merged["night_metric_mode"] = (
         "time_range" if merged.get("night_metric_mode") == "time_range" else "turn_count"
     )
-    raw_seqs = merged.get("night_turn_seqs")
-    if isinstance(raw_seqs, list):
-        merged["night_turn_seqs"] = sorted({int(x) for x in raw_seqs if str(x).isdigit() and int(x) > 0}) or [1]
-    else:
-        merged["night_turn_seqs"] = [1]
-    merged["night_include_last_turn"] = bool(merged.get("night_include_last_turn", True))
+    merged["night_route_turn_rules"] = _normalize_night_route_rules(
+        merged.get("night_route_turn_rules")
+    )
     merged["night_morning_end"] = _normalize_hhmm(merged.get("night_morning_end"), "06:00")
     merged["night_evening_start"] = _normalize_hhmm(merged.get("night_evening_start"), "21:00")
     merged["stats_include_draft"] = bool(merged.get("stats_include_draft", True))
     merged["enable_validation_blink"] = bool(merged.get("enable_validation_blink", True))
     merged["warn_prev_day_work"] = bool(merged.get("warn_prev_day_work", True))
-    raw_disc = merged.get("disciplined_drivers")
-    merged["disciplined_drivers"] = (
-        [str(x).strip() for x in raw_disc if str(x).strip()] if isinstance(raw_disc, list) else []
-    )
     return merged
 
 
@@ -215,21 +224,12 @@ def save_dispatch_settings(db: Session, payload: Dict[str, Any]) -> Dict[str, An
         "weekly_basis": "rolling_7d" if payload.get("weekly_basis") == "rolling_7d" else "calendar_week",
         "min_rest_hours": _clamp_int(payload.get("min_rest_hours"), 0, 24, 8),
         "night_metric_mode": "time_range" if payload.get("night_metric_mode") == "time_range" else "turn_count",
-        "night_turn_seqs": sorted(
-            {int(x) for x in (payload.get("night_turn_seqs") or [1]) if str(x).isdigit() and int(x) > 0}
-        )
-        or [1],
-        "night_include_last_turn": bool(payload.get("night_include_last_turn", True)),
+        "night_route_turn_rules": _normalize_night_route_rules(payload.get("night_route_turn_rules")),
         "night_morning_end": _normalize_hhmm(payload.get("night_morning_end"), "06:00"),
         "night_evening_start": _normalize_hhmm(payload.get("night_evening_start"), "21:00"),
         "stats_include_draft": bool(payload.get("stats_include_draft", True)),
         "enable_validation_blink": bool(payload.get("enable_validation_blink", True)),
         "warn_prev_day_work": bool(payload.get("warn_prev_day_work", True)),
-        "disciplined_drivers": [
-            str(x).strip()
-            for x in (payload.get("disciplined_drivers") or [])
-            if str(x).strip()
-        ],
     }
 
     row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_SETTINGS_KEY).first()
@@ -615,12 +615,10 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
                     "weekly_basis": settings.get("weekly_basis"),
                     "min_rest_hours": settings.get("min_rest_hours"),
                     "night_metric_mode": settings.get("night_metric_mode"),
-                    "night_turn_seqs": settings.get("night_turn_seqs"),
-                    "night_include_last_turn": settings.get("night_include_last_turn"),
+                    "night_route_turn_rules": settings.get("night_route_turn_rules"),
                     "night_morning_end": settings.get("night_morning_end"),
                     "night_evening_start": settings.get("night_evening_start"),
                     "stats_include_draft": settings.get("stats_include_draft"),
-                    "disciplined_drivers": settings.get("disciplined_drivers"),
                 },
                 sort_keys=True,
                 ensure_ascii=False,
@@ -666,8 +664,11 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
 
     rows = q.all()
 
-    night_seqs = set(settings.get("night_turn_seqs") or [1])
-    include_last = bool(settings.get("night_include_last_turn", True))
+    night_route_rules = [
+        (r["route_keyword"], set(r["turn_seqs"]))
+        for r in (settings.get("night_route_turn_rules") or [])
+        if r.get("route_keyword") and r.get("turn_seqs")
+    ]
     morning_end_min = _parse_hhmm_to_min(settings.get("night_morning_end", "06:00")) or 360
     evening_start_min = _parse_hhmm_to_min(settings.get("night_evening_start", "21:00")) or 1260
     min_rest_min = int(settings.get("min_rest_hours", 8)) * 60
@@ -720,10 +721,12 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
             entry["month_dates"].add(d_date)
             entry["month_work_minutes"] += dur
 
-            is_night_turn = tt_seq in night_seqs or (
-                include_last and max_seq_by_route.get(rm_id) == tt_seq
+            tt_route_name = ref_t.get("route_name") or ""
+            matched_rule_seqs = next(
+                (seqs for kw, seqs in night_route_rules if kw in tt_route_name),
+                None,
             )
-            if is_night_turn:
+            if matched_rule_seqs is not None and tt_seq in matched_rule_seqs:
                 entry["month_night_count"] += 1
 
             if s_min is not None and e_min is not None:
@@ -766,12 +769,6 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
                 entry = _ensure(str(cand).strip())
                 entry["dayoff_type"] = do.type
                 entry["dayoff_status"] = do.status
-
-    # 징계 목록 매칭
-    for disc_name in settings.get("disciplined_drivers") or []:
-        clean = str(disc_name).strip()
-        if clean:
-            _ensure(clean)["is_disciplined"] = True
 
     # 직렬화 (Set 제거 및 휴식 가능 시각 계산)
     result: Dict[str, Any] = {}
