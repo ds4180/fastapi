@@ -30,6 +30,7 @@ DISPATCH_TIMETABLE_ROTATION_TTL = 1800
 
 DISPATCH_SETTINGS_KEY = "dispatch_settings"
 DISPATCH_AUTO_ANNOUNCE_STATE_KEY = "dispatch_auto_announce_state"
+DISPATCH_PUBLISHED_DATES_KEY = "dispatch_published_dates"
 
 DEFAULT_ROUTE_FLEET_RULES: List[Dict[str, Any]] = [
     {"keywords": ["121", "122"], "fleet_key": "121/122"},
@@ -378,8 +379,76 @@ def verify_custom_preview_access(db: Session, target_date: date) -> None:
         )
 
 
+def get_published_dates_map(db: Session) -> Dict[str, Any]:
+    """날짜별 배차 공개(배포) 상태 맵을 조회합니다. ({'YYYY-MM-DD': {'published_at': ..., 'mode': ...}})"""
+    row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_PUBLISHED_DATES_KEY).first()
+    if row and isinstance(row.value, dict):
+        return dict(row.value)
+    return {}
+
+
+def is_date_published(db: Session, target_date: date) -> bool:
+    """해당 날짜의 배차가 공개(배포)되었는지 여부를 반환합니다. (날짜 단위 단일 진실 공급원)"""
+    date_key = target_date.isoformat()
+    pub_map = get_published_dates_map(db)
+    if date_key in pub_map:
+        return True
+    # 하위 호환: 기존에 행 단위 ANNOUNCED로 저장된 날짜도 공개된 것으로 인정
+    return (
+        db.query(Dispatch.id)
+        .filter(Dispatch.target_date == target_date, Dispatch.status == "ANNOUNCED")
+        .first()
+        is not None
+    )
+
+
+def set_date_published(
+    db: Session,
+    target_date: date,
+    published: bool,
+    *,
+    mode: str = "manual",
+) -> Dict[str, Any]:
+    """특정 날짜의 배차 공개(배포) 여부를 설정합니다."""
+    date_key = target_date.isoformat()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_PUBLISHED_DATES_KEY).first()
+    pub_map = dict(row.value) if (row and isinstance(row.value, dict)) else {}
+
+    # 30일 이상 지난 오래된 키 정리
+    cutoff = (datetime.now().date() - timedelta(days=30)).isoformat()
+    pub_map = {k: v for k, v in pub_map.items() if str(k) >= cutoff}
+
+    if published:
+        pub_map[date_key] = {"published_at": now_str, "mode": mode}
+    else:
+        pub_map.pop(date_key, None)
+        # 공개 취소 시 기존 ANNOUNCED 행도 DRAFT로 되돌려 하위 호환 유지
+        db.query(Dispatch).filter(
+            Dispatch.target_date == target_date,
+            Dispatch.status == "ANNOUNCED",
+        ).update({"status": "DRAFT"}, synchronize_session=False)
+
+    if row:
+        row.value = pub_map
+    else:
+        db.add(
+            SystemConfig(
+                key=DISPATCH_PUBLISHED_DATES_KEY,
+                value=pub_map,
+                description="날짜별 배차 공개(배포) 상태",
+            )
+        )
+    db.commit()
+    return {
+        "target_date": date_key,
+        "published": published,
+        "meta": pub_map.get(date_key),
+    }
+
+
 def filter_custom_dispatch_rows(db: Session, target_date: date, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """백엔드 단일 진실 공급원(SSOT): 날짜/설정에 따라 미공개 상태 행을 API 응답에서 차단합니다."""
+    """백엔드 단일 진실 공급원(SSOT): 날짜 단위 공개 여부 및 예고 구간 정책으로 조회 가능 여부를 판정합니다."""
     today = datetime.now().date()
     tomorrow = today + timedelta(days=1)
     settings = get_dispatch_settings(db)
@@ -387,16 +456,15 @@ def filter_custom_dispatch_rows(db: Session, target_date: date, rows: List[Dict[
     if target_date == today:
         if settings.get("confirm_d_day_always_open", True):
             return rows
-        return [r for r in rows if (r.get("status") or "DRAFT") in ("CONFIRMED", "ANNOUNCED")]
+        return rows if is_date_published(db, today) else []
 
     if target_date == tomorrow:
-        require_announced = bool(settings.get("confirm_d1_require_announced", True))
-        allowed_statuses = ("ANNOUNCED",) if require_announced else ("CONFIRMED", "ANNOUNCED")
-        return [r for r in rows if (r.get("status") or "DRAFT") in allowed_statuses]
+        if not settings.get("confirm_d1_require_announced", True):
+            return rows
+        return rows if is_date_published(db, tomorrow) else []
 
-    if settings.get("preview_allow_draft", True):
-        return rows
-    return [r for r in rows if (r.get("status") or "DRAFT") in ("CONFIRMED", "ANNOUNCED")]
+    # 미래(D+2+) 배차 예고는 verify_custom_preview_access()의 날짜 구간/일시정지 정책만으로 결정
+    return rows
 
 
 def get_dispatch_resources(db: Session) -> Dict[str, Any]:
@@ -502,6 +570,7 @@ def announce_tomorrow_dispatch(
         return {"status": "skipped_already_announced", "target_date": tomorrow_str, "updated_count": 0}
 
     db.commit()
+    set_date_published(db, tomorrow, True, mode="manual" if force else "auto")
 
     # 자동/수동 고지 실행 이력 기록 (수동 배포가 예약된 자동 배포를 막지 않도록 분리)
     state_row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_AUTO_ANNOUNCE_STATE_KEY).first()
@@ -582,20 +651,9 @@ def check_and_run_auto_announce(db: Session) -> Dict[str, Any]:
     if now_hhmm < target_hhmm:
         return {"status": "waiting", "now": now_hhmm, "target": target_hhmm}
 
-    state_row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_AUTO_ANNOUNCE_STATE_KEY).first()
-    state_dict = state_row.value if (state_row and isinstance(state_row.value, dict)) else {}
-    already_auto_ran_today = state_dict.get("last_auto_date") == today_str
-    if already_auto_ran_today:
-        # 자동 고지 시각 이후 추가로 확정(CONFIRMED)된 배차가 있다면 배포 상태로 승격
-        tomorrow = now.date() + timedelta(days=1)
-        has_pending_confirmed = (
-            db.query(Dispatch.id)
-            .filter(Dispatch.target_date == tomorrow, Dispatch.status == "CONFIRMED")
-            .first()
-            is not None
-        )
-        if not has_pending_confirmed:
-            return {"status": "already_ran_today", "date": today_str}
+    tomorrow = now.date() + timedelta(days=1)
+    if is_date_published(db, tomorrow):
+        return {"status": "already_published", "date": tomorrow.isoformat()}
 
     return announce_tomorrow_dispatch(db, force=False)
 

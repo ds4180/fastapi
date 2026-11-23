@@ -2431,16 +2431,13 @@ def save_daily_dispatch(
                     if not db_dispatch_tomorrow.vehicle_no or db_dispatch_tomorrow.vehicle_no.strip() == "" or tomorrow_driver != r.driver_name:
                         if tomorrow_vehicle:
                             db_dispatch_tomorrow.vehicle_no = tomorrow_vehicle
-                    # 이미 확정(CONFIRMED) 또는 배포(ANNOUNCED)된 익일 배차 상태는 금일 저장으로 강등시키지 않음
-                    if (db_dispatch_tomorrow.status or "DRAFT") not in ("CONFIRMED", "ANNOUNCED"):
-                        db_dispatch_tomorrow.status = payload.status
                 else:
                     db_dispatch_tomorrow = models.Dispatch(
                         target_date=tomorrow_date,
                         timetable_id=r.timetable_id,
                         driver_name=tomorrow_driver,
                         vehicle_no=tomorrow_vehicle or r.vehicle_no,
-                        status="DRAFT" if payload.status == "ANNOUNCED" else payload.status,
+                        status="DRAFT",
                         memo=""
                     )
                     db.add(db_dispatch_tomorrow)
@@ -2449,8 +2446,6 @@ def save_daily_dispatch(
                 # 데이터베이스에 이미 내일 데이터가 존재한다면 기사명을 빈 값(None)으로 덮어써서 비웁니다.
                 if db_dispatch_tomorrow:
                     db_dispatch_tomorrow.driver_name = None
-                    if (db_dispatch_tomorrow.status or "DRAFT") not in ("CONFIRMED", "ANNOUNCED"):
-                        db_dispatch_tomorrow.status = payload.status
 
         db.commit()
 

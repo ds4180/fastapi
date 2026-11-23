@@ -88,6 +88,53 @@ def get_admin_dispatch_driver_detail(
     return service.get_driver_dispatch_detail(db, driver_name, target_date)
 
 
+@admin_router.get("/publish-status")
+def get_admin_dispatch_publish_status(
+    target_date: date = Query(..., description="조회 날짜 (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_dispatch_admin),
+):
+    """특정 날짜의 배차 공개(배포) 상태를 반환합니다."""
+    date_key = target_date.isoformat()
+    pub_map = service.get_published_dates_map(db)
+    return {
+        "target_date": date_key,
+        "published": service.is_date_published(db, target_date),
+        "meta": pub_map.get(date_key),
+    }
+
+
+@admin_router.post("/publish-status")
+def update_admin_dispatch_publish_status(
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_dispatch_admin_write),
+):
+    """특정 날짜의 배차 공개(배포) 여부를 설정하거나 해제합니다."""
+    raw_date = str(payload.get("target_date") or "").strip()
+    try:
+        parsed_date = date.fromisoformat(raw_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="유효한 날짜(YYYY-MM-DD)를 입력해 주세요.")
+
+    published = bool(payload.get("published", False))
+    res = service.set_date_published(db, parsed_date, published, mode="manual")
+    safe_log_audit(
+        db=db,
+        app_id="dispatch",
+        log_type="CHANGE",
+        action="DISPATCH_PUBLISH_STATUS",
+        title=f"배차 공개 상태 변경 ({raw_date}: {'공개' if published else '비공개'})",
+        user=admin,
+        resource_type="dispatch",
+        resource_id=raw_date,
+    )
+    return {
+        "message": f"{raw_date} 배차가 {'공개(배포)' if published else '비공개(공개 취소)'} 처리되었습니다.",
+        **res,
+    }
+
+
 @admin_router.post("/announce-now")
 def trigger_announce_tomorrow_dispatch(
     db: Session = Depends(get_db),
