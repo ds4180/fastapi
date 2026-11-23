@@ -19,17 +19,10 @@ router = APIRouter(
 
 def verify_timeline_access(target_date: date, db: Session):
     """
-    일반 임직원 및 기사용 배차 정보 공개 타임라인 보안 검증 필터 (Timeline Logic)
-    - 오늘 기준 +3일 뒤부터 +7일 뒤 범위만 공개를 허용하며, 이외의 범위는 조회를 완전 차단합니다.
+    일반 임직원 및 기사용 배차 정보 공개 타임라인 보안 검증 필터 (설정 기반 동적 검증)
     """
-    today = datetime.now().date()
-    delta_days = (target_date - today).days
-
-    if not (3 <= delta_days <= 7):
-        raise HTTPException(
-            status_code=403,
-            detail="배차 정보는 오늘 기준 +3일부터 +7일까지의 기간만 조회 가능합니다."
-        )
+    from domain.v1.dispatch.dispatch_service import verify_custom_preview_access
+    verify_custom_preview_access(db, target_date)
 
 
 @router.get("/my-dispatch-briefing")
@@ -53,20 +46,24 @@ def get_my_dispatch_briefing(
         if n and str(n).strip()
     }
 
+    from domain.v1.dispatch.dispatch_service import build_timetable_rotation_resolver
+    resolve_tt, _ = build_timetable_rotation_resolver(db)
+
     def _serialize(rows: List[Dispatch]) -> List[dict]:
         items = []
         for d in rows:
             tt = d.timetable
-            s_time = (d.start_time or (tt.start_time if tt else "") or "").strip()
+            ref_t = resolve_tt(d.timetable_id, d.target_date) if d.timetable_id and d.target_date else None
+            s_time = (d.start_time or (ref_t["start_time"] if ref_t else (tt.start_time if tt else "")) or "").strip()
             items.append({
                 "id": d.id,
-                "route_name": tt.route_name if tt else "-",
-                "seq": tt.seq if tt else 0,
+                "route_name": (ref_t["route_name"] if ref_t else (tt.route_name if tt else "-")),
+                "seq": (ref_t["seq"] if ref_t else (tt.seq if tt else 0)),
                 "vehicle_no": d.vehicle_no or "-",
                 "start_time": s_time,
-                "end_time": (tt.end_time if tt else "") or "",
-                "start_location": (tt.start_location if tt else "") or "-",
-                "end_location": (tt.end_location if tt else "") or "-",
+                "end_time": (ref_t["end_time"] if ref_t else (tt.end_time if tt else "")) or "",
+                "start_location": (ref_t["start_location"] if ref_t else (tt.start_location if tt else "-")) or "-",
+                "end_location": (ref_t["end_location"] if ref_t else (tt.end_location if tt else "-")) or "-",
                 "status": d.status or "DRAFT",
             })
         items.sort(key=lambda x: (x["start_time"], x["seq"]))

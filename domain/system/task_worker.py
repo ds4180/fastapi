@@ -29,6 +29,16 @@ def register_handler(task_type: str):
 
 # --- [실제 작업 처리기] ---
 
+@register_handler("DISPATCH_AUTO_ANNOUNCE")
+async def handle_dispatch_auto_announce(task: SystemTask, db: Session):
+    """명일 배차 자동 고지 시각(D-1 xx:yy)을 감시하여 자동 확정 및 알림/웹푸시를 발송합니다."""
+    from domain.v1.dispatch.dispatch_service import check_and_run_auto_announce
+
+    res = check_and_run_auto_announce(db)
+    task.progress_pct = 100
+    return res
+
+
 @register_handler("MEDIA_ISOLATE")
 async def handle_media_isolate(task: SystemTask, db: Session):
     """

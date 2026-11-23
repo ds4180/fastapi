@@ -194,6 +194,16 @@ def bootstrap_default_cron_tasks(db: Session) -> int:
             "cron_expression": None,
             "tags": ["core", "miniapp", "alarm", "cron"],
             "desc": "미니앱 알람(리마인더) 1분 주기 감시 및 백그라운드 Web Push / WebSocket 실시간 발송"
+        },
+        {
+            "task_type": "DISPATCH_AUTO_ANNOUNCE",
+            "unique_key": "cron:dispatch_auto_announce",
+            "payload": {},
+            "priority": 2,
+            "repeat_interval": 60,
+            "cron_expression": None,
+            "tags": ["core", "dispatch", "announce", "cron"],
+            "desc": "명일 배차 자동 고지 시각(D-1 xx:yy) 감시 및 자동 확정/웹 푸시 발송"
         }
     ]
 

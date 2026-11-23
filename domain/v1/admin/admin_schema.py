@@ -479,6 +479,7 @@ class RouteMasterCreate(BaseModel):
     vehicle_count: int = 0
     version: str
     is_regular_duty: bool = False
+    start_turn_seq: int = 1
     timetables: List[RouteTimetableCreate] = []
 
 class RouteMasterUpdate(BaseModel):
@@ -493,6 +494,7 @@ class RouteMasterUpdate(BaseModel):
     vehicle_count: Optional[int] = None
     version: Optional[str] = None
     is_regular_duty: Optional[bool] = None
+    start_turn_seq: Optional[int] = None
     timetables: Optional[List[RouteTimetableCreate]] = None
 
 
@@ -559,6 +561,7 @@ class RouteRosterAppend(BaseModel):
     vehicle_count: int = 0
     version: Optional[str] = None
     is_regular_duty: bool = False
+    start_turn_seq: int = 1
     timetables: List[RouteTimetableCreate] = []
 
 

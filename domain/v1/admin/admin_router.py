@@ -1747,6 +1747,7 @@ def list_route_masters(
                 "vehicle_count": m.vehicle_count,
                 "version": m.version,
                 "is_regular_duty": m.is_regular_duty,
+                "start_turn_seq": getattr(m, "start_turn_seq", 1) or 1,
                 "timetables": [
                     {
                         "id": t.id,
@@ -1789,7 +1790,8 @@ def create_route_master(
             end_date=payload.end_date,
             vehicle_count=payload.vehicle_count,
             version=payload.version,
-            is_regular_duty=payload.is_regular_duty
+            is_regular_duty=payload.is_regular_duty,
+            start_turn_seq=max(1, payload.start_turn_seq or 1),
         )
         db.add(db_master)
         db.flush()  # timetable_id 바인딩을 위한 고유 ID 선점 획득
@@ -1852,6 +1854,8 @@ def update_route_master(
             db_master.version = payload.version
         if payload.is_regular_duty is not None:
             db_master.is_regular_duty = payload.is_regular_duty
+        if payload.start_turn_seq is not None:
+            db_master.start_turn_seq = max(1, payload.start_turn_seq)
             
         # 2. 시간표 리스트가 명시적으로 들어왔을 때 기존 상세 회차 시간표 덮어쓰기 수행
         if payload.timetables is not None:
@@ -1945,6 +1949,7 @@ def append_route_roster(
             vehicle_count=payload.vehicle_count,
             version=next_version,
             is_regular_duty=payload.is_regular_duty,
+            start_turn_seq=max(1, payload.start_turn_seq or 1),
         )
         db.add(db_master)
         db.flush()
@@ -2212,6 +2217,8 @@ def build_daily_dispatch_rows(db: Session, target_date: date, route_master_id: i
 
     N = len(timetables)
     delta_days = max(0, (target_date - master.start_date).days)
+    start_turn_seq = getattr(master, "start_turn_seq", 1) or 1
+    start_offset = next((idx for idx, tt in enumerate(timetables) if tt.seq == start_turn_seq), 0)
 
     # 드라이버 & 차량 메타데이터 로드 (차량 번호 목데이터 풀 유지)
     load_drivers_metadata()
@@ -2240,9 +2247,9 @@ def build_daily_dispatch_rows(db: Session, target_date: date, route_master_id: i
 
     result = []
     for i, t in enumerate(timetables):
-        ref_t = timetables[(i + delta_days) % N]
-        ref_t_yesterday = timetables[(i + delta_days - 1) % N]
-        ref_t_tomorrow = timetables[(i + delta_days + 1) % N]
+        ref_t = timetables[(i + delta_days + start_offset) % N]
+        ref_t_yesterday = timetables[(i + delta_days + start_offset - 1) % N]
+        ref_t_tomorrow = timetables[(i + delta_days + start_offset + 1) % N]
 
         is_yesterday_regular_duty = ref_t_yesterday.is_regular_duty
         is_tomorrow_regular_duty = ref_t_tomorrow.is_regular_duty
@@ -2478,6 +2485,12 @@ def save_daily_dispatch(
                             )
             except Exception:
                 pass
+
+        try:
+            from domain.v1.dispatch.dispatch_service import invalidate_driver_work_stats_cache
+            invalidate_driver_work_stats_cache()
+        except Exception:
+            pass
 
         return {"message": "success"}
     except Exception as e:

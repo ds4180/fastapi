@@ -30,6 +30,7 @@ class RouteMaster(Base):
     vehicle_count = Column(Integer, default=0, nullable=False)
     version = Column(String(50), nullable=False)
     is_regular_duty = Column(Boolean, default=False, nullable=False)  # 당연 근무 여부 (배차 편의용)
+    start_turn_seq = Column(Integer, default=1, server_default="1", nullable=False)  # 시작 로번 순번 (표 제일 위 로번)
 
     timetables = relationship("RouteTimetable", back_populates="master", cascade="all, delete-orphan")
 
