@@ -1,6 +1,8 @@
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from models import ServiceInstance, ServiceApp, ServiceEngine, ServiceRegistry
-from typing import List, Dict, Any
+from core.permission import evaluate_service_permission
+from typing import List, Dict, Any, Optional
 
 VALID_DISPLAYS = {"block", "inline", "grid-2"}
 VALID_ALIGNS = {"start", "between", "end"}
@@ -50,10 +52,16 @@ def _normalize_service_entry(entry: Any, fallback_row: int) -> tuple[int | None,
     }
 
 
-def resolve_service_apps(db: Session, service_app_ids: List[Any]) -> List[Dict[str, Any]]:
+def resolve_service_apps(
+    db: Session,
+    service_app_ids: List[Any],
+    user: Any = None,
+    host_obj: Any = None,
+) -> List[Dict[str, Any]]:
     """
     [App-Driven] 서비스 앱 ID(또는 레이아웃 확장 객체) 리스트를 순서대로 해석하여
     프론트엔드용 명세(ResolvedServiceBinding) 리스트로 반환합니다.
+    (user/host_obj 전달 시 각 서비스앱의 읽기/쓰기 권한을 함께 계산)
     """
     if not service_app_ids:
         return []
@@ -79,31 +87,75 @@ def resolve_service_apps(db: Session, service_app_ids: List[Any]) -> List[Dict[s
             "service_component": engine.frontend_plugin,
             "config": app.config,
             "layout": layout,
+            "permissions": evaluate_service_permission(
+                user=user,
+                host_obj=host_obj,
+                service_config=app.config,
+                service_id=engine.registry_id,
+                app_id=app.id,
+            ),
         })
 
     return resolved_list
 
 
-def resolve_service_instance(db: Session, instance_id: int) -> List[Dict[str, Any]]:
+def resolve_service_instance(
+    db: Session,
+    instance_id: int,
+    user: Any = None,
+    host_obj: Any = None,
+) -> List[Dict[str, Any]]:
     """
-    [Bundle-Driven] 서비스 인스턴스(꾸러미)에 담긴 앱들을 순서대로 해석하여 
+    [Bundle-Driven] 서비스 인스턴스(꾸러미)에 담긴 앱들을 순서대로 해석하여
     프론트엔드용 명세(ResolvedServiceBinding) 리스트로 반환합니다.
     """
     instance = db.query(ServiceInstance).filter(ServiceInstance.id == instance_id).first()
     if not instance or not instance.service_app_ids:
         return []
-    return resolve_service_apps(db, instance.service_app_ids)
+    return resolve_service_apps(db, instance.service_app_ids, user=user, host_obj=host_obj)
 
 
-def resolve_board_services(db: Session, board: Any) -> List[Dict[str, Any]]:
+def resolve_board_services(db: Session, board: Any, user: Any = None) -> List[Dict[str, Any]]:
     """
     [Board-Driven] 게시판에 직접 지정된 service_app_ids가 있으면 우선 적용하고,
     없으면 연결된 공통 번들(service_instance_id)을 해석합니다.
     """
     direct_ids = getattr(board, "service_app_ids", None) or []
     if direct_ids:
-        return resolve_service_apps(db, direct_ids)
+        return resolve_service_apps(db, direct_ids, user=user, host_obj=board)
     instance_id = getattr(board, "service_instance_id", None)
     if instance_id:
-        return resolve_service_instance(db, instance_id)
+        return resolve_service_instance(db, instance_id, user=user, host_obj=board)
     return []
+
+
+def enforce_post_service_permission(
+    db: Session,
+    post: Any,
+    user: Any,
+    service_id: str,
+    action: str = "write",
+) -> Dict[str, Any]:
+    """
+    [서비스 API 공용 권한 가드]
+    게시글에 연결된 호스트(BoardConfig)와 해당 서비스앱 바인딩(ServiceApp.config.permissions)을
+    기준으로 API 요청 권한을 검증합니다. (프론트 UI와 100% 동일한 SSOT 판별)
+    """
+    board = getattr(post, "board", None)
+    bindings = resolve_board_services(db, board, user=user) if board else []
+    matched = [b for b in bindings if b.get("service_id") == service_id]
+
+    if matched:
+        perms = [b.get("permissions") or {} for b in matched]
+    else:
+        perms = [evaluate_service_permission(user=user, host_obj=board, service_config=None, service_id=service_id)]
+
+    key = "can_write" if action == "write" else "can_read"
+    allowed_perm = next((p for p in perms if p.get(key)), None)
+    if allowed_perm is not None:
+        return allowed_perm
+
+    denied = perms[0]
+    status_code = 401 if user is None else 403
+    detail = denied.get("message") or ("로그인이 필요합니다." if user is None else "사용 권한이 없습니다.")
+    raise HTTPException(status_code=status_code, detail=detail)

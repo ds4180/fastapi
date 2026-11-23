@@ -72,6 +72,7 @@ class ServiceBindingSchema(BaseModel):
     engine_id: str
     service_component: str
     config: Dict[str, Any]
+    permissions: Optional[Dict[str, Any]] = None
 
 class PostDetailResponse(BaseModel):
     post: PostSimpleSchema

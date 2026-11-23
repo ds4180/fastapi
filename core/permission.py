@@ -258,3 +258,160 @@ def can_access_page(user: Optional[User], page_obj: Any, action: str = "read", o
         op=op,
     )
 
+
+# 📌 서비스앱 권한 정책 상수 (추상화 규격)
+SERVICE_READ_POLICIES = ("inherit", "authenticated", "custom")
+SERVICE_WRITE_POLICIES = ("inherit_read", "inherit_write", "authenticated", "custom")
+
+
+def _check_host_read(user: Optional[User], host_obj: Any) -> bool:
+    """호스트 앱(BoardConfig, Page, AppRegistry 등)의 읽기 권한 평가"""
+    if not host_obj:
+        return True
+    min_read = getattr(host_obj, "min_read_rank", None)
+    if min_read is None:
+        min_read = getattr(host_obj, "min_rank", 0)
+    return evaluate_permission(
+        user=user,
+        action="read",
+        min_read_rank=min_read or 0,
+        min_write_rank=getattr(host_obj, "min_write_rank", 2) or 0,
+        allow_groups=getattr(host_obj, "allow_groups", None) or [],
+        deny_groups=getattr(host_obj, "deny_groups", None) or [],
+    )
+
+
+def _check_host_write(user: Optional[User], host_obj: Any) -> bool:
+    """호스트 앱의 쓰기 권한 평가"""
+    if not host_obj:
+        return get_user_rank(user) >= 1
+    min_read = getattr(host_obj, "min_read_rank", None)
+    if min_read is None:
+        min_read = getattr(host_obj, "min_rank", 0)
+    return evaluate_permission(
+        user=user,
+        action="write",
+        min_read_rank=min_read or 0,
+        min_write_rank=getattr(host_obj, "min_write_rank", 2) or 0,
+        allow_groups=getattr(host_obj, "allow_groups", None) or [],
+        deny_groups=getattr(host_obj, "deny_groups", None) or [],
+    )
+
+
+def evaluate_service_permission(
+    user: Optional[User],
+    host_obj: Any = None,
+    service_config: Optional[dict[str, Any]] = None,
+    service_id: Optional[str] = None,
+    app_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """
+    [서비스앱 권한 통합 판별기 (SSOT)]
+    - 우선순위: 기본값 -> ServiceApp.config.permissions -> 호스트 인스턴스(options.service_permissions)
+    - 기본 조회(can_read): 호스트 앱의 읽기 권한 승계 (read_policy="inherit")
+    - 기본 쓰기(can_write): 호스트 read 통과 + 로그인 + 정회원(rank >= 1) + 호스트 deny_groups(write/all) 미해당
+    - 예외 처리: read_policy / write_policy로 선택형 제어
+    """
+    raw_app_perm = service_config.get("permissions") if isinstance(service_config, dict) else None
+    perm_cfg: dict[str, Any] = dict(raw_app_perm) if isinstance(raw_app_perm, dict) else {}
+
+    # 호스트 인스턴스(BoardConfig.options.service_permissions 등) 오버라이드 병합
+    host_options = getattr(host_obj, "options", None) if host_obj else None
+    if isinstance(host_options, dict):
+        svc_perms = host_options.get("service_permissions")
+        if isinstance(svc_perms, dict):
+            for key in (service_id, str(app_id) if app_id is not None else None):
+                if key and isinstance(svc_perms.get(key), dict):
+                    perm_cfg.update(svc_perms[key])
+
+    read_policy = str(perm_cfg.get("read_policy") or "inherit")
+    if read_policy not in SERVICE_READ_POLICIES:
+        read_policy = "inherit"
+
+    write_policy = str(perm_cfg.get("write_policy") or "inherit_read")
+    if write_policy not in SERVICE_WRITE_POLICIES:
+        write_policy = "inherit_read"
+
+    host_read_ok = _check_host_read(user, host_obj)
+    user_rank = get_user_rank(user)
+
+    # 1. 조회(can_read) 평가
+    if user_rank == ROOT_RANK:
+        can_read = True
+    elif read_policy == "authenticated":
+        can_read = host_read_ok and (user is not None)
+    elif read_policy == "custom":
+        can_read = host_read_ok and evaluate_permission(
+            user=user,
+            action="read",
+            min_read_rank=int(perm_cfg.get("min_read_rank", 0) or 0),
+            min_write_rank=int(perm_cfg.get("min_write_rank", 1) or 1),
+            allow_groups=perm_cfg.get("allow_groups") or [],
+            deny_groups=perm_cfg.get("deny_groups") or [],
+        )
+    else:
+        can_read = host_read_ok
+
+    # 호스트의 write/all 차단 그룹 여부 (Deny-Wins 보완)
+    host_write_denied = False
+    if host_obj and user is not None and user_rank != ROOT_RANK:
+        deny_for_write = extract_groups_for_action(getattr(host_obj, "deny_groups", None), action="write")
+        if get_user_groups(user) & deny_for_write:
+            host_write_denied = True
+
+    # 2. 쓰기(can_write) 평가 — 비로그인은 항상 쓰기 불가
+    if not can_read or user is None:
+        can_write = False
+    elif user_rank == ROOT_RANK:
+        can_write = True
+    elif host_write_denied:
+        can_write = False
+    elif write_policy == "inherit_write":
+        can_write = _check_host_write(user, host_obj)
+    elif write_policy == "authenticated":
+        can_write = True
+    elif write_policy == "custom":
+        can_write = evaluate_permission(
+            user=user,
+            action="write",
+            min_read_rank=int(perm_cfg.get("min_read_rank", 0) or 0),
+            min_write_rank=int(perm_cfg.get("min_write_rank", 1) or 1),
+            allow_groups=perm_cfg.get("allow_groups") or [],
+            deny_groups=perm_cfg.get("deny_groups") or [],
+        )
+    else:
+        # inherit_read (기본값): 호스트 읽기 통과 + 정회원(1+) 이상 (또는 호스트 write allow_groups 소속)
+        can_write = evaluate_permission(
+            user=user,
+            action="write",
+            min_read_rank=0,
+            min_write_rank=1,
+            allow_groups=getattr(host_obj, "allow_groups", None) if host_obj else [],
+            deny_groups=getattr(host_obj, "deny_groups", None) if host_obj else [],
+        )
+
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    if not can_write:
+        if user is None:
+            reason = "LOGIN_REQUIRED"
+            message = "로그인 후 이용할 수 있습니다."
+        elif not can_read:
+            reason = "FORBIDDEN"
+            message = "열람 권한이 없습니다."
+        elif user_rank == 0 and write_policy == "inherit_read":
+            reason = "FORBIDDEN"
+            message = "정회원 이상만 이용할 수 있습니다."
+        else:
+            reason = "FORBIDDEN"
+            message = "사용 권한이 없습니다."
+
+    return {
+        "can_read": can_read,
+        "can_write": can_write,
+        "reason": reason,
+        "message": message,
+        "read_policy": read_policy,
+        "write_policy": write_policy,
+    }
+

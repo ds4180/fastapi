@@ -1,12 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from typing import Optional, Any
+
 from database import get_db
-from models import AppRegistry, ServiceInstance, BoardConfig, Post, Page
-from domain.v1.admin.service_service import resolve_service_instance, resolve_board_services
 from core.deps import get_current_user_optional
-from core.permission import can_access_app, can_access_board, can_access_page
-from core.exceptions import CoreException, AccessDeniedError, ResourceNotFoundError
-from typing import Optional, Any, Dict
+from core.exceptions import CoreException
+from domain.v1.app.app_service import load_app_data
 
 router = APIRouter(prefix="/v1/app", tags=["App Engine"])
 
@@ -21,133 +20,27 @@ def get_app_data(
     keyword: str = "",
     sort: str = "latest",
     db: Session = Depends(get_db),
-    current_user: Optional[Any] = Depends(get_current_user_optional)
+    current_user: Optional[Any] = Depends(get_current_user_optional),
 ):
     """
     [Data-Driven] 범용 앱 데이터 제공 API
     AppRegistry의 설정에 따라 동적으로 모델을 탐색하고 서비스 바인딩을 조립합니다.
     """
-    canonical_app_id = "board" if app_id in ("board", "boards") else app_id
-
-    # 1. 앱 레지스트리 정보 확인 (board 정규 ID 우선, 기존 DB 'boards' 레코드 하위 호환 조회)
-    app_info = db.query(AppRegistry).filter(AppRegistry.app_id == canonical_app_id).first()
-    if not app_info and canonical_app_id == "board":
-        app_info = db.query(AppRegistry).filter(AppRegistry.app_id == "boards").first()
-    if not app_info:
-        raise ResourceNotFoundError(f"등록되지 않은 앱입니다: '{app_id}'", resource="app", resource_id=app_id)
-
-    # 1-1. 🛡️ 앱 활성 여부 및 권한 검문
-    # - board / page 처럼 개별 인스턴스(BoardConfig, Page)가 자체 권한을 가지는 앱은
-    #   AppRegistry 랭크가 '관리자 화면 진입' 기준이므로 아래 인스턴스별 4단계 권한으로 판단합니다.
-    if not app_info.is_active:
-        raise AccessDeniedError(
-            f"비활성화된 앱('{app_info.title or canonical_app_id}')입니다.",
-            resource="app",
-            resource_id=canonical_app_id
-        )
-    if canonical_app_id not in ("board", "page") and not can_access_app(
-        user=current_user,
-        app_obj=app_info,
-        action="read",
-    ):
-        raise AccessDeniedError(
-            f"해당 앱('{app_info.title or canonical_app_id}')에 접근할 권한이 없습니다.",
-            resource="app",
-            resource_id=canonical_app_id
-        )
-
-    # 2. 경로 분석 (slug: board_slug/id or just id)
-    parts = slug.split('/')
-    
-    # 3. 데이터 조립용 결과 객체
-    result = {
-        "app_info": app_info,
-        "instance": None,
-        "parent_config": None,
-        "bindings": []
-    }
-
-    # 4. 하드코딩 Zero 기반 동적 로딩 로직 (현재는 Board/Page에 대해 시범 적용)
-    # TODO: 향후 config_schema의 instance_info 메타데이터를 100% 활용하도록 고도화
-    
     try:
-        if canonical_app_id == "board":
-            # 1. 경로 분석 (slug: board_slug/id or just board_slug)
-            board_slug = parts[0]
-            board = db.query(BoardConfig).filter(BoardConfig.slug == board_slug).first()
-            if not board:
-                return result # 인스턴스 없음 반환
-
-            # 🛡️ [인스턴스 단위 4단계 권한 검문: 1.root ➔ 2.deny ➔ 3.allow ➔ 4.min_read_rank]
-            if not can_access_board(current_user, board, action="read"):
-                raise AccessDeniedError(
-                    f"해당 게시판('{board.name}')에 접근할 권한이 없습니다.",
-                    resource="board",
-                    resource_id=board.slug
-                )
-
-            result["parent_config"] = board
-            
-            # 2. 목록 vs 상세 분기
-            if len(parts) >= 2 and parts[1].isdigit():
-                # 상세 조회 모드
-                post_id = int(parts[1])
-                post = db.query(Post).filter(Post.id == post_id, Post.board_id == board.id, Post.is_deleted == False).first()
-                if post:
-                    from domain.v1.board import board_crud
-                    if not board_crud.can_view_post(post, current_user, board):
-                        raise AccessDeniedError(
-                            "이 게시물을 열람할 권한이 없거나 게시 기간이 아닙니다.",
-                            resource="board",
-                            resource_id=str(post_id)
-                        )
-                    from core.view_counter import should_count_view
-                    if should_count_view("post", post.id, request, current_user):
-                        db.query(Post).filter(Post.id == post.id).update({Post.view_count: Post.view_count + 1})
-                        db.commit()
-                        db.refresh(post)
-                    setattr(post, "user_name", board_crud.mask_post_author_name(post, current_user, board))
-                    result["instance"] = post
-                    # 서비스 바인딩 해결 (게시판 직접 지정 우선 -> 공통 번들)
-                    result["bindings"] = resolve_board_services(db, board)
-            else:
-                # 목록 조회 모드 (전달받은 앱 쿼리 파라미터 적용)
-                from domain.v1.board import board_crud
-                category = request.query_params.get("category", "")
-                total, posts = board_crud.get_post_list(
-                    db,
-                    board_id=board.id,
-                    skip=page * size,
-                    limit=size,
-                    user=current_user,
-                    keyword=keyword,
-                    sort=sort,
-                    category=category,
-                    use_pin=board_crud.is_board_pin_enabled(board.options),
-                )
-                result["instance"] = {"posts": posts, "total": total}
-                result["bindings"] = resolve_board_services(db, board)
-
-        elif canonical_app_id == "page":
-            # 페이지 로직: slug = "about-us"
-            page_slug = parts[0]
-            page = db.query(Page).filter(Page.slug == page_slug).first()
-            if page:
-                # 🛡️ [인스턴스 단위 4단계 권한 검문: 1.root ➔ 2.deny ➔ 3.allow ➔ 4.min_rank]
-                if not can_access_page(current_user, page, action="read"):
-                    raise AccessDeniedError(
-                        f"해당 페이지('{page.title}')에 접근할 권한이 없습니다.",
-                        resource="page",
-                        resource_id=page.slug
-                    )
-                result["instance"] = page
-                # 페이지는 아직 서비스 바인딩 필드가 없으므로 bindings=[]
-
+        return load_app_data(
+            db=db,
+            app_id=app_id,
+            slug=slug,
+            request=request,
+            current_user=current_user,
+            page=page,
+            size=size,
+            keyword=keyword,
+            sort=sort,
+        )
     except (CoreException, HTTPException):
-        # 🛡️ [핵심 안전장치]: 정상적인 401, 403, 404 예외는 500으로 마스킹하지 않고 그대로 상위 통과!
+        # 정상적인 401, 403, 404 예외는 500으로 마스킹하지 않고 그대로 통과
         raise
     except Exception as e:
         print(f"❌ [AppRouter] Dynamic Loading Error: {e}")
-        raise HTTPException(status_code=500, detail="Internal data resolution error")
-
-    return result
+        raise HTTPException(status_code=500, detail=str(e))

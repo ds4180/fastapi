@@ -1,5 +1,7 @@
 from datetime import datetime
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 from models import Comment, User, MediaAsset
 from domain.v1.comment.comment_schema import CommentCreate, CommentUpdate
 
@@ -34,32 +36,67 @@ def _attach_media_map(comments: list, media_map: dict):
 
 
 def get_comments_by_post(db: Session, post_id: int):
-    comments = db.query(Comment).filter(
-        Comment.post_id == post_id,
-        Comment.parent_id == None
-    ).order_by(Comment.create_date.asc()).all()
+    """특정 게시물의 댓글 목록을 1회 쿼리로 조회하여 2단계 트리(N+1 방지)로 조립합니다."""
+    all_comments = (
+        db.query(Comment)
+        .filter(Comment.post_id == post_id)
+        .order_by(Comment.create_date.asc(), Comment.id.asc())
+        .all()
+    )
+    if not all_comments:
+        return []
 
-    target_ids = _collect_comment_ids(comments)
-    if target_ids:
-        assets = db.query(MediaAsset).filter(
+    target_ids = [str(c.id) for c in all_comments]
+    assets = (
+        db.query(MediaAsset)
+        .filter(
             MediaAsset.app_id == "comment",
             MediaAsset.target_id.in_(target_ids),
-            MediaAsset.is_deleted == False
-        ).order_by(MediaAsset.id.asc()).all()
-        media_map = {}
-        for asset in assets:
-            media_map.setdefault(str(asset.target_id), []).append(_serialize_asset(asset))
-        _attach_media_map(comments, media_map)
-    return comments
+            MediaAsset.is_deleted == False,
+        )
+        .order_by(MediaAsset.id.asc())
+        .all()
+    )
+    media_map: dict[str, list] = {}
+    for asset in assets:
+        media_map.setdefault(str(asset.target_id), []).append(_serialize_asset(asset))
+
+    children_map: dict[int, list[Comment]] = {}
+    roots: list[Comment] = []
+    for c in all_comments:
+        setattr(c, "attachments", media_map.get(str(c.id), []))
+        set_committed_value(c, "sub_comments", [])
+        if c.parent_id is None:
+            roots.append(c)
+        else:
+            children_map.setdefault(c.parent_id, []).append(c)
+
+    for root in roots:
+        set_committed_value(root, "sub_comments", children_map.get(root.id, []))
+
+    return roots
 
 
 def create_comment(db: Session, post_id: int, user_id: int, comment_in: CommentCreate):
+    resolved_parent_id = comment_in.parent_id
+    if resolved_parent_id is not None:
+        parent = (
+            db.query(Comment)
+            .filter(Comment.id == resolved_parent_id, Comment.post_id == post_id)
+            .first()
+        )
+        if not parent:
+            raise HTTPException(status_code=400, detail="유효하지 않은 부모 댓글입니다.")
+        # 2단계 고정: 2단 답글에 달린 답글도 최상위 원댓글 하위에 연결
+        if parent.parent_id is not None:
+            resolved_parent_id = parent.parent_id
+
     db_comment = Comment(
         post_id=post_id,
         user_id=user_id,
         content=comment_in.content,
-        parent_id=comment_in.parent_id,
-        create_date=datetime.now()
+        parent_id=resolved_parent_id,
+        create_date=datetime.now(),
     )
     db.add(db_comment)
     db.commit()

@@ -340,6 +340,7 @@ class ResolvedServiceBinding(BaseModel):
     service_component: str              # service_engine.frontend_plugin
     config: Dict[str, Any]              # ServiceApp.config
     layout: Optional[Dict[str, Any]] = None  # 행/블록/인라인/카드묶음 배치 정보
+    permissions: Optional[Dict[str, Any]] = None  # 현재 사용자 서비스 권한 (can_read, can_write, reason, message)
 
 # --- 게시판/포스트 공통 스키마 ---
 class BoardSimpleSchema(BaseModel):

@@ -8,10 +8,10 @@
 
 from datetime import datetime
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -125,9 +125,12 @@ def list_my_surveys(
         my_list = my_by_campaign.get(c.id, [])
         if not service.is_user_targeted(c, current_user) and not my_list and not is_admin:
             continue
+        t_status = service.build_campaign_target_status(db, c)
         result.append(
             service.serialize_campaign(
                 c,
+                response_count=t_status["completed_count"],
+                target_count=t_status["target_count"],
                 my_response=my_list[0] if my_list else None,
                 my_responses=my_list,
             )
@@ -165,11 +168,15 @@ def get_survey_by_code(
         .all()
     )
     serialized = [service.serialize_response(r) for r in my_rows]
+    target_status = service.build_campaign_target_status(db, c)
     return {
         "campaign": service.serialize_campaign(
             c,
+            response_count=target_status["completed_count"],
+            target_count=target_status["target_count"],
             my_response=serialized[0] if serialized else None,
             my_responses=serialized,
+            target_status=target_status,
         ),
         "vehicle_context": service.get_vehicle_context(current_user),
     }
@@ -204,11 +211,15 @@ def get_survey_detail(
         raise HTTPException(status_code=403, detail="아직 배포되지 않은 조사입니다.")
 
     serialized = [service.serialize_response(r) for r in my_rows]
+    target_status = service.build_campaign_target_status(db, c)
     return {
         "campaign": service.serialize_campaign(
             c,
+            response_count=target_status["completed_count"],
+            target_count=target_status["target_count"],
             my_response=serialized[0] if serialized else None,
             my_responses=serialized,
+            target_status=target_status,
         ),
         "vehicle_context": service.get_vehicle_context(current_user),
     }
@@ -230,7 +241,9 @@ def submit_survey_response(
     if not c:
         raise HTTPException(status_code=404, detail="조사 양식을 찾을 수 없습니다.")
 
-    if not service.is_user_targeted(c, current_user) and current_user.rank() < 4:
+    settings = service.get_survey_settings(db)
+    is_admin_submit = current_user.rank() >= 4 and settings.get("allow_untargeted_admin_submit", True)
+    if not service.is_user_targeted(c, current_user) and not is_admin_submit:
         raise HTTPException(status_code=403, detail="이 조사의 참여 대상이 아닙니다.")
 
     row = service.upsert_response(
@@ -314,12 +327,19 @@ def admin_list_campaigns(
 
     result = []
     for c in campaigns:
-        target_users = service.resolve_campaign_target_users(db, c)
+        if c.submit_scope == "VEHICLE":
+            t_status = service.build_campaign_target_status(db, c)
+            t_count = t_status["target_count"]
+            r_count = t_status["completed_count"]
+        else:
+            target_users = service.resolve_campaign_target_users(db, c)
+            t_count = len(target_users)
+            r_count = count_map.get(c.id, 0)
         result.append(
             service.serialize_campaign(
                 c,
-                response_count=count_map.get(c.id, 0),
-                target_count=len(target_users),
+                response_count=r_count,
+                target_count=t_count,
                 issue_count=issue_map.get(c.id, 0),
             )
         )
@@ -561,17 +581,29 @@ def admin_remind_missing_users(
         raise HTTPException(status_code=404, detail="캠페인을 찾을 수 없습니다.")
 
     stats = service.build_campaign_stats(db, c)
-    missing_ids = [u["id"] for u in stats["summary"]["missing_users"]]
-    if not missing_ids:
-        return {"message": "미제출자가 없습니다.", "sent_count": 0}
+    if c.submit_scope == "VEHICLE":
+        missing_cnt = stats["summary"]["missing_count"]
+        if missing_cnt <= 0:
+            return {"message": "모든 대상 차량의 조사가 완료되었습니다.", "sent_count": 0}
+        target_ids = [u.id for u in service.resolve_campaign_target_users(db, c)]
+        if not target_ids:
+            return {"message": "알림을 받을 작성 가능 사원이 없습니다.", "sent_count": 0}
+        remind_msg = f"미작성 대상 차량이 {missing_cnt}대 남아 있습니다. 확인 후 작성을 완료해 주세요."
+        result_msg = f"작성 가능 사원 {len(target_ids)}명에게 독촉 알림을 발송했습니다."
+    else:
+        target_ids = [u["id"] for u in stats["summary"]["missing_users"]]
+        if not target_ids:
+            return {"message": "미제출자가 없습니다.", "sent_count": 0}
+        remind_msg = "아직 제출하지 않은 조사 양식이 있습니다. 확인 후 작성을 완료해 주세요."
+        result_msg = f"미제출자 {len(target_ids)}명에게 독촉 알림을 발송했습니다."
 
     _notify_survey_targets(
         db,
         campaign=c,
         sender=admin,
-        target_user_ids=missing_ids,
+        target_user_ids=target_ids,
         title=f"[미제출 독촉] {c.title}",
-        message="아직 제출하지 않은 조사 양식이 있습니다. 확인 후 작성을 완료해 주세요.",
+        message=remind_msg,
         background_tasks=background_tasks,
     )
     safe_log_audit(
@@ -579,12 +611,12 @@ def admin_remind_missing_users(
         app_id="survey",
         log_type="CHANGE",
         action="SURVEY_REMIND",
-        title=f"미제출 독촉 발송: {c.title} ({len(missing_ids)}명)",
+        title=f"미제출 독촉 발송: {c.title} ({len(target_ids)}명)",
         user=admin,
         resource_type="survey_campaign",
         resource_id=str(c.id),
     )
-    return {"message": f"미제출자 {len(missing_ids)}명에게 독촉 알림을 발송했습니다.", "sent_count": len(missing_ids)}
+    return {"message": result_msg, "sent_count": len(target_ids)}
 
 
 @admin_router.get("/campaigns/{campaign_id}/responses")
@@ -723,3 +755,63 @@ def admin_delete_template(
         resource_id=service.SURVEY_TEMPLATES_KEY,
     )
     return {"message": "템플릿이 삭제되었습니다."}
+
+
+@admin_router.get("/settings")
+def admin_get_survey_settings(
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_survey_read),
+):
+    """조사·설문 앱 전역 비즈니스 설정을 조회합니다."""
+    return {"settings": service.get_survey_settings(db)}
+
+
+@admin_router.put("/settings")
+def admin_update_survey_settings(
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_survey_write),
+):
+    """조사·설문 앱 전역 비즈니스 설정을 저장합니다."""
+    saved = service.save_survey_settings(db, payload)
+    safe_log_audit(
+        db=db,
+        app_id="survey",
+        log_type="CHANGE",
+        action="SURVEY_SETTINGS_UPDATE",
+        title="조사·설문 전역 비즈니스 설정 변경",
+        user=admin,
+        resource_type="system_config",
+        resource_id=service.SURVEY_SETTINGS_KEY,
+    )
+    return {"message": "설문 설정이 저장되었습니다.", "settings": saved}
+
+
+@admin_router.post("/campaigns/{campaign_id}/resolve-vehicle")
+def admin_resolve_vehicle_responses(
+    campaign_id: int,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_survey_write),
+):
+    """차량별 복수 응답에 대해 1건 채택(PICK) 또는 이견 문항 선택(UNION)으로 최종 확정합니다."""
+    c = (
+        db.query(SurveyCampaign)
+        .filter(SurveyCampaign.id == campaign_id, SurveyCampaign.is_deleted == False)
+        .first()
+    )
+    if not c:
+        raise HTTPException(status_code=404, detail="캠페인을 찾을 수 없습니다.")
+
+    res = service.resolve_vehicle_responses(db, c, admin, payload)
+    safe_log_audit(
+        db=db,
+        app_id="survey",
+        log_type="CHANGE",
+        action="SURVEY_VEHICLE_RESOLVE",
+        title=f"차량별 응답 확정: {c.title} ({payload.get('vehicle_no')})",
+        user=admin,
+        resource_type="survey_campaign",
+        resource_id=str(c.id),
+    )
+    return res

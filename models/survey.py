@@ -125,11 +125,12 @@ class SurveyResponse(Base):
             unique=True,
             postgresql_where=and_(is_deleted == False, vehicle_no.is_(None)),
         ),
-        # VEHICLE 단위: 동일 캠페인 + 동일 차량 중복 방지
+        # VEHICLE 단위: 동일 캠페인 + 동일 차량 + 동일 작성자 중복 방지 (다중 조사원 복수 작성 허용)
         Index(
-            "ix_survey_responses_campaign_vehicle_active",
+            "ix_survey_responses_campaign_vehicle_user_active",
             "campaign_id",
             "vehicle_no",
+            "user_id",
             unique=True,
             postgresql_where=and_(is_deleted == False, vehicle_no.isnot(None)),
         ),

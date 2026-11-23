@@ -115,6 +115,9 @@ class Comment(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     parent_id = Column(Integer, ForeignKey("comment.id"), nullable=True)
     content = Column(Text, nullable=False)
+    is_secret = Column(Boolean, default=False, nullable=False, server_default="false")
+    is_deleted = Column(Boolean, default=False, nullable=False, server_default="false", index=True)
+    delete_date = Column(DateTime, nullable=True)
     create_date = Column(DateTime, default=datetime.now)
     modify_date = Column(DateTime, nullable=True)
 
