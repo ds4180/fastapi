@@ -2452,8 +2452,8 @@ def save_daily_dispatch(
 
         db.commit()
 
-        # 🔔 [Web Push] 배차 확정(CONFIRMED) 저장 시 배정된 운전원들에게 노선 확정 푸시 발송
-        if payload.status == "CONFIRMED":
+        # 🔔 [Web Push] 즉시 배포(ANNOUNCED) 저장 시 배정된 운전원들에게 노선 확정 푸시 발송
+        if payload.status == "ANNOUNCED":
             try:
                 from sqlalchemy import or_
                 from domain.push.push_service import (

@@ -303,7 +303,14 @@ def compute_preview_window(settings: Dict[str, Any], now: Optional[datetime] = N
 
 
 def verify_custom_preview_access(db: Session, target_date: date) -> None:
-    """일반 사원용 배차 예고 날짜 접근 가능 여부를 검증합니다."""
+    """일반 사원용 배차 조회 날짜 접근 가능 여부를 검증합니다.
+    - 오늘(D-day) 및 내일(D-1)은 배차 확인 탭 조회를 허용합니다(노출 여부는 status로 통제).
+    - 그 외(D+2 이상)는 preview_window 설정을 따릅니다.
+    """
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    if target_date in (today, tomorrow):
+        return
     settings = get_dispatch_settings(db)
     win = compute_preview_window(settings)
     if win["is_paused"]:
@@ -361,7 +368,7 @@ def announce_tomorrow_dispatch(
     route_ids = [r["id"] for r in active_routes if isinstance(r, dict) and r.get("id")]
 
     updated_count = 0
-    already_confirmed_all = True
+    already_announced_all = True
 
     if route_ids:
         timetable_rows = (
@@ -377,15 +384,15 @@ def announce_tomorrow_dispatch(
                 .all()
             )
             for d_row in existing_rows:
-                if d_row.status != "CONFIRMED":
-                    already_confirmed_all = False
-                    d_row.status = "CONFIRMED"
+                if d_row.status != "ANNOUNCED":
+                    already_announced_all = False
+                    d_row.status = "ANNOUNCED"
                     updated_count += 1
             if not existing_rows:
-                already_confirmed_all = False
+                already_announced_all = False
 
-    if not force and settings.get("auto_announce_skip_if_confirmed", True) and already_confirmed_all and updated_count == 0:
-        return {"status": "skipped_already_confirmed", "target_date": tomorrow_str, "updated_count": 0}
+    if not force and settings.get("auto_announce_skip_if_confirmed", True) and already_announced_all and updated_count == 0:
+        return {"status": "skipped_already_announced", "target_date": tomorrow_str, "updated_count": 0}
 
     db.commit()
 
