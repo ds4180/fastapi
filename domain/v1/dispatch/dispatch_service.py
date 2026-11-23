@@ -423,11 +423,11 @@ def set_date_published(
         pub_map[date_key] = {"published_at": now_str, "mode": mode}
     else:
         pub_map.pop(date_key, None)
-        # 공개 취소 시 기존 ANNOUNCED 행은 CONFIRMED(확정 유지)로 되돌림
+        # 공개 취소 시 확정/배포 상태를 저장 완료(DRAFT) 상태로 전환해 재수정 후 확정->공개 흐름을 따르도록 함
         db.query(Dispatch).filter(
             Dispatch.target_date == target_date,
-            Dispatch.status == "ANNOUNCED",
-        ).update({"status": "CONFIRMED"}, synchronize_session=False)
+            Dispatch.status.in_(("ANNOUNCED", "CONFIRMED")),
+        ).update({"status": "DRAFT"}, synchronize_session=False)
 
     if row:
         row.value = pub_map
@@ -654,6 +654,15 @@ def check_and_run_auto_announce(db: Session) -> Dict[str, Any]:
     tomorrow = now.date() + timedelta(days=1)
     if is_date_published(db, tomorrow):
         return {"status": "already_published", "date": tomorrow.isoformat()}
+
+    has_confirmed = (
+        db.query(Dispatch.id)
+        .filter(Dispatch.target_date == tomorrow, Dispatch.status == "CONFIRMED")
+        .first()
+        is not None
+    )
+    if not has_confirmed:
+        return {"status": "waiting_confirmation", "date": tomorrow.isoformat()}
 
     return announce_tomorrow_dispatch(db, force=False)
 
