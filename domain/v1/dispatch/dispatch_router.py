@@ -104,6 +104,7 @@ def get_admin_dispatch_publish_status(
     route_ids = [r["id"] for r in active_routes if isinstance(r, dict) and r.get("id")]
     total_count = 0
     saved_count = 0
+    confirmed_count = 0
     if route_ids:
         tt_ids = [
             tid
@@ -118,9 +119,20 @@ def get_admin_dispatch_publish_status(
                 .filter(Dispatch.target_date == target_date, Dispatch.timetable_id.in_(tt_ids))
                 .count()
             )
+            confirmed_count = (
+                db.query(Dispatch.id)
+                .filter(
+                    Dispatch.target_date == target_date,
+                    Dispatch.timetable_id.in_(tt_ids),
+                    Dispatch.status.in_(("CONFIRMED", "ANNOUNCED")),
+                )
+                .count()
+            )
     return {
         "target_date": date_key,
         "published": service.is_date_published(db, target_date),
+        "confirmed": bool(total_count > 0 and confirmed_count >= total_count),
+        "confirmed_count": confirmed_count,
         "meta": pub_map.get(date_key),
         "saved_count": saved_count,
         "total_count": total_count,

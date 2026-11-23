@@ -423,11 +423,11 @@ def set_date_published(
         pub_map[date_key] = {"published_at": now_str, "mode": mode}
     else:
         pub_map.pop(date_key, None)
-        # 공개 취소 시 기존 ANNOUNCED 행도 DRAFT로 되돌려 하위 호환 유지
+        # 공개 취소 시 기존 ANNOUNCED 행은 CONFIRMED(확정 유지)로 되돌림
         db.query(Dispatch).filter(
             Dispatch.target_date == target_date,
             Dispatch.status == "ANNOUNCED",
-        ).update({"status": "DRAFT"}, synchronize_session=False)
+        ).update({"status": "CONFIRMED"}, synchronize_session=False)
 
     if row:
         row.value = pub_map
