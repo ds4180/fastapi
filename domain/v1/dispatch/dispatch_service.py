@@ -366,15 +366,37 @@ def verify_custom_preview_access(db: Session, target_date: date) -> None:
     today = datetime.now().date()
     tomorrow = today + timedelta(days=1)
     settings = get_dispatch_settings(db)
-    if target_date == today and settings.get("confirm_d_day_always_open", True):
-        return
-    if target_date == tomorrow:
+    if target_date in (today, tomorrow):
         return
     win = compute_preview_window(settings)
     if win["is_paused"]:
         raise HTTPException(status_code=403, detail=win["reason"])
     if target_date.isoformat() not in win["allowed_dates"]:
-        raise HTTPException(status_code=403, detail=win["reason"])
+        raise HTTPException(
+            status_code=403,
+            detail=f"{target_date.isoformat()} 배차 예고는 아직 공개 전입니다. ({win['reason']})",
+        )
+
+
+def filter_custom_dispatch_rows(db: Session, target_date: date, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """백엔드 단일 진실 공급원(SSOT): 날짜/설정에 따라 미공개 상태 행을 API 응답에서 차단합니다."""
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    settings = get_dispatch_settings(db)
+
+    if target_date == today:
+        if settings.get("confirm_d_day_always_open", True):
+            return rows
+        return [r for r in rows if (r.get("status") or "DRAFT") in ("CONFIRMED", "ANNOUNCED")]
+
+    if target_date == tomorrow:
+        require_announced = bool(settings.get("confirm_d1_require_announced", True))
+        allowed_statuses = ("ANNOUNCED",) if require_announced else ("CONFIRMED", "ANNOUNCED")
+        return [r for r in rows if (r.get("status") or "DRAFT") in allowed_statuses]
+
+    if settings.get("preview_allow_draft", True):
+        return rows
+    return [r for r in rows if (r.get("status") or "DRAFT") in ("CONFIRMED", "ANNOUNCED")]
 
 
 def get_dispatch_resources(db: Session) -> Dict[str, Any]:
@@ -429,34 +451,73 @@ def announce_tomorrow_dispatch(
     already_announced_all = True
 
     if route_ids:
+        from domain.v1.admin.admin_router import build_daily_dispatch_rows
+
         timetable_rows = (
             db.query(RouteTimetable)
             .filter(RouteTimetable.route_master_id.in_(route_ids))
             .all()
         )
         tt_ids = [t.id for t in timetable_rows]
+        existing_map: Dict[int, Dispatch] = {}
         if tt_ids:
             existing_rows = (
                 db.query(Dispatch)
                 .filter(Dispatch.target_date == tomorrow, Dispatch.timetable_id.in_(tt_ids))
                 .all()
             )
-            for d_row in existing_rows:
-                if d_row.status != "ANNOUNCED":
+            existing_map = {d.timetable_id: d for d in existing_rows}
+
+        for rid in route_ids:
+            computed_rows = build_daily_dispatch_rows(db, tomorrow, rid)
+            for cr in computed_rows:
+                tid = cr.get("timetable_id")
+                if not tid:
+                    continue
+                d_row = existing_map.get(tid)
+                if d_row:
+                    if d_row.status != "ANNOUNCED":
+                        already_announced_all = False
+                        d_row.status = "ANNOUNCED"
+                        updated_count += 1
+                else:
                     already_announced_all = False
-                    d_row.status = "ANNOUNCED"
+                    new_row = Dispatch(
+                        target_date=tomorrow,
+                        timetable_id=tid,
+                        driver_name=cr.get("driver_name"),
+                        vehicle_no=cr.get("vehicle_no"),
+                        start_time=cr.get("start_time"),
+                        status="ANNOUNCED",
+                        memo=cr.get("memo") or "",
+                    )
+                    db.add(new_row)
+                    existing_map[tid] = new_row
                     updated_count += 1
-            if not existing_rows:
-                already_announced_all = False
+
+        if not existing_map:
+            already_announced_all = False
 
     if not force and settings.get("auto_announce_skip_if_confirmed", True) and already_announced_all and updated_count == 0:
         return {"status": "skipped_already_announced", "target_date": tomorrow_str, "updated_count": 0}
 
     db.commit()
 
-    # 오늘 자동 고지 실행 날짜 기록
+    # 자동/수동 고지 실행 이력 기록 (수동 배포가 예약된 자동 배포를 막지 않도록 분리)
     state_row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_AUTO_ANNOUNCE_STATE_KEY).first()
-    state_val = {"last_run_date": today_str, "target_date": tomorrow_str, "ran_at": now.strftime("%Y-%m-%d %H:%M")}
+    prev_val = dict(state_row.value) if (state_row and isinstance(state_row.value, dict)) else {}
+    state_val = {
+        **prev_val,
+        "target_date": tomorrow_str,
+        "ran_at": now.strftime("%Y-%m-%d %H:%M"),
+    }
+    if force:
+        state_val["last_manual_date"] = today_str
+        state_val["last_manual_at"] = now.strftime("%Y-%m-%d %H:%M")
+    else:
+        state_val["last_run_date"] = today_str
+        state_val["last_auto_date"] = today_str
+        state_val["last_auto_at"] = now.strftime("%Y-%m-%d %H:%M")
     if state_row:
         state_row.value = state_val
     else:
@@ -522,8 +583,19 @@ def check_and_run_auto_announce(db: Session) -> Dict[str, Any]:
         return {"status": "waiting", "now": now_hhmm, "target": target_hhmm}
 
     state_row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_AUTO_ANNOUNCE_STATE_KEY).first()
-    if state_row and isinstance(state_row.value, dict) and state_row.value.get("last_run_date") == today_str:
-        return {"status": "already_ran_today", "date": today_str}
+    state_dict = state_row.value if (state_row and isinstance(state_row.value, dict)) else {}
+    already_auto_ran_today = state_dict.get("last_auto_date") == today_str
+    if already_auto_ran_today:
+        # 자동 고지 시각 이후 추가로 확정(CONFIRMED)된 배차가 있다면 배포 상태로 승격
+        tomorrow = now.date() + timedelta(days=1)
+        has_pending_confirmed = (
+            db.query(Dispatch.id)
+            .filter(Dispatch.target_date == tomorrow, Dispatch.status == "CONFIRMED")
+            .first()
+            is not None
+        )
+        if not has_pending_confirmed:
+            return {"status": "already_ran_today", "date": today_str}
 
     return announce_tomorrow_dispatch(db, force=False)
 

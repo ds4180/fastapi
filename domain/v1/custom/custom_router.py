@@ -181,7 +181,10 @@ def get_custom_daily_dispatch(
     verify_timeline_access(target_date, db)
 
     try:
-        return build_daily_dispatch_rows(db, target_date, route_master_id)
+        from domain.v1.dispatch.dispatch_service import filter_custom_dispatch_rows
+
+        rows = build_daily_dispatch_rows(db, target_date, route_master_id)
+        return filter_custom_dispatch_rows(db, target_date, rows)
     except HTTPException:
         raise
     except Exception as e:
