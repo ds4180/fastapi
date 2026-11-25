@@ -1906,13 +1906,23 @@ def delete_route_master(
     admin: User = Depends(check_route_master_admin_write)
 ):
     """
-    특정 노선 마스터와 종속된 모든 상세 시간표를 물리적으로 영구 삭제합니다.
+    미래 적용 예정(start_date > 오늘)인 노선 마스터만 영구 삭제할 수 있습니다.
+    이미 시작되었거나 지난 과거 로번은 배차 이력 참조를 위해 삭제를 차단합니다.
     """
     try:
+        from domain.v1.dispatch.dispatch_service import _now_kst
+
         db_master = db.query(RouteMaster).filter(RouteMaster.id == master_id).first()
         if not db_master:
             raise HTTPException(status_code=404, detail="해당 노선 마스터를 찾을 수 없습니다.")
-            
+
+        today_kst = _now_kst().date()
+        if db_master.start_date <= today_kst:
+            raise HTTPException(
+                status_code=400,
+                detail="이미 적용되었거나 지난 로번은 과거 배차 이력 보존을 위해 삭제할 수 없습니다. 미래 적용 예정 로번만 삭제 가능합니다.",
+            )
+
         db.delete(db_master)
         db.commit()
         try:
@@ -2382,6 +2392,15 @@ def save_daily_dispatch(
     - 단일 트랜잭션으로 오늘과 내일의 배차 현황을 안전하게 교차 일괄 영구 저장합니다.
     """
     try:
+        from domain.v1.dispatch.dispatch_service import _now_kst
+
+        today_kst = _now_kst().date()
+        if payload.target_date < today_kst:
+            raise HTTPException(
+                status_code=400,
+                detail="과거 날짜(어제 이전)의 배차 데이터는 수정·저장할 수 없습니다.",
+            )
+
         role_map, vehicle_map, _ = load_drivers_metadata()
         
         for r in payload.rows:
