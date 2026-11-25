@@ -24,7 +24,11 @@ logger = logging.getLogger("core.notify")
 def resolve_target_user_ids(
     db: Session,
     target_user_ids: Optional[List[int]] = None,
-    target_groups: Optional[List[str]] = None
+    target_groups: Optional[List[str]] = None,
+    target_app_id: Optional[str] = None,
+    target_app_action: str = "read",
+    target_board_id: Optional[int] = None,
+    exclude_user_id: Optional[int] = None,
 ) -> Set[int]:
     """
     [수신 대상 사원 ID 자동 분해 및 합집합 연산]
@@ -66,6 +70,33 @@ def resolve_target_user_ids(
             if any(g in target_groups for g in sec_groups):
                 resolved_ids.add(p.user_id)
 
+    if target_app_id:
+        from models import AppRegistry, User
+        from core.permission import can_access_app
+
+        app_obj = db.query(AppRegistry).filter(AppRegistry.app_id == target_app_id).first()
+        if app_obj:
+            for u in db.query(User).all():
+                if u.profile is not None and u.profile.is_active is False:
+                    continue
+                if can_access_app(user=u, app_obj=app_obj, action=target_app_action):
+                    resolved_ids.add(u.id)
+
+    if target_board_id is not None:
+        from models import BoardConfig, User
+        from core.permission import can_access_board
+
+        board = db.query(BoardConfig).filter(BoardConfig.id == target_board_id).first()
+        if board:
+            for u in db.query(User).all():
+                if u.profile is not None and u.profile.is_active is False:
+                    continue
+                if can_access_board(u, board, action="read"):
+                    resolved_ids.add(u.id)
+
+    if exclude_user_id is not None:
+        resolved_ids.discard(int(exclude_user_id))
+
     return resolved_ids
 
 
@@ -78,6 +109,10 @@ def notify(
     sender: Optional[Any] = None,
     target_user_ids: Optional[List[int]] = None,
     target_groups: Optional[List[str]] = None,
+    target_app_id: Optional[str] = None,
+    target_app_action: str = "read",
+    target_board_id: Optional[int] = None,
+    exclude_user_id: Optional[int] = None,
     level: int = 1,
     link: Optional[str] = None,
     background_tasks: Optional[Any] = None,
@@ -93,6 +128,10 @@ def notify(
     :param sender: 발신 User 인스턴스 (None이면 시스템 발송)
     :param target_user_ids: 수신 사원 ID 리스트
     :param target_groups: 수신 그룹 코드 리스트 (예: ['운수1팀', '기사'])
+    :param target_app_id: AppRegistry 앱 권한 기준 수신자 조회 (예: 'dayoff', 'blackbox')
+    :param target_app_action: AppRegistry 권한 액션 ('read' | 'write')
+    :param target_board_id: 게시판 열람 권한 기준 수신자 조회
+    :param exclude_user_id: 수신 대상에서 제외할 사용자 ID
     :param level: 알림 심각도 (1: 일반, 2: 성공토스트, 3: 중요공지+웹푸시, 4: 경보모달, 5: 비상락)
     :param link: 클릭 시 바로 이동할 업무 화면 URL
     :param background_tasks: FastAPI BackgroundTasks (비동기 푸시 예약용)
@@ -101,7 +140,15 @@ def notify(
     from models.miniapp import MiniappItem
 
     sender_id = getattr(sender, "id", None) if sender else None
-    resolved_uids = resolve_target_user_ids(db, target_user_ids, target_groups)
+    resolved_uids = resolve_target_user_ids(
+        db,
+        target_user_ids=target_user_ids,
+        target_groups=target_groups,
+        target_app_id=target_app_id,
+        target_app_action=target_app_action,
+        target_board_id=target_board_id,
+        exclude_user_id=exclude_user_id,
+    )
     created_items: List[MiniappItem] = []
 
     payload = extra_payload or {}
@@ -194,7 +241,11 @@ def notify(
 
     if should_send_push:
         try:
-            from domain.push.push_service import send_push_to_all, send_push_to_users
+            from domain.push.push_service import (
+                dispatch_push_async,
+                send_push_to_all,
+                send_push_to_users,
+            )
             push_title = title or ("🚨 [긴급 공지]" if level >= 4 else "📢 [사내 알림]")
             push_url = link or "/"
             if resolved_uids:
@@ -206,13 +257,29 @@ def notify(
                         body=message,
                         url=push_url,
                     )
-            elif background_tasks:
-                background_tasks.add_task(
-                    send_push_to_all,
-                    title=push_title,
-                    body=message,
-                    url=push_url,
-                )
+                else:
+                    dispatch_push_async(
+                        send_push_to_users,
+                        user_ids=list(resolved_uids),
+                        title=push_title,
+                        body=message,
+                        url=push_url,
+                    )
+            else:
+                if background_tasks:
+                    background_tasks.add_task(
+                        send_push_to_all,
+                        title=push_title,
+                        body=message,
+                        url=push_url,
+                    )
+                else:
+                    dispatch_push_async(
+                        send_push_to_all,
+                        title=push_title,
+                        body=message,
+                        url=push_url,
+                    )
         except Exception as e:
             logger.warning(f"⚠️ [core.notify] Web Push 발송 예약 실패 (무시됨): {e}")
 
@@ -229,6 +296,10 @@ def safe_notify(
     sender: Optional[Any] = None,
     target_user_ids: Optional[List[int]] = None,
     target_groups: Optional[List[str]] = None,
+    target_app_id: Optional[str] = None,
+    target_app_action: str = "read",
+    target_board_id: Optional[int] = None,
+    exclude_user_id: Optional[int] = None,
     level: int = 1,
     link: Optional[str] = None,
     background_tasks: Optional[Any] = None,
@@ -248,6 +319,10 @@ def safe_notify(
             sender=sender,
             target_user_ids=target_user_ids,
             target_groups=target_groups,
+            target_app_id=target_app_id,
+            target_app_action=target_app_action,
+            target_board_id=target_board_id,
+            exclude_user_id=exclude_user_id,
             level=level,
             link=link,
             background_tasks=background_tasks,

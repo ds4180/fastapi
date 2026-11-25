@@ -1459,24 +1459,25 @@ def admin_update_dayoff_status(
         
     db.commit()
 
-    # 🔔 [Web Push] 관리자 휴무 승인/반려 시 신청 사원 본인에게 결과 푸시 발송
+    # 🔔 [통합 알림] 관리자 휴무 승인/반려 시 신청 사원 본인에게 알림함 + 결과 푸시 발송
     if new_status in ("APPROVED", "REJECTED"):
         try:
-            from domain.push.push_service import (
-                is_push_domain_enabled,
-                dispatch_push_async,
-                send_push_to_user,
+            from core.notify import safe_notify
+            from domain.push.push_service import is_push_domain_enabled
+
+            status_label = "승인" if new_status == "APPROVED" else "반려"
+            date_label = str(db_dayoff.date) if getattr(db_dayoff, "date", None) else "신청일"
+            safe_notify(
+                db=db,
+                category="NOTIFICATION",
+                title=f"휴무 신청이 {status_label}되었습니다",
+                message=f"{date_label} 휴무 신청 건이 {status_label} 처리되었습니다.",
+                sender=admin,
+                target_user_ids=[db_dayoff.user_id],
+                level=2 if new_status == "APPROVED" else 3,
+                link="/v1/custom/dayoff",
+                extra_payload={"send_web_push": is_push_domain_enabled(db, "dayoff_result")},
             )
-            if is_push_domain_enabled(db, "dayoff_result"):
-                status_label = "승인" if new_status == "APPROVED" else "반려"
-                date_label = str(db_dayoff.date) if getattr(db_dayoff, "date", None) else "신청일"
-                dispatch_push_async(
-                    send_push_to_user,
-                    user_id=db_dayoff.user_id,
-                    title=f"휴무 신청이 {status_label}되었습니다",
-                    body=f"{date_label} 휴무 신청 건이 {status_label} 처리되었습니다.",
-                    url="/v1/custom/dayoff",
-                )
         except Exception:
             pass
 
@@ -2468,52 +2469,54 @@ def save_daily_dispatch(
 
         db.commit()
 
-        # 🔔 [Web Push] 즉시 배포(ANNOUNCED) 저장 시 배정된 운전원들에게 노선 확정 푸시 발송
+        # 🔔 [통합 알림] 즉시 배포(ANNOUNCED) 저장 시 배정된 운전원들에게 알림함 + 노선 확정 푸시 발송
         if payload.status == "ANNOUNCED":
             try:
                 from sqlalchemy import or_
-                from domain.push.push_service import (
-                    is_push_domain_enabled,
-                    dispatch_push_async,
-                    send_push_to_user,
-                )
-                if is_push_domain_enabled(db, "dispatch_confirmed"):
-                    timetable_ids = list({r.timetable_id for r in payload.rows if r.timetable_id})
-                    route_map = {}
-                    if timetable_ids:
-                        tt_rows = (
-                            db.query(models.RouteTimetable.id, models.RouteMaster.route_name)
-                            .join(models.RouteMaster, models.RouteTimetable.route_master_id == models.RouteMaster.id)
-                            .filter(models.RouteTimetable.id.in_(timetable_ids))
-                            .all()
+                from core.notify import safe_notify
+                from domain.push.push_service import is_push_domain_enabled
+
+                push_enabled = is_push_domain_enabled(db, "dispatch_confirmed")
+                timetable_ids = list({r.timetable_id for r in payload.rows if r.timetable_id})
+                route_map = {}
+                if timetable_ids:
+                    tt_rows = (
+                        db.query(models.RouteTimetable.id, models.RouteMaster.route_name)
+                        .join(models.RouteMaster, models.RouteTimetable.route_master_id == models.RouteMaster.id)
+                        .filter(models.RouteTimetable.id.in_(timetable_ids))
+                        .all()
+                    )
+                    route_map = {tid: rname for tid, rname in tt_rows if rname}
+
+                driver_routes: dict[str, list[str]] = {}
+                for r in payload.rows:
+                    dname = (r.driver_name or "").strip()
+                    if not dname:
+                        continue
+                    rname = route_map.get(r.timetable_id, "")
+                    bucket = driver_routes.setdefault(dname, [])
+                    if rname and rname not in bucket:
+                        bucket.append(rname)
+
+                if driver_routes:
+                    driver_names = list(driver_routes.keys())
+                    matched_users = db.query(User).filter(
+                        or_(User.real_name.in_(driver_names), User.username.in_(driver_names))
+                    ).all()
+                    for u in matched_users:
+                        routes = driver_routes.get(u.real_name or "") or driver_routes.get(u.username) or []
+                        route_prefix = f"{', '.join(routes)} 노선 " if routes else ""
+                        safe_notify(
+                            db=db,
+                            category="NOTIFICATION",
+                            title=f"{route_prefix}배차가 확정되었습니다",
+                            message=f"{payload.target_date} 배차가 확정되었습니다. 배차표를 확인해 주세요.",
+                            sender=admin,
+                            target_user_ids=[u.id],
+                            level=2,
+                            link="/v1/custom/dispatch",
+                            extra_payload={"send_web_push": push_enabled},
                         )
-                        route_map = {tid: rname for tid, rname in tt_rows if rname}
-
-                    driver_routes: dict[str, list[str]] = {}
-                    for r in payload.rows:
-                        dname = (r.driver_name or "").strip()
-                        if not dname:
-                            continue
-                        rname = route_map.get(r.timetable_id, "")
-                        bucket = driver_routes.setdefault(dname, [])
-                        if rname and rname not in bucket:
-                            bucket.append(rname)
-
-                    if driver_routes:
-                        driver_names = list(driver_routes.keys())
-                        matched_users = db.query(User).filter(
-                            or_(User.real_name.in_(driver_names), User.username.in_(driver_names))
-                        ).all()
-                        for u in matched_users:
-                            routes = driver_routes.get(u.real_name or "") or driver_routes.get(u.username) or []
-                            route_prefix = f"{', '.join(routes)} 노선 " if routes else ""
-                            dispatch_push_async(
-                                send_push_to_user,
-                                user_id=u.id,
-                                title=f"{route_prefix}배차가 확정되었습니다",
-                                body=f"{payload.target_date} 배차가 확정되었습니다. 배차표를 확인해 주세요.",
-                                url="/v1/custom/dispatch",
-                            )
             except Exception:
                 pass
 

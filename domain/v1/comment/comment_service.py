@@ -52,14 +52,11 @@ def create_post_comment(
         db, post_id=post_id, user_id=current_user.id, comment_in=comment_in
     )
 
-    # 게시판 푸시 옵션 활성화 시 게시글 작성자 / 원댓글 작성자에게 비동기 Web Push 발송
+    # 게시판 댓글/답글 알림 (core.notify 단일화: 알림함 적재 + WS + Web Push)
     board = post.board
     if board:
-        from domain.push.push_service import (
-            dispatch_push_async,
-            is_push_option_enabled,
-            send_push_to_user,
-        )
+        from core.notify import safe_notify
+        from domain.push.push_service import is_push_option_enabled
 
         commenter = current_user.real_name or current_user.username
         preview = (comment_in.content or "").strip().replace("\n", " ")[:60]
@@ -72,12 +69,16 @@ def create_post_comment(
             and is_push_option_enabled(board.options, "push_on_comment")
         ):
             notified_user_ids.add(post.user_id)
-            dispatch_push_async(
-                send_push_to_user,
-                user_id=post.user_id,
+            safe_notify(
+                db=db,
+                category="NOTIFICATION",
                 title=f"[{board.name}] 새 댓글",
-                body=f"{commenter}: {preview}",
-                url=target_url,
+                message=f"{commenter}: {preview}",
+                sender=current_user,
+                target_user_ids=[post.user_id],
+                level=1,
+                link=target_url,
+                extra_payload={"send_web_push": True},
             )
 
         if created.parent_id and is_push_option_enabled(board.options, "push_on_reply"):
@@ -88,12 +89,16 @@ def create_post_comment(
                 and parent_comment.user_id != current_user.id
                 and parent_comment.user_id not in notified_user_ids
             ):
-                dispatch_push_async(
-                    send_push_to_user,
-                    user_id=parent_comment.user_id,
+                safe_notify(
+                    db=db,
+                    category="NOTIFICATION",
                     title=f"[{board.name}] 내 댓글에 새 답글",
-                    body=f"{commenter}: {preview}",
-                    url=target_url,
+                    message=f"{commenter}: {preview}",
+                    sender=current_user,
+                    target_user_ids=[parent_comment.user_id],
+                    level=1,
+                    link=target_url,
+                    extra_payload={"send_web_push": True},
                 )
 
     return created

@@ -92,23 +92,24 @@ def submit_driver_request(
         message=f"'{req.requester_name}' 기사님이 {req.vehicle_no}호 비디오 교체를 요청했습니다. ({req.reason_type})",
     )
 
-    # 🔔 [Web Push] 블랙박스 확인/교체 요청 접수 시 사무실/담당 직원에게 푸시 발송
+    # 🔔 [통합 알림] 블랙박스 확인/교체 요청 접수 시 사무실/담당 직원에게 알림함 + 푸시 발송
     try:
-        from domain.push.push_service import (
-            is_push_domain_enabled,
-            dispatch_push_async,
-            send_push_to_app_users,
+        from core.notify import safe_notify
+        from domain.push.push_service import is_push_domain_enabled
+
+        safe_notify(
+            db=db,
+            category="NOTIFICATION",
+            title=f"[블랙박스] {req.vehicle_no}호 영상 확인/교체 요청",
+            message=f"{req.requester_name} 기사님이 {req.vehicle_no}호 요청을 접수했습니다. ({req.reason_type})",
+            sender=current_user,
+            target_app_id="blackbox",
+            target_app_action="read",
+            exclude_user_id=current_user.id,
+            level=2,
+            link="/v1/admin/blackbox",
+            extra_payload={"send_web_push": is_push_domain_enabled(db, "blackbox_request")},
         )
-        if is_push_domain_enabled(db, "blackbox_request"):
-            dispatch_push_async(
-                send_push_to_app_users,
-                app_id="blackbox",
-                title=f"[블랙박스] {req.vehicle_no}호 영상 확인/교체 요청",
-                body=f"{req.requester_name} 기사님이 {req.vehicle_no}호 요청을 접수했습니다. ({req.reason_type})",
-                url="/v1/admin/blackbox",
-                action="read",
-                exclude_user_id=current_user.id,
-            )
     except Exception:
         pass
 

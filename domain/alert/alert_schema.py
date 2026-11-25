@@ -43,6 +43,7 @@ class AlertCreate(BaseModel):
     confirm_text: str = "확인하였습니다"
     reset_sec: int = 0
     send_web_push: Optional[bool] = False
+    save_to_inbox: Optional[bool] = True
 
 class AlertUpdate(BaseModel):
     """

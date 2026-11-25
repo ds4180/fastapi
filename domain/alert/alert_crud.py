@@ -103,10 +103,13 @@ async def create_alert(
     - Level 5(시스템 락 / 비상 공지)의 경우 전 사용자에게 백그라운드 Web Push 자동 발송 (HIST-007 표준)
     - 실시간 WebSocket 브로드캐스트로 접속 중인 모든 클라이언트 즉각 갱신 유도
     """
+    from domain.alert.alert_service import format_alert_inbox_title, get_alert_settings
+    alert_cfg = get_alert_settings(db)
+
     db_alert = Alert(
         message=alert_create.message,
-        level=alert_create.level,
-        style=alert_create.style,
+        level=alert_create.level or alert_cfg["default_level"],
+        style=alert_create.style or alert_cfg["default_style"],
         position=alert_create.position or 'top',
         category=alert_create.category or 'NOTIFICATION',
         target_group=alert_create.target_group,
@@ -115,7 +118,7 @@ async def create_alert(
         start_date=alert_create.start_date,
         end_date=alert_create.end_date,
         target_users=alert_create.target_users,
-        confirm_text=alert_create.confirm_text,
+        confirm_text=alert_create.confirm_text or alert_cfg["default_confirm_text"],
         reset_sec=alert_create.reset_sec,
         create_date=datetime.now(),
         user=user
@@ -126,7 +129,6 @@ async def create_alert(
 
     # 📱 [전역 통합 알림 단일화 core.notify 호출]
     cat = alert_create.category or ("INSTRUCTION" if alert_create.position == "modal" else "NOTICE")
-    category_label = "🚨 중요 공지" if cat == "URGENT_NOTICE" else ("📋 지시사항" if cat == "INSTRUCTION" else "📢 사내 공지")
     
     target_uids = []
     if alert_create.target_users and alert_create.target_users.strip():
@@ -134,7 +136,11 @@ async def create_alert(
             if uid_s.strip().isdigit():
                 target_uids.append(int(uid_s.strip()))
 
-    send_push_flag = bool(getattr(alert_create, "send_web_push", False))
+    send_push_flag = (
+        bool(alert_create.send_web_push)
+        if alert_create.send_web_push is not None
+        else bool(alert_cfg["default_send_web_push"])
+    )
     if not send_push_flag and cat in ("INSTRUCTION", "NOTICE", "URGENT_NOTICE"):
         try:
             from domain.push.push_service import is_push_domain_enabled
@@ -143,24 +149,30 @@ async def create_alert(
         except Exception:
             pass
 
-    from core.notify import safe_notify
-    safe_notify(
-        db=db,
-        category=cat,
-        title=f"[{category_label}] {alert_create.message[:25]}..." if len(alert_create.message) > 25 else f"[{category_label}] {alert_create.message}",
-        message=alert_create.message,
-        sender=user,
-        target_user_ids=target_uids if target_uids else None,
-        target_groups=[alert_create.target_group] if alert_create.target_group else None,
-        level=alert_create.level,
-        link=alert_create.redirect_url,
-        background_tasks=background_tasks,
-        extra_payload={
-            "alert_id": db_alert.id,
-            "target_group": alert_create.target_group,
-            "send_web_push": send_push_flag
-        }
+    save_to_inbox = (
+        bool(alert_create.save_to_inbox)
+        if alert_create.save_to_inbox is not None
+        else bool(alert_cfg["default_save_to_inbox"])
     )
+    if save_to_inbox:
+        from core.notify import safe_notify
+        safe_notify(
+            db=db,
+            category=cat,
+            title=format_alert_inbox_title(alert_create.message, cat, alert_cfg),
+            message=alert_create.message,
+            sender=user,
+            target_user_ids=target_uids if target_uids else None,
+            target_groups=[alert_create.target_group] if alert_create.target_group else None,
+            level=db_alert.level,
+            link=alert_create.redirect_url,
+            background_tasks=background_tasks,
+            extra_payload={
+                "alert_id": db_alert.id,
+                "target_group": alert_create.target_group,
+                "send_web_push": send_push_flag
+            }
+        )
 
     # 🔔 실시간 웹소켓 갱신 신호 브로드캐스트 (기존 레거시 팝업/토스트 화면 동기화)
     background_tasks.add_task(manager.broadcast, {"type": "new_alert"})

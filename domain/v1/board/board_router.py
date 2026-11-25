@@ -153,24 +153,26 @@ def post_create(
         resource_id=str(getattr(created, "id", "")),
     )
 
-    # 5. 🔔 게시판 푸시 옵션(push_on_post) 활성화 시 열람 권한자 대상 비동기 Web Push 발송
-    from domain.push.push_service import (
-        dispatch_push_async,
-        is_push_option_enabled,
-        send_push_to_board_readers,
-    )
+    # 5. 🔔 [통합 알림] 게시판 푸시 옵션(push_on_post) 활성화 시 열람 권한자 대상 알림함 + 푸시 발송
+    from core.notify import safe_notify
+    from domain.push.push_service import is_push_option_enabled
+
     should_push = is_push_option_enabled(board.options, "push_on_post") or bool(
         board_crud.is_board_admin(current_user, board, db=db) and (created.extra_data or {}).get("push_on_create")
     )
     if should_push:
         author_name = current_user.real_name or current_user.username
-        dispatch_push_async(
-            send_push_to_board_readers,
-            board_id=board.id,
+        safe_notify(
+            db=db,
+            category="NOTIFICATION",
             title=f"[{board.name}] 새 게시글",
-            body=f"{post_in.title} · {author_name}",
-            url=f"/v1/app/board/{slug}/{created.id}",
+            message=f"{post_in.title} · {author_name}",
+            sender=current_user,
+            target_board_id=board.id,
             exclude_user_id=current_user.id,
+            level=1,
+            link=f"/v1/app/board/{slug}/{created.id}",
+            extra_payload={"send_web_push": True},
         )
 
     return created

@@ -13,13 +13,14 @@
 3. 활성 알림 조회(`GET /alert/active`)는 일반 유저 및 손님도 안전하게 조회할 수 있도록 분리했습니다.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Body, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from starlette import status
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from database import get_db
-from domain.alert import alert_schema, alert_crud
+from domain.alert import alert_schema, alert_crud, alert_service
+from core.audit import safe_log_audit
 from core.deps import get_current_user, get_current_user_optional, require_app_permission
 from models import User
 
@@ -31,6 +32,49 @@ router = APIRouter(
 # 🔒 관리자 권한 의존성 정의 (AppRegistry 실시간 4단계 인가 가드와 완전 연동)
 check_alerts_read = require_app_permission("alerts", action="read")
 check_alerts_write = require_app_permission("alerts", action="write")
+
+
+@router.get("/policy")
+def get_public_alert_policy(db: Session = Depends(get_db)):
+    """일반 사용자 클라이언트용 알림 사운드·진동 전역 정책을 반환합니다."""
+    cfg = alert_service.get_alert_settings(db)
+    return {
+        "enable_sound": bool(cfg.get("enable_sound", True)),
+        "enable_vibration": bool(cfg.get("enable_vibration", True)),
+        "mandatory_read_seconds": int(cfg.get("mandatory_read_seconds", 5)),
+    }
+
+
+@router.get("/settings")
+def get_alert_settings(
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(check_alerts_read),
+):
+    """알림·지시 관리 전역 정책 설정을 조회합니다."""
+    return {"settings": alert_service.get_alert_settings(db)}
+
+
+@router.put("/settings")
+def update_alert_settings(
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(check_alerts_write),
+):
+    """알림·지시 관리 전역 정책 설정을 저장합니다."""
+    raw = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
+    saved = alert_service.update_alert_settings(db, raw)
+    safe_log_audit(
+        db=db,
+        app_id="alerts",
+        log_type="CHANGE",
+        action="ALERT_SETTINGS_UPDATE",
+        title="알림·지시 관리 정책 설정 변경",
+        user=admin_user,
+        resource_type="system_config",
+        resource_id=alert_service.ALERT_SETTINGS_KEY,
+        message=f"관리자 '{admin_user.username}'이(가) 알림·지시 관리 기본 정책을 수정했습니다.",
+    )
+    return {"message": "saved", "settings": saved}
 
 
 @router.get("/list", response_model=list[alert_schema.Alert])
@@ -107,7 +151,13 @@ async def alert_update(
     if not db_alert:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="알림을 찾을 수 없습니다.")
     
-    return alert_crud.update_alert(db, db_alert=db_alert, alert_update=_alert_update, admin_user=admin_user)
+    updated = alert_crud.update_alert(db, db_alert=db_alert, alert_update=_alert_update, admin_user=admin_user)
+    try:
+        from domain.ws.ws_service import manager
+        await manager.broadcast({"type": "new_alert"})
+    except Exception:
+        pass
+    return updated
 
 
 @router.post("/toggle/{alert_id}", response_model=alert_schema.Alert)
