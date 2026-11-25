@@ -547,7 +547,7 @@ def process_driver_request(
     )
     if not req:
         raise HTTPException(status_code=404, detail="교체 요청을 찾을 수 없습니다.")
-    if req.status != "PENDING":
+    if req.status not in ("PENDING", "PREPARING"):
         raise HTTPException(status_code=400, detail="이미 처리 완료된 요청입니다.")
 
     admin_name = getattr(admin, "real_name", None) or admin.username

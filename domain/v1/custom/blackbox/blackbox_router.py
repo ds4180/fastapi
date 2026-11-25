@@ -130,7 +130,7 @@ def get_admin_summary(
     disposed_count = sum(1 for v in all_videos if v.disposal_date is not None)
     pending_requests = (
         db.query(BlackboxRequest)
-        .filter(BlackboxRequest.status == "PENDING", BlackboxRequest.is_deleted == False)
+        .filter(BlackboxRequest.status.in_(("PENDING", "PREPARING")), BlackboxRequest.is_deleted == False)
         .count()
     )
     device_count = db.query(BlackboxDevice).filter(BlackboxDevice.is_deleted == False).count()

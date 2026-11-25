@@ -125,7 +125,7 @@ class DriverRequestCreate(BaseModel):
 
 
 class AdminRequestProcess(BaseModel):
-    status: str  # COMPLETED | REJECTED
+    status: str  # PREPARING | COMPLETED | REJECTED
     replacement_video_id: Optional[int] = None
     admin_note: Optional[str] = None
 
@@ -133,6 +133,6 @@ class AdminRequestProcess(BaseModel):
     @classmethod
     def check_status(cls, v: str) -> str:
         norm = (v or "").strip().upper()
-        if norm not in {"COMPLETED", "REJECTED"}:
-            raise ValueError("처리 상태(status)는 COMPLETED 또는 REJECTED 이어야 합니다.")
+        if norm not in {"PREPARING", "COMPLETED", "REJECTED"}:
+            raise ValueError("처리 상태(status)는 PREPARING, COMPLETED 또는 REJECTED 이어야 합니다.")
         return norm

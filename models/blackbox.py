@@ -133,7 +133,7 @@ class BlackboxRequest(Base):
     reason_detail = Column(Text, nullable=True)
     incident_date = Column(DateTime, nullable=True)
 
-    status = Column(String(20), nullable=False, default="PENDING", index=True)  # PENDING | COMPLETED | REJECTED
+    status = Column(String(20), nullable=False, default="PENDING", index=True)  # PENDING | PREPARING | COMPLETED | REJECTED
     replacement_video_id = Column(Integer, ForeignKey("blackbox_videos.id"), nullable=True)
     replacement_video_no = Column(String(50), nullable=True)
     replacement_display_num = Column(String(3), nullable=True)
