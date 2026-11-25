@@ -128,12 +128,17 @@ def get_admin_dispatch_publish_status(
                 )
                 .count()
             )
+    meta = pub_map.get(date_key) if isinstance(pub_map.get(date_key), dict) else None
+    publish_count = int((meta or {}).get("publish_count") or (1 if meta else 0))
+    was_published = bool(meta and (meta.get("unpublished_at") or publish_count > 0))
     return {
         "target_date": date_key,
         "published": service.is_date_published(db, target_date),
+        "was_published": was_published,
+        "publish_count": publish_count,
         "confirmed": bool(total_count > 0 and confirmed_count >= total_count),
         "confirmed_count": confirmed_count,
-        "meta": pub_map.get(date_key),
+        "meta": meta,
         "saved_count": saved_count,
         "total_count": total_count,
     }
@@ -177,18 +182,23 @@ def trigger_announce_tomorrow_dispatch(
 ):
     """관리자가 명일 배차 고지 및 알림·웹푸시를 즉시 실행합니다."""
     res = service.announce_tomorrow_dispatch(db, force=True, trigger_user=admin)
+    is_reannounce = bool(res.get("is_reannounce", False))
     safe_log_audit(
         db=db,
         app_id="dispatch",
         log_type="CHANGE",
         action="DISPATCH_ANNOUNCE_NOW",
-        title=f"명일 배차 즉시 고지 ({res.get('target_date')})",
+        title=f"명일 배차 {'변경 재공지' if is_reannounce else '즉시 고지'} ({res.get('target_date')})",
         user=admin,
         resource_type="dispatch",
         resource_id=str(res.get("target_date")),
     )
     return {
-        "message": f"{res.get('target_date')} 명일 배차가 고지되었습니다.",
+        "message": (
+            f"{res.get('target_date')} 명일 배차가 변경 재공지(재배포)되었습니다."
+            if is_reannounce
+            else f"{res.get('target_date')} 명일 배차가 고지되었습니다."
+        ),
         **res,
     }
 

@@ -9,8 +9,19 @@ import hashlib
 import json
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def _now_kst() -> datetime:
+    """한국 표준시(Asia/Seoul) 기준 현재 시각을 반환합니다."""
+    try:
+        return datetime.now(KST)
+    except Exception:
+        return datetime.now(timezone(timedelta(hours=9)))
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_
@@ -57,6 +68,8 @@ DEFAULT_DISPATCH_SETTINGS: Dict[str, Any] = {
     "auto_announce_skip_if_confirmed": True,
     "auto_announce_title_template": "[명일 배차 고지] {target_date}",
     "auto_announce_body_template": "{target_date} 배차가 확정 고지되었습니다. 배차표에서 차량과 로번을 확인해 주세요.",
+    "reannounce_title_template": "[명일 배차 변경 재공지] {target_date}",
+    "reannounce_body_template": "{target_date} 배차가 수정되어 재배포되었습니다. 변경된 차량과 로번을 반드시 다시 확인해 주세요.",
     "announce_sender_min_rank": 4,
     # 2-1. 배차 확인(D-day/D-1) 및 예고(D+2+) 공개 정책 설정
     "confirm_d_day_always_open": True,
@@ -180,6 +193,14 @@ def get_dispatch_settings(db: Session) -> Dict[str, Any]:
         str(merged.get("auto_announce_body_template") or "").strip()
         or DEFAULT_DISPATCH_SETTINGS["auto_announce_body_template"]
     )
+    merged["reannounce_title_template"] = (
+        str(merged.get("reannounce_title_template") or "").strip()
+        or DEFAULT_DISPATCH_SETTINGS["reannounce_title_template"]
+    )
+    merged["reannounce_body_template"] = (
+        str(merged.get("reannounce_body_template") or "").strip()
+        or DEFAULT_DISPATCH_SETTINGS["reannounce_body_template"]
+    )
     merged["announce_sender_min_rank"] = _clamp_int(merged.get("announce_sender_min_rank"), 1, 10, 4)
     merged["confirm_d_day_always_open"] = bool(merged.get("confirm_d_day_always_open", True))
     merged["confirm_d1_require_announced"] = bool(merged.get("confirm_d1_require_announced", True))
@@ -245,6 +266,14 @@ def save_dispatch_settings(db: Session, payload: Dict[str, Any]) -> Dict[str, An
             str(payload.get("auto_announce_body_template") or "").strip()
             or DEFAULT_DISPATCH_SETTINGS["auto_announce_body_template"]
         ),
+        "reannounce_title_template": (
+            str(payload.get("reannounce_title_template") or "").strip()
+            or DEFAULT_DISPATCH_SETTINGS["reannounce_title_template"]
+        ),
+        "reannounce_body_template": (
+            str(payload.get("reannounce_body_template") or "").strip()
+            or DEFAULT_DISPATCH_SETTINGS["reannounce_body_template"]
+        ),
         "announce_sender_min_rank": _clamp_int(payload.get("announce_sender_min_rank"), 1, 10, 4),
         "confirm_d_day_always_open": bool(payload.get("confirm_d_day_always_open", True)),
         "confirm_d1_require_announced": bool(payload.get("confirm_d1_require_announced", True)),
@@ -281,16 +310,31 @@ def save_dispatch_settings(db: Session, payload: Dict[str, Any]) -> Dict[str, An
 
 
 def compute_preview_window(settings: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
-    """배차 예고 공개 범위(offsets 및 날짜 목록)를 계산합니다."""
-    cur = now or datetime.now()
+    """배차 예고 공개 범위(offsets 및 날짜 목록)를 계산합니다.
+
+    정책(공개 시각 전 전체 잠금):
+    - preview_enabled=False: 예고 일시 중지 (전체 잠금)
+    - preview_force_open=False 이고 현재 시각(KST) < preview_open_time:
+      해당일 공개 시각 이전이므로 예고 전체 잠금 (offsets=[], allowed_dates=[])
+    - preview_force_open=True 또는 현재 시각(KST) >= preview_open_time:
+      설정한 preview_start_offset ~ preview_start_offset + preview_days - 1 전체 공개
+    """
+    cur = now if now is not None else _now_kst()
+    if cur.tzinfo is not None:
+        cur = cur.astimezone(KST)
     today = cur.date()
     now_hhmm = cur.strftime("%H:%M")
+
+    open_time = _normalize_hhmm(
+        settings.get("preview_open_time"),
+        DEFAULT_DISPATCH_SETTINGS["preview_open_time"],
+    )
 
     if not settings.get("preview_enabled", True):
         return {
             "is_paused": True,
             "is_force_open": False,
-            "open_time": settings.get("preview_open_time", "17:00"),
+            "open_time": open_time,
             "min_offset": None,
             "max_offset": None,
             "offsets": [],
@@ -298,29 +342,33 @@ def compute_preview_window(settings: Dict[str, Any], now: Optional[datetime] = N
             "reason": settings.get("preview_pause_message") or DEFAULT_DISPATCH_SETTINGS["preview_pause_message"],
         }
 
-    start_offset = int(settings.get("preview_start_offset", 3))
-    days = int(settings.get("preview_days", 5))
-    open_time = str(settings.get("preview_open_time", "17:00"))
+    start_offset = int(settings.get("preview_start_offset", DEFAULT_DISPATCH_SETTINGS["preview_start_offset"]))
+    days = int(settings.get("preview_days", DEFAULT_DISPATCH_SETTINGS["preview_days"]))
     force_open = bool(settings.get("preview_force_open", False))
 
-    if force_open or now_hhmm >= open_time:
-        max_offset = start_offset + days - 1
-    else:
-        max_offset = start_offset + days - 2
+    if not force_open and now_hhmm < open_time:
+        return {
+            "is_paused": False,
+            "is_force_open": False,
+            "open_time": open_time,
+            "min_offset": None,
+            "max_offset": None,
+            "offsets": [],
+            "allowed_dates": [],
+            "reason": f"배차 예고는 매일 {open_time} 이후부터 확인할 수 있습니다.",
+        }
 
+    max_offset = start_offset + days - 1
     if max_offset < start_offset:
         offsets: List[int] = []
     else:
         offsets = list(range(start_offset, max_offset + 1))
 
     allowed_dates = [(today + timedelta(days=off)).isoformat() for off in offsets]
-    reason = ""
     if not offsets:
         reason = f"배차 예고는 매일 {open_time} 이후부터 확인할 수 있습니다."
     else:
         reason = f"조회 가능 범위: 오늘 기준 +{offsets[0]}일 ~ +{offsets[-1]}일"
-        if not force_open and now_hhmm < open_time:
-            reason += f" ({open_time} 이후 +{start_offset + days - 1}일 추가 공개)"
 
     return {
         "is_paused": False,
@@ -364,12 +412,13 @@ def resolve_route_fleet(
 
 def verify_custom_preview_access(db: Session, target_date: date) -> None:
     """일반 사원용 배차 조회 날짜 접근 가능 여부를 검증합니다."""
-    today = datetime.now().date()
+    now_kst = _now_kst()
+    today = now_kst.date()
     tomorrow = today + timedelta(days=1)
     settings = get_dispatch_settings(db)
     if target_date in (today, tomorrow):
         return
-    win = compute_preview_window(settings)
+    win = compute_preview_window(settings, now=now_kst)
     if win["is_paused"]:
         raise HTTPException(status_code=403, detail=win["reason"])
     if target_date.isoformat() not in win["allowed_dates"]:
@@ -392,6 +441,9 @@ def is_date_published(db: Session, target_date: date) -> bool:
     date_key = target_date.isoformat()
     pub_map = get_published_dates_map(db)
     if date_key in pub_map:
+        entry = pub_map.get(date_key)
+        if isinstance(entry, dict) and entry.get("published") is False:
+            return False
         return True
     # 하위 호환: 기존에 행 단위 ANNOUNCED로 저장된 날짜도 공개된 것으로 인정
     return (
@@ -409,20 +461,46 @@ def set_date_published(
     *,
     mode: str = "manual",
 ) -> Dict[str, Any]:
-    """특정 날짜의 배차 공개(배포) 여부를 설정합니다."""
+    """특정 날짜의 배차 공개(배포) 여부를 설정하고 재공지 이력을 관리합니다."""
     date_key = target_date.isoformat()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_kst = _now_kst()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M")
     row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_PUBLISHED_DATES_KEY).first()
     pub_map = dict(row.value) if (row and isinstance(row.value, dict)) else {}
 
     # 30일 이상 지난 오래된 키 정리
-    cutoff = (datetime.now().date() - timedelta(days=30)).isoformat()
+    cutoff = (now_kst.date() - timedelta(days=30)).isoformat()
     pub_map = {k: v for k, v in pub_map.items() if str(k) >= cutoff}
 
+    prev_meta = pub_map.get(date_key) if isinstance(pub_map.get(date_key), dict) else {}
+    prev_count = int(prev_meta.get("publish_count") or 0)
+    if prev_count == 0 and prev_meta:
+        # 하위 호환: publish_count가 없던 기존 공개 기록은 1회로 간주
+        prev_count = 1
+
+    is_reannounce = False
+    publish_count = prev_count
+
     if published:
-        pub_map[date_key] = {"published_at": now_str, "mode": mode}
+        is_reannounce = bool(prev_meta.get("unpublished_at")) or prev_count > 0
+        publish_count = prev_count + 1
+        pub_map[date_key] = {
+            "published": True,
+            "published_at": now_str,
+            "mode": mode,
+            "publish_count": publish_count,
+            "is_reannounce": is_reannounce,
+            "unpublished_at": prev_meta.get("unpublished_at"),
+        }
     else:
-        pub_map.pop(date_key, None)
+        # 공개 취소 이력을 보존해 재공지/재배포 시 별도 알림을 발송할 수 있도록 함
+        publish_count = max(1, prev_count)
+        pub_map[date_key] = {
+            **prev_meta,
+            "published": False,
+            "unpublished_at": now_str,
+            "publish_count": publish_count,
+        }
         # 공개 취소 시 확정/배포 상태를 저장 완료(DRAFT) 상태로 전환해 재수정 후 확정->공개 흐름을 따르도록 함
         db.query(Dispatch).filter(
             Dispatch.target_date == target_date,
@@ -443,6 +521,8 @@ def set_date_published(
     return {
         "target_date": date_key,
         "published": published,
+        "is_reannounce": is_reannounce,
+        "publish_count": publish_count,
         "meta": pub_map.get(date_key),
     }
 
@@ -570,7 +650,9 @@ def announce_tomorrow_dispatch(
         return {"status": "skipped_already_announced", "target_date": tomorrow_str, "updated_count": 0}
 
     db.commit()
-    set_date_published(db, tomorrow, True, mode="manual" if force else "auto")
+    pub_res = set_date_published(db, tomorrow, True, mode="manual" if force else "auto")
+    is_reannounce = bool(pub_res.get("is_reannounce", False))
+    publish_count = int(pub_res.get("publish_count") or 1)
 
     # 자동/수동 고지 실행 이력 기록 (수동 배포가 예약된 자동 배포를 막지 않도록 분리)
     state_row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_AUTO_ANNOUNCE_STATE_KEY).first()
@@ -600,11 +682,24 @@ def announce_tomorrow_dispatch(
         target_ids = [u.id for u in active_users if u.profile is None or u.profile.is_active is not False]
         min_rank = int(settings.get("announce_sender_min_rank", 4))
         sender = trigger_user or next((u for u in active_users if u.rank() >= min_rank), None)
-        title_tpl = str(settings.get("auto_announce_title_template") or "[명일 배차 고지] {target_date}")
-        body_tpl = str(
-            settings.get("auto_announce_body_template")
-            or "{target_date} 배차가 확정 고지되었습니다. 배차표에서 차량과 로번을 확인해 주세요."
-        )
+        if is_reannounce:
+            title_tpl = str(
+                settings.get("reannounce_title_template")
+                or DEFAULT_DISPATCH_SETTINGS["reannounce_title_template"]
+            )
+            body_tpl = str(
+                settings.get("reannounce_body_template")
+                or DEFAULT_DISPATCH_SETTINGS["reannounce_body_template"]
+            )
+        else:
+            title_tpl = str(
+                settings.get("auto_announce_title_template")
+                or DEFAULT_DISPATCH_SETTINGS["auto_announce_title_template"]
+            )
+            body_tpl = str(
+                settings.get("auto_announce_body_template")
+                or DEFAULT_DISPATCH_SETTINGS["auto_announce_body_template"]
+            )
         title = title_tpl.replace("{target_date}", tomorrow_str)
         msg = body_tpl.replace("{target_date}", tomorrow_str)
         if sender and target_ids:
@@ -617,7 +712,12 @@ def announce_tomorrow_dispatch(
                 target_user_ids=target_ids,
                 level=2,
                 link="/v1/custom/dispatch",
-                extra_payload={"target_date": tomorrow_str, "send_web_push": False},
+                extra_payload={
+                    "target_date": tomorrow_str,
+                    "is_reannounce": is_reannounce,
+                    "publish_count": publish_count,
+                    "send_web_push": False,
+                },
             )
         if is_push_domain_enabled(db, "dispatch_announce"):
             dispatch_push_async(
@@ -634,6 +734,8 @@ def announce_tomorrow_dispatch(
         "target_date": tomorrow_str,
         "updated_count": updated_count,
         "push_sent": push_sent,
+        "is_reannounce": is_reannounce,
+        "publish_count": publish_count,
     }
 
 
