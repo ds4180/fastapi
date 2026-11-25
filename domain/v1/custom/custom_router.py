@@ -4,7 +4,7 @@ from database import get_db
 from models import RouteMaster, RouteTimetable, Dispatch, User, DayOff
 from core.deps import get_current_user
 from domain.v1.admin import admin_schema
-from domain.v1.admin.admin_router import (
+from domain.v1.dispatch.dispatch_builder import (
     query_active_routes_for_date,
     build_daily_dispatch_rows,
 )

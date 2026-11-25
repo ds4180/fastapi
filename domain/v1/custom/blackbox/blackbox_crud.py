@@ -10,7 +10,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from models import BlackboxDevice, BlackboxVideo, BlackboxUsage, BlackboxRequest, User
-from domain.v1.admin.admin_router import load_vehicles_metadata
+from domain.v1.dispatch.dispatch_builder import load_vehicles_metadata
 
 
 def get_vehicle_pool() -> List[Dict[str, str]]:

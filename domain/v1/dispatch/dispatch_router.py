@@ -95,7 +95,7 @@ def get_admin_dispatch_publish_status(
     admin: User = Depends(check_dispatch_admin),
 ):
     """특정 날짜의 배차 공개(배포) 상태 및 저장 건수를 반환합니다."""
-    from domain.v1.admin.admin_router import query_active_routes_for_date
+    from domain.v1.dispatch.dispatch_builder import query_active_routes_for_date
     from models import Dispatch, RouteTimetable
 
     date_key = target_date.isoformat()

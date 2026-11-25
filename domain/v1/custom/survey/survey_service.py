@@ -41,7 +41,7 @@ def get_vehicle_context(user: Optional[User] = None) -> Dict[str, Any]:
 
     if user is not None:
         try:
-            from domain.v1.admin.admin_router import load_drivers_metadata
+            from domain.v1.dispatch.dispatch_builder import load_drivers_metadata
             _, vehicle_map, _ = load_drivers_metadata()
             for candidate in (getattr(user, "real_name", None), getattr(user, "username", None)):
                 if candidate and candidate.strip() in vehicle_map:

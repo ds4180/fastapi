@@ -549,7 +549,7 @@ def filter_custom_dispatch_rows(db: Session, target_date: date, rows: List[Dict[
 
 def get_dispatch_resources(db: Session) -> Dict[str, Any]:
     """배차 조율에 필요한 차량 풀, 기사 목록, 전역 설정을 반환합니다."""
-    from domain.v1.admin.admin_router import (
+    from domain.v1.dispatch.dispatch_builder import (
         _resolve_shared_data_path,
         load_vehicles_metadata,
     )
@@ -578,7 +578,10 @@ def announce_tomorrow_dispatch(
     trigger_user: Optional[User] = None,
 ) -> Dict[str, Any]:
     """명일(D+1) 배차를 일괄 확정(CONFIRMED)하고 인앱 알림 + 웹 푸시를 발송합니다."""
-    from domain.v1.admin.admin_router import query_active_routes_for_date
+    from domain.v1.dispatch.dispatch_builder import (
+        build_daily_dispatch_rows,
+        query_active_routes_for_date,
+    )
     from core.notify import safe_notify
     from domain.push.push_service import (
         is_push_domain_enabled,
@@ -599,8 +602,6 @@ def announce_tomorrow_dispatch(
     already_announced_all = True
 
     if route_ids:
-        from domain.v1.admin.admin_router import build_daily_dispatch_rows
-
         timetable_rows = (
             db.query(RouteTimetable)
             .filter(RouteTimetable.route_master_id.in_(route_ids))
