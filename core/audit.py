@@ -116,12 +116,32 @@ def get_user_summary(user: Optional[User]) -> str:
 
 def sanitize_diff(diff_payload: Optional[list]) -> list:
     """
-    diff_payload 내부의 민감 정보(비밀번호, 주민번호, 계좌번호 등)를
+    diff_payload 내부의 민감 정보(비밀번호, 주민번호, 계좌번호 등)와
+    관제 정책(observability_settings.audit_extra_mask_fields)에 등록된 추가 필드를
     '********'로 자동 마스킹하여 개인정보 침해를 원천 방지합니다.
     """
     if not diff_payload or not isinstance(diff_payload, list):
         return []
 
+    mask_enabled = True
+    extra_fields: set = set()
+    try:
+        from domain.system.observability_policy_service import get_cached_observability_settings
+
+        obs_cfg = get_cached_observability_settings()
+        mask_enabled = bool(obs_cfg.get("audit_mask_sensitive_fields", True))
+        extra_fields = {
+            str(f).strip().lower()
+            for f in (obs_cfg.get("audit_extra_mask_fields") or [])
+            if str(f).strip()
+        }
+    except Exception:
+        pass
+
+    if not mask_enabled:
+        return [dict(item) for item in diff_payload if isinstance(item, dict)]
+
+    all_sensitive = SENSITIVE_FIELDS | extra_fields
     sanitized = []
     for item in diff_payload:
         if not isinstance(item, dict):
@@ -129,8 +149,9 @@ def sanitize_diff(diff_payload: Optional[list]) -> list:
         entry = dict(item)
         field_name = str(entry.get("field", "")).lower()
 
-        # 민감 필드에 해당하거나 'password'/'secret'/'token'이 포함된 경우 마스킹
-        if field_name in SENSITIVE_FIELDS or any(s in field_name for s in ["password", "secret", "token"]):
+        if field_name in all_sensitive or any(s in field_name for s in ("password", "secret", "token")) or any(
+            ext in field_name for ext in extra_fields
+        ):
             if "from" in entry and entry["from"] is not None:
                 entry["from"] = "********"
             if "to" in entry and entry["to"] is not None:

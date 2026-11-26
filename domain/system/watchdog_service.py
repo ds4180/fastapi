@@ -33,15 +33,15 @@ DEFAULT_WATCHDOG_CONFIG: Dict[str, Any] = {
 
 # 🛡️ 메모리 기반 중복 경보 방지 쿨다운 딕셔너리 (Key: alarm_type, Value: datetime)
 _COOLDOWN_MAP: Dict[str, datetime] = {}
-COOLDOWN_MINUTES = 15  # 동일 경보 15분 내 중복 발송 방지
+COOLDOWN_MINUTES = 15  # 기본 쿨다운 폴백 (실제 운영 시 observability_settings.watchdog_cooldown_minutes 적용)
 
 
-def _is_in_cooldown(alarm_type: str) -> bool:
-    """동일 경보의 쿨다운 경과 여부 확인"""
+def _is_in_cooldown(alarm_type: str, cooldown_minutes: int = COOLDOWN_MINUTES) -> bool:
+    """동일 경보의 쿨다운 경과 여부 확인 (동적 정책 쿨다운 반영)"""
     last_time = _COOLDOWN_MAP.get(alarm_type)
     if not last_time:
         return False
-    if datetime.now() - last_time < timedelta(minutes=COOLDOWN_MINUTES):
+    if datetime.now() - last_time < timedelta(minutes=max(1, int(cooldown_minutes or COOLDOWN_MINUTES))):
         return True
     return False
 
@@ -53,26 +53,31 @@ def _set_cooldown(alarm_type: str):
 
 def get_watchdog_settings(db: Session) -> Dict[str, Any]:
     """
-    DB의 system_config 테이블에서 Watchdog 설정을 조회하여 기본값과 병합 반환합니다.
+    통합 관제 정책(observability_settings) 및 기존 스칼라 키를 통합 조회하여
+    Watchdog 실행 정책을 반환합니다.
     """
-    settings = dict(DEFAULT_WATCHDOG_CONFIG)
-    keys = list(DEFAULT_WATCHDOG_CONFIG.keys())
+    from domain.system.observability_policy_service import get_cached_observability_settings
 
-    configs = db.query(SystemConfig).filter(SystemConfig.key.in_(keys)).all()
-    for cfg in configs:
-        # JSONType/JSONB로 저장된 값 파싱
-        val = cfg.value
-        if isinstance(val, dict) and "value" in val:
-            val = val["value"]
-        settings[cfg.key] = val
+    obs_cfg = get_cached_observability_settings(db)
+    settings: Dict[str, Any] = {
+        "watchdog_enabled": bool(obs_cfg.get("watchdog_enabled", True)),
+        "watchdog_fail_threshold": DEFAULT_WATCHDOG_CONFIG["watchdog_fail_threshold"],
+        "watchdog_security_alert": bool(obs_cfg.get("watchdog_security_alert", True)),
+        "watchdog_instruction_delay_minutes": int(obs_cfg.get("watchdog_instruction_delay_minutes", 30)),
+        "watchdog_instruction_min_count": int(obs_cfg.get("watchdog_instruction_min_count", 3)),
+        "watchdog_cooldown_minutes": int(obs_cfg.get("watchdog_cooldown_minutes", COOLDOWN_MINUTES)),
+        "security_alert_ignore_actions": list(obs_cfg.get("security_alert_ignore_actions") or []),
+    }
 
-    # 타입 캐스팅 보정
+    # watchdog_fail_threshold는 task_settings/스칼라 키에서 보조 로드
     try:
-        settings["watchdog_enabled"] = bool(settings["watchdog_enabled"])
-        settings["watchdog_fail_threshold"] = int(settings["watchdog_fail_threshold"])
-        settings["watchdog_security_alert"] = bool(settings["watchdog_security_alert"])
-        settings["watchdog_instruction_delay_minutes"] = int(settings["watchdog_instruction_delay_minutes"])
-    except (ValueError, TypeError):
+        cfg_row = db.query(SystemConfig).filter(SystemConfig.key == "watchdog_fail_threshold").first()
+        if cfg_row:
+            val = cfg_row.value
+            if isinstance(val, dict) and "value" in val:
+                val = val["value"]
+            settings["watchdog_fail_threshold"] = int(val)
+    except Exception:
         pass
 
     return settings
@@ -103,7 +108,7 @@ def check_and_alert_task_failure(db: Session, failed_task_id: Optional[int] = No
 
     if fail_count >= threshold:
         cooldown_key = "task_failure"
-        if _is_in_cooldown(cooldown_key):
+        if _is_in_cooldown(cooldown_key, cfg.get("watchdog_cooldown_minutes", COOLDOWN_MINUTES)):
             logger.info(f"⏳ Watchdog: 태스크 실패 쿨다운 중 (누적: {fail_count}건)")
             return False
 
@@ -157,13 +162,22 @@ def check_and_alert_security_violation(db: Session, audit_log: AuditLog) -> bool
     if not cfg.get("watchdog_enabled", True) or not cfg.get("watchdog_security_alert", True):
         return False
 
-    # 📌 관리자의 정상적인 통제 행위 및 세션 강제 추방은 보안 침해 경보 대상에서 제외
-    NORMAL_ACTIONS = {"SESSION_KICKED", "SESSION_REVOKED", "ADMIN_KICK", "PERM_CHANGED", "LOGIN_SUCCESS", "LOGOUT"}
-    if audit_log.action in NORMAL_ACTIONS or (audit_log.metadata_payload and audit_log.metadata_payload.get("admin_id")):
+    # 📌 정책에 등록된 정상 관리자 통제 행위는 보안 침해 경보 대상에서 제외
+    normal_actions = set(cfg.get("security_alert_ignore_actions") or []) | {
+        "SESSION_KICKED",
+        "SESSION_REVOKED",
+        "ADMIN_KICK",
+        "PERM_CHANGED",
+        "LOGIN_SUCCESS",
+        "LOGOUT",
+    }
+    if (audit_log.action or "").upper() in normal_actions or (
+        audit_log.metadata_payload and audit_log.metadata_payload.get("admin_id")
+    ):
         return False
 
     cooldown_key = f"security_{audit_log.app_id or 'unknown'}"
-    if _is_in_cooldown(cooldown_key):
+    if _is_in_cooldown(cooldown_key, cfg.get("watchdog_cooldown_minutes", COOLDOWN_MINUTES)):
         return False
 
     _set_cooldown(cooldown_key)
@@ -204,9 +218,10 @@ def check_and_alert_instruction_delays(db: Session) -> bool:
         )
     ).all()
 
-    if len(delayed_instructions) >= 3:
+    min_count = max(1, int(cfg.get("watchdog_instruction_min_count", 3)))
+    if len(delayed_instructions) >= min_count:
         cooldown_key = "instruction_delay"
-        if _is_in_cooldown(cooldown_key):
+        if _is_in_cooldown(cooldown_key, cfg.get("watchdog_cooldown_minutes", COOLDOWN_MINUTES)):
             return False
 
         _set_cooldown(cooldown_key)
