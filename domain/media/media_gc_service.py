@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, not_
 from models import MediaAsset
 from domain.media import media_config as config
+from domain.media.media_policy_service import get_media_settings
 
 logger = logging.getLogger("media_gc")
 logger.setLevel(logging.INFO)
@@ -13,6 +14,7 @@ logger.setLevel(logging.INFO)
 class MediaGCService:
     def __init__(self, db: Session):
         self.db = db
+        self.settings = get_media_settings(db)
         self.today_str = datetime.now().strftime("%Y%m%d")
         self.gc_del_root = os.path.join(config.MEDIA_ROOT, f".DEL_GC_{self.today_str}")
 
@@ -226,14 +228,15 @@ class MediaGCService:
             pass
         return False
 
-    def cleanup_retention(self, days=30):
+    def cleanup_retention(self, days: int | None = None):
         """
         [작업 4] 보관 기한 만료 폴더 및 개별 격리 파일 영구 삭제
-        루트 및 하위 티어 내 .DEL_ / DEL_ 격리 폴더·파일 중 설정 기간(기본 30일)이 지난 항목 영구 파기
+        루트 및 하위 티어 내 .DEL_ / DEL_ 격리 폴더·파일 중 동적 설정 기간(기본 30일)이 지난 항목 영구 파기
         """
+        effective_days = int(days if days is not None else self.settings.get("isolation_retention_days", 30))
         deleted_folders = []
         deleted_files = []
-        limit_date = datetime.now() - timedelta(days=days)
+        limit_date = datetime.now() - timedelta(days=effective_days)
 
         # 1. 루트 레벨의 .DEL_ / DEL_ 격리 폴더 영구 삭제
         for item in os.listdir(config.MEDIA_ROOT):
@@ -339,18 +342,26 @@ class MediaGCService:
         
         return {"status": "success", "removed_count": removed_count}
 
-    def cleanup_expired_originals(self, soft_days=60):
+    def cleanup_expired_originals(self, soft_days: int | None = None):
         """
         [작업 6] 원본 이미지(IMG_) 시한부 수명주기 관리 - 소프트 격리 전담
-        - 60일 경과: 원본 파일명을 .DEL_ORIG_{오늘날짜}_{파일명}으로 격리, has_original=False (소프트 삭제)
-        - 격리된 .DEL_ORIG_ 파일의 최종 물리 영구 파기는 [작업 4] 보관 기한 만료 GC(cleanup_retention)가
-          격리일로부터 30일(총 90일) 경과 시 알아서 단일 책임으로 영구 삭제합니다 (중복 명령 제거).
-        - 썸네일 3종(SM, MD, LG)은 절대 삭제하지 않고 영구 보존!
+        - 동적 설정 enable_original_auto_expiry=False 시 즉시 건너뜀 (원본 영구 보존)
+        - 설정된 original_keep_days(기본 60일) 경과 시 원본 파일명을 .DEL_ORIG_{오늘날짜}_{파일명}으로 격리
         """
         from sqlalchemy.orm.attributes import flag_modified
 
+        if soft_days is None and not self.settings.get("enable_original_auto_expiry", True):
+            return {
+                "status": "skipped",
+                "reason": "disabled_by_policy",
+                "soft_isolated_count": 0,
+            }
+
+        effective_soft_days = int(
+            soft_days if soft_days is not None else self.settings.get("original_keep_days", 60)
+        )
         now = datetime.now()
-        soft_limit_date = now - timedelta(days=soft_days)
+        soft_limit_date = now - timedelta(days=effective_soft_days)
         soft_isolated_count = 0
 
         # 소프트 격리 대상: created_at <= 60일 전인 정상 이미지 자산

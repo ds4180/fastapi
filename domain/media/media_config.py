@@ -1,9 +1,10 @@
 import os
 
 # ==============================================================================
-# [Media System Global Configuration v3.1]
+# [Media System Physical & Default Constants (domain/media/media_config.py)]
 # ==============================================================================
-# 이 파일의 설정은 시스템 전역 미디어 자산의 저장 및 네이밍 규칙을 결정합니다.
+# 물리 디스크 구조·접두어·예약어 등 불변 규격 상수와 동적 정책의 초기 기본값을 정의합니다.
+# 운영 중 변경 가능한 비즈니스 정책은 media_policy_service (SystemConfig: media_settings)에서 조회합니다.
 # ==============================================================================
 
 # 1. 물리 저장소 루트 (컨테이너 내부 경로)
@@ -14,35 +15,44 @@ MEDIA_TIERS = {
     "PUBLIC": "PUBLIC",
     "PROTECTED": "PROTECTED",
     "PRIVATE": "PRIVATE",
-    "SYSTEM": "SYSTEM"
+    "SYSTEM": "SYSTEM",
 }
 
 # 3. 미디어 카테고리 정의
 MEDIA_CATEGORIES = {
     "IMAGE": "image",
     "DOCUMENT": "document",
-    "ARCHIVE": "archive"
+    "ARCHIVE": "archive",
 }
 
-# 4. 네이밍 접두어 (Prefix) - v3.3 표준 (숨김/격리는 '.' 접두어 적용)
+ARCHIVE_EXTENSIONS = {".zip", ".tar", ".gz", ".7z", ".rar"}
+
+# 4. 네이밍 접두어 (Prefix) - 숨김/격리는 '.' 접두어 적용
 PREFIX = {
     "IMAGE": "IMG_",
     "DOC": "DOC_",
     "THUMB": "TMB_",
-    "DELETE": ".DEL_"
+    "DELETE": ".DEL_",
+    "DELETE_ORIG": ".DEL_ORIG_",
 }
 
-# 5. 썸네일 설정
-THUMB_FOLDER_NAME = "THUMB" # 기존 thumbnails에서 THUMB로 변경
+# 5. 썸네일 폴더 및 예약어 SSOT
+THUMB_FOLDER_NAME = "THUMB"
+LEGACY_THUMB_FOLDER_NAME = "thumbnails"
+
+RESERVED_FOLDER_NAMES = {"THUMB", "THUMBNAILS", "TMP"}
+RESERVED_ROOT_SUBFOLDERS = {"PUBLIC", "PROTECTED", "PRIVATE", "SYSTEM", "USERS", "GLOBAL"}
+RESERVED_FOLDER_PREFIXES = (".", "DEL_")
+
+# 6. 동적 설정 폴백용 기본 상수 (하위 호환 유지)
 WEBP_QUALITY = 85
-
-# 썸네일 규격 및 파일명 접미어 (Suffix) - 대문자 고정
 MEDIA_THUMB_CONFIG = {
-    "SM": {"size": (300, 300), "suffix": "SM"}, # 리스트용
-    "MD": {"size": (900, 900), "suffix": "MD"}, # 상세페이지용
-    "LG": {"size": (1920, 1920), "suffix": "LG"} # 원본급 확대용
+    "SM": {"size": (300, 300), "suffix": "SM"},
+    "MD": {"size": (900, 900), "suffix": "MD"},
+    "LG": {"size": (1920, 1920), "suffix": "LG"},
 }
-
-# 6. 기타 설정
-MAX_FILE_SIZE = 100 * 1024 * 1024 # 100MB
-ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.docx', '.xlsx', '.zip'}
+MAX_FILE_SIZE = 100 * 1024 * 1024
+ALLOWED_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp",
+    ".pdf", ".docx", ".xlsx", ".zip", ".hwp", ".txt", ".csv",
+}

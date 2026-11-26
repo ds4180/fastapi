@@ -103,38 +103,42 @@ async def handle_thumb_gen(task: SystemTask, db: Session):
         task.progress_pct = 100
         return {"status": "cancelled", "reason": f"원본 파일을 찾을 수 없습니다: {abs_file_path}"}
 
-    # 이미지 처리
+    # 이미지 처리 (동적 정책 해상도 및 WebP 품질 반영)
+    from domain.media.media_policy_service import get_media_settings, get_thumb_specs_from_settings
+    from domain.media.media_explorer_service import extract_asset_uuid
+
+    settings = get_media_settings(db)
+    thumb_specs = get_thumb_specs_from_settings(settings)
+    webp_quality = int(settings.get("webp_quality", config.WEBP_QUALITY))
+
     with Image.open(abs_file_path) as img:
         meta_info = asset.meta_info or {}
-        if "thumbs" not in meta_info: meta_info["thumbs"] = {}
-        
+        if "thumbs" not in meta_info:
+            meta_info["thumbs"] = {}
+
         dir_name = os.path.dirname(abs_file_path)
         thumb_dir = os.path.join(dir_name, config.THUMB_FOLDER_NAME)
         media_service.safe_makedirs(thumb_dir)
-        
-        # 파일명에서 UUID 추출 (IMG_uuid.JPG -> uuid)
-        base_name = os.path.basename(asset.file_path)
-        unique_id = base_name.replace(config.PREFIX['IMAGE'], "").split('.')[0]
-        
+
+        unique_id = extract_asset_uuid(asset.file_path)
+
         if img.mode in ("P", "CMYK"):
             img = img.convert("RGB")
-            
+
         # SM, MD, LG 사이즈 비동기 생성 (전체 복구 지원)
-        for key in ["SM", "MD", "LG"]:
-            cfg = config.MEDIA_THUMB_CONFIG[key]
+        for key in ("SM", "MD", "LG"):
+            cfg = thumb_specs[key]
             t_img = img.copy()
             t_img.thumbnail(cfg["size"], Image.Resampling.LANCZOS)
-            
-            # TMB_{uuid}_{SIZE}.WEBP
+
             t_filename = f"{config.PREFIX['THUMB']}{unique_id}_{cfg['suffix']}.WEBP"
             t_abs_path = os.path.join(thumb_dir, t_filename)
             t_rel_path = os.path.join(os.path.dirname(asset.file_path), config.THUMB_FOLDER_NAME, t_filename).replace("\\", "/")
-            
-            t_img.save(t_abs_path, "WEBP", quality=config.WEBP_QUALITY)
-            os.chmod(t_abs_path, 0o644) # [v3.2] 비동기 썸네일 읽기 권한 보장
+
+            t_img.save(t_abs_path, "WEBP", quality=webp_quality)
+            os.chmod(t_abs_path, 0o644)
             meta_info["thumbs"][key.lower()] = t_rel_path
-            
-            # SM 사이즈인 경우 레거시 필드인 thumbnail_path도 함께 업데이트
+
             if key == "SM":
                 asset.thumbnail_path = t_rel_path
 
@@ -166,41 +170,54 @@ async def handle_media_backup(task: SystemTask, db: Session):
     success_count = 0
     errors = []
     
+    from domain.media.media_explorer_service import resolve_best_fallback_abs
+
     assets = db.query(MediaAsset).filter(MediaAsset.id.in_(asset_ids)).all()
     for asset in assets:
         try:
-            src_path = os.path.join(config.MEDIA_ROOT, asset.file_path)
-            if not os.path.exists(src_path):
+            src_path, resolved_display, used_fallback_thumb = resolve_best_fallback_abs(asset)
+            if not src_path:
                 errors.append(f"Source not found: {asset.original_name}")
                 continue
-                
+
             category_dir = "IMAGE" if asset.category == "image" else "DOCUMENT"
             target_dir = os.path.join(backup_root, category_dir)
             media_service.safe_makedirs(target_dir)
-            
-            dst_path = os.path.join(target_dir, asset.original_name)
-            # 중복 회피
-            counter = 1
-            name, ext = os.path.splitext(asset.original_name)
-            while os.path.exists(dst_path):
-                dst_path = os.path.join(target_dir, f"{name}({counter}){ext}")
-                counter += 1
-                
+
+            backup_uuid = str(uuid.uuid4())
+            if asset.category == "image":
+                ext = ".WEBP" if used_fallback_thumb else (os.path.splitext(src_path)[1].upper() or ".JPG")
+                dst_filename = f"{config.PREFIX['IMAGE']}{backup_uuid}{ext}"
+                orig_display = resolved_display
+            else:
+                orig_stem, orig_ext = os.path.splitext(asset.original_name)
+                ext = (orig_ext or os.path.splitext(src_path)[1]).upper()
+                dst_filename = f"{config.PREFIX['DOC']}{backup_uuid[:8]}_{orig_stem or 'backup'}{ext}"
+                orig_display = asset.original_name
+
+            dst_path = os.path.join(target_dir, dst_filename)
             shutil.copy2(src_path, dst_path)
             os.chmod(dst_path, 0o644) # [v3.2] 백업 파일 읽기 권한 보장
-            
+
+            actual_size = os.path.getsize(dst_path)
+            actual_mime = "image/webp" if used_fallback_thumb else asset.mime_type
+
             # DB 레코드 생성
             new_asset = MediaAsset(
                 user_id=user_id,
                 access_level="PRIVATE",
                 app_id="admin_backup",
                 target_id=today_str,
-                original_name=os.path.basename(dst_path),
-                file_path=os.path.join("PRIVATE", backup_sub_path, category_dir, os.path.basename(dst_path)),
-                file_size=asset.file_size,
-                mime_type=asset.mime_type,
+                original_name=orig_display,
+                file_path=os.path.join("PRIVATE", backup_sub_path, category_dir, dst_filename).replace("\\", "/"),
+                file_size=actual_size,
+                mime_type=actual_mime,
                 category=asset.category,
-                meta_info={} 
+                meta_info={
+                    "original_name": orig_display,
+                    "backed_up_from": asset.id,
+                    "has_original": True,
+                }
             )
             db.add(new_asset)
             db.flush() # ID 확보
@@ -229,13 +246,11 @@ async def handle_media_gc(task: SystemTask, db: Session):
     [v3.2] 시스템 가비지 컬렉션(GC) 핸들러
     """
     from domain.media.media_gc_service import MediaGCService
-    
-    # payload에서 실행할 작업 인덱스 목록을 가져옴 (기본값: [1,2,3,4,5,6] 전체)
-    task_indices = task.payload.get("indices", [1, 2, 3, 4, 5, 6])
-    
+
     service = MediaGCService(db)
+    task_indices = task.payload.get("indices") or service.settings.get("default_gc_indices", [1, 2, 3, 4, 5, 6])
     logger.info(f"🧹 시스템 정리를 시작합니다 (작업: {task_indices})")
-    
+
     results = service.run_tasks(task_indices)
     
     return {"status": "finished", "results": results}
