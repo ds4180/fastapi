@@ -136,30 +136,34 @@ async def create_alert(
             if uid_s.strip().isdigit():
                 target_uids.append(int(uid_s.strip()))
 
-    send_push_flag = (
-        bool(alert_create.send_web_push)
-        if alert_create.send_web_push is not None
-        else bool(alert_cfg["default_send_web_push"])
-    )
-    if not send_push_flag and cat in ("INSTRUCTION", "NOTICE", "URGENT_NOTICE"):
-        try:
-            from domain.push.push_service import is_push_domain_enabled
-            if is_push_domain_enabled(db, "alert_instruction"):
-                send_push_flag = True
-        except Exception:
-            pass
+    # 🔔 Web Push 발송 여부 결정 우선순위:
+    # 1순위: /v1/admin/alerts 생성 요청에서 명시적으로 전달한 send_web_push (True/False 절대 존중)
+    # 2순위: 미지정(None) 시 alerts 정책 기본값(default_send_web_push) 적용
+    # 3순위: 여전히 False이고 L3 이상 지시/긴급공지인 경우에만 pushs/config 전역 기본값(alert_instruction) 폴백
+    if alert_create.send_web_push is not None:
+        send_push_flag = bool(alert_create.send_web_push)
+    else:
+        send_push_flag = bool(alert_cfg["default_send_web_push"])
+        if not send_push_flag and db_alert.level >= 3 and cat in ("INSTRUCTION", "URGENT_NOTICE"):
+            try:
+                from domain.push.push_service import is_push_domain_enabled
+                if is_push_domain_enabled(db, "alert_instruction"):
+                    send_push_flag = True
+            except Exception:
+                pass
 
     save_to_inbox = (
         bool(alert_create.save_to_inbox)
         if alert_create.save_to_inbox is not None
         else bool(alert_cfg["default_save_to_inbox"])
     )
+    inbox_title = format_alert_inbox_title(alert_create.message, cat, alert_cfg)
     if save_to_inbox:
         from core.notify import safe_notify
         safe_notify(
             db=db,
             category=cat,
-            title=format_alert_inbox_title(alert_create.message, cat, alert_cfg),
+            title=inbox_title,
             message=alert_create.message,
             sender=user,
             target_user_ids=target_uids if target_uids else None,
@@ -173,6 +177,35 @@ async def create_alert(
                 "send_web_push": send_push_flag
             }
         )
+    elif send_push_flag:
+        # 알림함 미기록("팝업만")이라도 사용자가 Web Push를 명시적으로 켠 경우 대상에 맞춰 푸시 발송
+        try:
+            from core.notify import resolve_target_user_ids
+            from domain.push.push_service import send_push_to_users
+
+            resolved_uids = resolve_target_user_ids(
+                db,
+                target_user_ids=target_uids if target_uids else None,
+                target_groups=[alert_create.target_group] if alert_create.target_group else None,
+            )
+            push_url = alert_create.redirect_url or "/"
+            if resolved_uids:
+                background_tasks.add_task(
+                    send_push_to_users,
+                    user_ids=list(resolved_uids),
+                    title=inbox_title,
+                    body=alert_create.message,
+                    url=push_url,
+                )
+            elif not target_uids and not alert_create.target_group:
+                background_tasks.add_task(
+                    send_push_to_all,
+                    title=inbox_title,
+                    body=alert_create.message,
+                    url=push_url,
+                )
+        except Exception:
+            pass
 
     # 🔔 실시간 웹소켓 갱신 신호 브로드캐스트 (기존 레거시 팝업/토스트 화면 동기화)
     background_tasks.add_task(manager.broadcast, {"type": "new_alert"})

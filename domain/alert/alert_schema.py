@@ -42,8 +42,8 @@ class AlertCreate(BaseModel):
     category: Optional[str] = "NOTIFICATION"
     confirm_text: str = "확인하였습니다"
     reset_sec: int = 0
-    send_web_push: Optional[bool] = False
-    save_to_inbox: Optional[bool] = True
+    send_web_push: Optional[bool] = None
+    save_to_inbox: Optional[bool] = None
 
 class AlertUpdate(BaseModel):
     """
