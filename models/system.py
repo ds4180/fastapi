@@ -140,7 +140,7 @@ class SystemTask(Base):
 
     priority = Column(Integer, default=5, index=True)          # 우선순위 (1: 매우급함, 10: 여유있음)
     unique_key = Column(String(100), unique=True)              # 중복 작업 방지 키
-    parent_id = Column(Integer, ForeignKey("system_tasks.id")) # 연쇄 작업 부모 ID
+    parent_id = Column(Integer, ForeignKey("system_tasks.id", ondelete="SET NULL")) # 연쇄 작업 부모 ID
     on_parent_failure = Column(String(20), default="CANCEL")   # 부모 실패 시 정책
     
     scheduled_at = Column(DateTime, default=datetime.now, index=True) # 실행 예정 시각

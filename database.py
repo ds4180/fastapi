@@ -6,13 +6,16 @@ from core.config import settings
 SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
 
 # 💡 [DB 커넥션 풀 안정성 설정]:
-# - 풀 개수(pool_size=5, max_overflow=10)는 메모리 점유와 컨텍스트 스위칭 방지를 위해 기본값을 현행 유지합니다.
+# - pool_size / max_overflow / pool_timeout / pool_recycle은 .env 또는 docker-compose environment로 언제든 조절 가능.
+# - 기본값(pool_size=10, max_overflow=20 -> 최대 30개)은 PostgreSQL max_connections(100) 대비 안전한 탄력 한도.
 # - pool_pre_ping=True: 커넥션을 사용할 때 DB 연결이 살아있는지 먼저 확인하여 끊어진 유휴 연결 에러(500)를 자동 복구합니다.
-# - pool_recycle=1800: 30분(1800초)마다 오래된 커넥션을 안전하게 갱신하여 장시간 구동 시 메모리 누수를 방지합니다.
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT,
+    pool_recycle=settings.DB_POOL_RECYCLE,
     pool_pre_ping=True,
-    pool_recycle=1800,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

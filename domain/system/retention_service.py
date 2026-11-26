@@ -140,14 +140,22 @@ def run_data_retention_gc(db: Session, rd=None) -> Dict[str, Any]:
     # 1. Redis 인메모리 GC
     redis_res = clean_redis_keys(rd, dynamic_ttl_hours=cfg["retention_redis_dynamic_hours"])
 
-    # 2. 백그라운드 태스크 로그 정리
+    # 2. 백그라운드 태스크 로그 정리 (부모-자식 parent_id 사슬 FK 충돌 방어 및 CANCELLED 포함)
     task_threshold = now - timedelta(days=cfg["retention_system_task_days"])
-    deleted_tasks = db.query(SystemTask).filter(
-        and_(
-            SystemTask.status.in_(["SUCCESS", "FAILED"]),
-            SystemTask.completed_at <= task_threshold
-        )
-    ).delete(synchronize_session=False)
+    expired_task_cond = and_(
+        SystemTask.status.in_(["SUCCESS", "FAILED", "CANCELLED"]),
+        or_(
+            and_(SystemTask.completed_at.isnot(None), SystemTask.completed_at <= task_threshold),
+            and_(SystemTask.completed_at.is_(None), SystemTask.created_at <= task_threshold),
+        ),
+    )
+    expired_task_ids_subq = db.query(SystemTask.id).filter(expired_task_cond).subquery()
+    # 삭제 대상 부모 행을 참조하는 생존 자식 행의 parent_id를 먼저 NULL 해제 (DB FK 안전 보강)
+    db.query(SystemTask).filter(
+        SystemTask.parent_id.in_(db.query(expired_task_ids_subq.c.id))
+    ).update({SystemTask.parent_id: None}, synchronize_session=False)
+
+    deleted_tasks = db.query(SystemTask).filter(expired_task_cond).delete(synchronize_session=False)
 
     # 3. 종료·추방·자연만료(EXPIRED 포함) 세션 이력 정리
     session_threshold = now - timedelta(days=cfg["retention_session_history_days"])

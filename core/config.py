@@ -47,12 +47,16 @@ class Settings:
     VERSION: str = "2.0.0"
     DEBUG: bool = os.getenv("DEBUG", "False").lower() in ("true", "1", "t")
 
-    # 📌 [2] 데이터베이스 접속 주소 (PostgreSQL)
+    # 📌 [2] 데이터베이스 접속 주소 및 커넥션 풀 설정 (PostgreSQL)
     # 도커 내부망에서는 호스트명 'db'를 사용합니다.
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL", 
         "postgresql+psycopg://lee:1234@db:5432/bus_db"
     )
+    DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "10"))
+    DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+    DB_POOL_TIMEOUT: int = int(os.getenv("DB_POOL_TIMEOUT", "15"))
+    DB_POOL_RECYCLE: int = int(os.getenv("DB_POOL_RECYCLE", "1800"))
 
     # 📌 [3] Redis 실시간 캐시 및 멀티 디바이스 세션 설정
     # 도커 내부망에서는 서비스명 'redis'로 접근합니다.

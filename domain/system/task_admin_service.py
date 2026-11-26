@@ -184,6 +184,32 @@ def retry_task_by_id(db: Session, task_id: int, admin_username: str) -> SystemTa
     if task.status == "RUNNING":
         raise HTTPException(status_code=400, detail="현재 실행 중인 태스크는 재시도할 수 없습니다.")
 
+    # 🛡️ 정기 스케줄(Cron/Interval) 중복 증식 방지 가드:
+    # 이미 대기/실행 중인 차기 회차가 존재하면 과거 이력 재시도로 병렬 중복 체인이 생기는 것을 차단합니다.
+    if task.cron_expression or task.repeat_interval:
+        dup_query = db.query(SystemTask).filter(
+            SystemTask.id != task.id,
+            SystemTask.task_type == task.task_type,
+            or_(SystemTask.cron_expression.is_not(None), SystemTask.repeat_interval.is_not(None)),
+            SystemTask.status.in_(["PENDING", "RUNNING"]),
+        )
+        if task.unique_key:
+            base_parts = task.unique_key.split(":")
+            base_key = ":".join(base_parts[:2]) if len(base_parts) >= 2 else task.unique_key
+            dup_query = dup_query.filter(
+                or_(SystemTask.unique_key.like(f"{base_key}%"), SystemTask.unique_key.is_(None))
+            )
+        active_sibling = dup_query.order_by(SystemTask.id.desc()).first()
+        if active_sibling:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"동일한 정기 스케줄의 활성 회차(#{active_sibling.id}, {active_sibling.status})가 "
+                    "이미 존재하여 중복 증식을 방지합니다. 즉시 실행이 필요하면 단발성 수동 태스크를 등록하거나 "
+                    "대기 중인 회차의 예약 시각을 변경하세요."
+                ),
+            )
+
     task.status = "PENDING"
     task.retry_count = 0
     task.worker_id = None
@@ -222,14 +248,19 @@ def clear_tasks_by_status(db: Session, target_status: str = "FAILED") -> int:
     if clean_status not in allowed:
         raise HTTPException(status_code=400, detail="일괄 정리는 FAILED, CANCELLED, SUCCESS 상태만 허용됩니다.")
 
-    rows = db.query(SystemTask).filter(SystemTask.status == clean_status).all()
-    count = len(rows)
-    if count == 0:
-        return 0
-    for row in rows:
-        db.delete(row)
+    # ⚡ 대량 행(1만 건+)도 메모리 적재 없이 단 2방의 벌크 SQL로 안전 삭제
+    target_ids_subq = db.query(SystemTask.id).filter(SystemTask.status == clean_status).subquery()
+    db.query(SystemTask).filter(
+        SystemTask.parent_id.in_(db.query(target_ids_subq.c.id))
+    ).update({SystemTask.parent_id: None}, synchronize_session=False)
+
+    deleted_count = (
+        db.query(SystemTask)
+        .filter(SystemTask.status == clean_status)
+        .delete(synchronize_session=False)
+    )
     db.commit()
-    return count
+    return int(deleted_count or 0)
 
 
 def cancel_or_delete_task_by_id(db: Session, task_id: int, hard_delete: bool = False) -> Tuple[str, str, bool]:

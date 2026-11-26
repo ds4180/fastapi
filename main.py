@@ -23,14 +23,18 @@ system_file_formatter = logging.Formatter(
 )
 system_file_handler.setFormatter(system_file_formatter)
 
-# 루트 로거 및 uvicorn 로거에 바인딩
+# 루트 로거 및 uvicorn 로거에 바인딩 (자식 로거 전파로 인한 2줄 중복 기록 방지)
+# - root_logger: 앱·fastapi·task_worker 등 일반 로거 일괄 수신
+# - uvicorn: uvicorn.error가 propagate=True로 올라오므로 uvicorn에만 부착 (uvicorn.error 중복 부착 금지)
+# - uvicorn.access: uvicorn 기본 설정상 propagate=False이므로 단독 부착
 root_logger = logging.getLogger()
 if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
     root_logger.addHandler(system_file_handler)
-    logging.getLogger("uvicorn").addHandler(system_file_handler)
-    logging.getLogger("uvicorn.access").addHandler(system_file_handler)
-    logging.getLogger("uvicorn.error").addHandler(system_file_handler)
-    logging.getLogger("fastapi").addHandler(system_file_handler)
+
+for _uv_name in ("uvicorn", "uvicorn.access"):
+    _uv_logger = logging.getLogger(_uv_name)
+    if not any(isinstance(h, RotatingFileHandler) for h in _uv_logger.handlers):
+        _uv_logger.addHandler(system_file_handler)
 
 from domain.user import user_router
 from domain.fileupload import fileupload_router
