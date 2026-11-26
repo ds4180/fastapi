@@ -372,12 +372,16 @@ def reclaim_stuck_tasks(db: Session) -> int:
     워커 프로세스 비정상 종료(컨테이너 재시작, OOM 등)로 인해
     장시간 RUNNING 상태로 고착된 태스크를 감지하여 자동 복구합니다.
     """
+    from domain.system.task_policy_service import get_cached_task_settings
+
+    settings = get_cached_task_settings(db)
+    default_timeout = int(settings.get("default_timeout_sec", 300))
     now = datetime.now()
     running_tasks = db.query(SystemTask).filter(SystemTask.status == "RUNNING").all()
     reclaimed_count = 0
 
     for task in running_tasks:
-        timeout_sec = task.timeout_sec or 300
+        timeout_sec = task.timeout_sec or default_timeout
         task_timeout = timedelta(seconds=timeout_sec)
         started = task.started_at or task.scheduled_at or now
         elapsed = now - started
@@ -540,8 +544,13 @@ async def process_next_task(db: Session, worker_id: str) -> bool:
                     logger.warning(f"⚠️ Watchdog 경보 트리거 오류: {we}")
                 return True
             else:
-                # 지수 백오프 적용 (1차: 10초, 2차: 40초, 3차: 80초, 최대 300초)
-                delay_sec = min(300, (2 ** failed_task.retry_count) * 10)
+                # 동적 정책 기반 지수 백오프 적용
+                from domain.system.task_policy_service import get_cached_task_settings
+
+                cfg = get_cached_task_settings(db)
+                base_sec = int(cfg.get("retry_backoff_base_sec", 10))
+                max_sec = int(cfg.get("retry_backoff_max_sec", 300))
+                delay_sec = min(max_sec, (2 ** failed_task.retry_count) * base_sec)
                 failed_task.scheduled_at = datetime.now() + timedelta(seconds=delay_sec)
                 failed_task.status = "PENDING"
                 logger.warning(f"⚠️ 작업 재시도 예약 (시도 {failed_task.retry_count}/{failed_task.max_retries}, {delay_sec}초 후): ID={failed_task.id}")
@@ -551,11 +560,12 @@ async def process_next_task(db: Session, worker_id: str) -> bool:
 
 
 async def run_task_worker():
-    """[워커 엔진] PENDING 상태인 작업을 찾아 하나씩 안전하게 처리하는 무한 루프"""
+    """[워커 엔진] 동적 정책(가동/일시정지, 폴링 주기, 고착 감시 주기)에 따라 동작하는 자율 루프"""
+    from domain.system.task_policy_service import get_cached_task_settings
+
     worker_id = f"worker-{os.getpid()}-{uuid.uuid4().hex[:6]}"
-    logger.info(f"🚀 시스템 태스크 워커(v3.2 자율신경계) 가동 시작! (Worker ID: {worker_id})")
-    
-    # 🛡️ 워커 최초 기동 시: 이전 프로세스 비정상 종료로 고착된 RUNNING 태스크 즉각 회수
+    logger.info(f"🚀 시스템 태스크 워커(v3.5 동적 정책 연동) 가동 시작! (Worker ID: {worker_id})")
+
     init_db = SessionLocal()
     try:
         recovered = reclaim_stuck_tasks(init_db)
@@ -570,16 +580,25 @@ async def run_task_worker():
 
     while True:
         db = SessionLocal()
+        poll_sleep_sec = 2
         try:
-            # 🛡️ 60초마다 워커락(고착 RUNNING) 정기 감시 및 자동 치유
+            cfg = get_cached_task_settings(db)
+            poll_sleep_sec = max(1, int(cfg.get("worker_poll_interval_sec", 2)))
+            reclaim_interval_sec = max(10, int(cfg.get("reclaim_check_interval_sec", 60)))
+
             now_check = datetime.now()
-            if (now_check - last_reclaim_check).total_seconds() >= 60:
+            if (now_check - last_reclaim_check).total_seconds() >= reclaim_interval_sec:
                 last_reclaim_check = now_check
                 reclaim_stuck_tasks(db)
 
+            # 일시정지(worker_enabled=False) 상태면 새 작업을 선점하지 않고 대기
+            if not cfg.get("worker_enabled", True):
+                await asyncio.sleep(max(2, poll_sleep_sec))
+                continue
+
             processed = await process_next_task(db, worker_id)
             if not processed:
-                await asyncio.sleep(2)
+                await asyncio.sleep(poll_sleep_sec)
                 continue
         except Exception as global_e:
             logger.error(f"🚨 워커 엔진 오류: {str(global_e)}")

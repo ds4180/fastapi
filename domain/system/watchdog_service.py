@@ -84,11 +84,14 @@ def check_and_alert_task_failure(db: Session, failed_task_id: Optional[int] = No
     최근 1시간 내 FAILED 태스크가 임계치(기본 3회)에 도달하면 관리자 화면에 실시간 토스트 알림을 발행합니다.
     (알람·지시사항 피드 및 Alert 모달 DB에 적재하지 않고, 가벼운 실시간 토스트로만 표출)
     """
+    from domain.system.task_policy_service import get_task_settings
+
     cfg = get_watchdog_settings(db)
-    if not cfg.get("watchdog_enabled", True):
+    task_cfg = get_task_settings(db)
+    if not cfg.get("watchdog_enabled", True) or not task_cfg.get("watchdog_fail_alert_enabled", True):
         return False
 
-    threshold = cfg.get("watchdog_fail_threshold", 3)
+    threshold = int(task_cfg.get("watchdog_fail_threshold") or cfg.get("watchdog_fail_threshold", 3))
     one_hour_ago = datetime.now() - timedelta(hours=1)
 
     fail_count = db.query(func.count(SystemTask.id)).filter(
