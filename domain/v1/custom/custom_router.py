@@ -31,14 +31,27 @@ def get_my_dispatch_briefing(
     current_user: User = Depends(get_current_user)
 ):
     """
-    로그인한 운전원 본인의 당일 및 명일(17시 이후) 배차 브리핑 조회
-    - 본인(real_name/username)에게 배정된 당일·명일 배차만 최소 정보로 반환합니다.
+    로그인한 운전원 본인의 당일 및 명일 배차 브리핑 조회
+    - admin/dispatch 설정의 preview_enabled / preview_force_open / preview_open_time 정책을 실시간 반영합니다.
     """
+    from domain.v1.dispatch.dispatch_service import (
+        build_timetable_rotation_resolver,
+        compute_preview_window,
+        get_dispatch_settings,
+    )
+
     now = datetime.now()
     today = now.date()
     tomorrow = today + timedelta(days=1)
-    is_after_17 = now.hour >= 17
     now_hhmm = now.strftime("%H:%M")
+
+    dispatch_cfg = get_dispatch_settings(db)
+    preview_win = compute_preview_window(dispatch_cfg, now)
+    preview_open_time = preview_win["open_time"]
+    is_preview_paused = bool(preview_win["is_paused"])
+    is_preview_open = (not is_preview_paused) and (
+        bool(preview_win["is_force_open"]) or (now_hhmm >= preview_open_time)
+    )
 
     candidate_names = {
         str(n).strip()
@@ -46,7 +59,6 @@ def get_my_dispatch_briefing(
         if n and str(n).strip()
     }
 
-    from domain.v1.dispatch.dispatch_service import build_timetable_rotation_resolver
     resolve_tt, _ = build_timetable_rotation_resolver(db)
 
     def _serialize(rows: List[Dispatch]) -> List[dict]:
@@ -84,7 +96,7 @@ def get_my_dispatch_briefing(
         )
         today_dispatches = _serialize(today_rows)
 
-        if is_after_17:
+        if is_preview_open:
             tomorrow_rows = (
                 db.query(Dispatch)
                 .options(joinedload(Dispatch.timetable))
@@ -122,7 +134,7 @@ def get_my_dispatch_briefing(
         }
 
     today_dayoff = _serialize_dayoff(today_dayoff_obj)
-    tomorrow_dayoff = _serialize_dayoff(tomorrow_dayoff_obj) if is_after_17 else None
+    tomorrow_dayoff = _serialize_dayoff(tomorrow_dayoff_obj) if is_preview_open else None
 
     if today_dayoff:
         today_work_status = "DAYOFF"      # 휴무일
@@ -135,7 +147,11 @@ def get_my_dispatch_briefing(
         "today": str(today),
         "tomorrow": str(tomorrow),
         "now_hhmm": now_hhmm,
-        "is_after_17": is_after_17,
+        "is_after_17": is_preview_open,
+        "is_preview_open": is_preview_open,
+        "is_preview_paused": is_preview_paused,
+        "preview_open_time": preview_open_time,
+        "preview_reason": preview_win["reason"],
         "driver_name": getattr(current_user, "real_name", None) or current_user.username,
         "today_work_status": today_work_status,
         "today_dayoff": today_dayoff,

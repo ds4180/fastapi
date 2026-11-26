@@ -26,6 +26,7 @@ def _now_kst() -> datetime:
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm.attributes import flag_modified
 
 from models import DayOff, Dispatch, RouteMaster, RouteTimetable, SystemConfig, User
 
@@ -454,6 +455,98 @@ def is_date_published(db: Session, target_date: date) -> bool:
     )
 
 
+def get_dispatch_date_state(db: Session, target_date: date) -> Dict[str, Any]:
+    """
+    [배차 상태 머신 단일 진실 공급원 (SSOT)]
+    특정 날짜의 저장/확정/배포/재배포 가능 여부를 일관되게 계산합니다.
+    - PAST (< today): 수정·저장·확정·배포 모두 불가
+    - TODAY (== today): 긴급 수정 저장 가능
+    - D_MINUS_1 (== today + 1): 저장·확정↔확정취소 무제한, 최초 배포 1회, 공개취소↔재배포 무제한
+    - FUTURE (> today + 1): 언제든 DRAFT 저장 가능, 확정·배포 불가
+    """
+    from domain.v1.dispatch.dispatch_builder import query_active_routes_for_date
+
+    today_kst = _now_kst().date()
+    tomorrow_kst = today_kst + timedelta(days=1)
+    if target_date < today_kst:
+        date_role = "PAST"
+    elif target_date == today_kst:
+        date_role = "TODAY"
+    elif target_date == tomorrow_kst:
+        date_role = "D_MINUS_1"
+    else:
+        date_role = "FUTURE"
+
+    date_key = target_date.isoformat()
+    pub_map = get_published_dates_map(db)
+    meta = pub_map.get(date_key) if isinstance(pub_map.get(date_key), dict) else None
+
+    active_routes = query_active_routes_for_date(db, target_date)
+    route_ids = [r["id"] for r in active_routes if isinstance(r, dict) and r.get("id")]
+
+    total_count = 0
+    saved_count = 0
+    confirmed_count = 0
+    announced_count = 0
+
+    if route_ids:
+        tt_ids = [
+            tid
+            for (tid,) in db.query(RouteTimetable.id)
+            .filter(RouteTimetable.route_master_id.in_(route_ids))
+            .all()
+        ]
+        total_count = len(tt_ids)
+        if tt_ids:
+            saved_count = (
+                db.query(Dispatch.id)
+                .filter(Dispatch.target_date == target_date, Dispatch.timetable_id.in_(tt_ids))
+                .count()
+            )
+            confirmed_count = (
+                db.query(Dispatch.id)
+                .filter(
+                    Dispatch.target_date == target_date,
+                    Dispatch.timetable_id.in_(tt_ids),
+                    Dispatch.status.in_(("CONFIRMED", "ANNOUNCED")),
+                )
+                .count()
+            )
+            announced_count = (
+                db.query(Dispatch.id)
+                .filter(
+                    Dispatch.target_date == target_date,
+                    Dispatch.timetable_id.in_(tt_ids),
+                    Dispatch.status == "ANNOUNCED",
+                )
+                .count()
+            )
+
+    published = is_date_published(db, target_date)
+    publish_count = int((meta or {}).get("publish_count") or (1 if (meta and meta.get("published", True)) else 0))
+    was_published = bool(publish_count > 0 or (meta and meta.get("unpublished_at")))
+    is_all_confirmed = bool(total_count > 0 and confirmed_count >= total_count)
+
+    return {
+        "target_date": date_key,
+        "date_role": date_role,
+        "published": published,
+        "was_published": was_published,
+        "publish_count": publish_count,
+        "confirmed": is_all_confirmed,
+        "confirmed_count": confirmed_count,
+        "announced_count": announced_count,
+        "saved_count": saved_count,
+        "total_count": total_count,
+        "meta": meta,
+        "can_save_draft": date_role != "PAST",
+        "can_confirm_toggle": date_role == "D_MINUS_1" and not published,
+        "can_initial_publish": date_role == "D_MINUS_1" and is_all_confirmed and not published and not was_published,
+        "can_republish": date_role == "D_MINUS_1" and is_all_confirmed and not published and was_published,
+        "can_unpublish": date_role == "D_MINUS_1" and published,
+    }
+
+
 def set_date_published(
     db: Session,
     target_date: date,
@@ -461,27 +554,41 @@ def set_date_published(
     *,
     mode: str = "manual",
 ) -> Dict[str, Any]:
-    """특정 날짜의 배차 공개(배포) 여부를 설정하고 재공지 이력을 관리합니다."""
+    """
+    전날(D-1) 배차의 공개(최초 배포 1회) / 공개 취소(무제한) / 재배포(무제한) 상태를 원자적으로 전이합니다.
+    """
     date_key = target_date.isoformat()
     now_kst = _now_kst()
+    tomorrow_kst = now_kst.date() + timedelta(days=1)
+
+    if target_date != tomorrow_kst:
+        raise HTTPException(
+            status_code=400,
+            detail="배차 배포 및 배포 취소는 운행 전날(D-1, 내일 배차)에만 수행할 수 있습니다.",
+        )
+
     now_str = now_kst.strftime("%Y-%m-%d %H:%M")
     row = db.query(SystemConfig).filter(SystemConfig.key == DISPATCH_PUBLISHED_DATES_KEY).first()
     pub_map = dict(row.value) if (row and isinstance(row.value, dict)) else {}
 
-    # 30일 이상 지난 오래된 키 정리
     cutoff = (now_kst.date() - timedelta(days=30)).isoformat()
     pub_map = {k: v for k, v in pub_map.items() if str(k) >= cutoff}
 
     prev_meta = pub_map.get(date_key) if isinstance(pub_map.get(date_key), dict) else {}
+    prev_published = bool(prev_meta.get("published", True)) if prev_meta else False
     prev_count = int(prev_meta.get("publish_count") or 0)
     if prev_count == 0 and prev_meta:
-        # 하위 호환: publish_count가 없던 기존 공개 기록은 1회로 간주
         prev_count = 1
 
     is_reannounce = False
     publish_count = prev_count
 
     if published:
+        if prev_published:
+            raise HTTPException(
+                status_code=409,
+                detail="이미 배포(공개) 중인 배차입니다. 재배포하려면 먼저 '배포 취소'를 실행해 주세요.",
+            )
         is_reannounce = bool(prev_meta.get("unpublished_at")) or prev_count > 0
         publish_count = prev_count + 1
         pub_map[date_key] = {
@@ -493,7 +600,11 @@ def set_date_published(
             "unpublished_at": prev_meta.get("unpublished_at"),
         }
     else:
-        # 공개 취소 이력을 보존해 재공지/재배포 시 별도 알림을 발송할 수 있도록 함
+        if not prev_published and not is_date_published(db, target_date):
+            raise HTTPException(
+                status_code=409,
+                detail="현재 배포(공개) 중인 상태가 아닙니다.",
+            )
         publish_count = max(1, prev_count)
         pub_map[date_key] = {
             **prev_meta,
@@ -501,7 +612,7 @@ def set_date_published(
             "unpublished_at": now_str,
             "publish_count": publish_count,
         }
-        # 공개 취소 시 확정/배포 상태를 저장 완료(DRAFT) 상태로 전환해 재수정 후 확정->공개 흐름을 따르도록 함
+        # 배포 취소 시 확정/배포 상태를 DRAFT로 되돌려 수정 및 재확정->재배포 흐름을 따르도록 함
         db.query(Dispatch).filter(
             Dispatch.target_date == target_date,
             Dispatch.status.in_(("ANNOUNCED", "CONFIRMED")),
@@ -509,6 +620,7 @@ def set_date_published(
 
     if row:
         row.value = pub_map
+        flag_modified(row, "value")
     else:
         db.add(
             SystemConfig(
@@ -590,10 +702,32 @@ def announce_tomorrow_dispatch(
     )
 
     settings = get_dispatch_settings(db)
-    now = datetime.now()
+    now = _now_kst()
     today_str = now.date().isoformat()
     tomorrow = now.date() + timedelta(days=1)
     tomorrow_str = tomorrow.isoformat()
+
+    # 🔒 [상태 머신 검증] 전날(D-1) 전체 노선 확정(CONFIRMED) 및 미배포 상태 검증
+    state = get_dispatch_date_state(db, tomorrow)
+    if state["published"]:
+        if not force:
+            return {"status": "already_published", "target_date": tomorrow_str, "updated_count": 0}
+        raise HTTPException(
+            status_code=409,
+            detail="이미 배포(공개) 중인 명일 배차입니다. 재배포하려면 먼저 '배포 취소'를 실행해 주세요.",
+        )
+    if not state["confirmed"]:
+        if not force:
+            return {
+                "status": "waiting_confirmation",
+                "target_date": tomorrow_str,
+                "confirmed_count": state["confirmed_count"],
+                "total_count": state["total_count"],
+            }
+        raise HTTPException(
+            status_code=400,
+            detail=f"모든 노선의 명일 배차가 확정되어야 배포할 수 있습니다. (현재 확정: {state['confirmed_count']}/{state['total_count']})",
+        )
 
     active_routes = query_active_routes_for_date(db, tomorrow)
     route_ids = [r["id"] for r in active_routes if isinstance(r, dict) and r.get("id")]
@@ -672,6 +806,7 @@ def announce_tomorrow_dispatch(
         state_val["last_auto_at"] = now.strftime("%Y-%m-%d %H:%M")
     if state_row:
         state_row.value = state_val
+        flag_modified(state_row, "value")
     else:
         db.add(SystemConfig(key=DISPATCH_AUTO_ANNOUNCE_STATE_KEY, value=state_val, description="명일 배차 자동 고지 실행 이력"))
     db.commit()
@@ -741,13 +876,16 @@ def announce_tomorrow_dispatch(
 
 
 def check_and_run_auto_announce(db: Session) -> Dict[str, Any]:
-    """1분 주기 크론에서 호출되어 설정된 자동 고지 시각(D-1 xx:yy)에 명일 배차를 고지합니다."""
+    """
+    1분 주기 크론에서 호출되어 설정된 자동 고지 시각(D-1 xx:yy)에 명일 배차를 최초 1회 자동 배포합니다.
+    - 이미 배포되었거나 관리자가 수동으로 배포 취소(was_published=True)한 날짜는 자동 재배포하지 않습니다.
+    - 전 노선 확정 완료(confirmed=True) 상태일 때만 실행됩니다.
+    """
     settings = get_dispatch_settings(db)
     if not settings.get("auto_announce_enabled", False):
         return {"status": "disabled"}
 
-    now = datetime.now()
-    today_str = now.date().isoformat()
+    now = _now_kst()
     now_hhmm = now.strftime("%H:%M")
     target_hhmm = str(settings.get("auto_announce_time") or "17:00")
 
@@ -755,17 +893,18 @@ def check_and_run_auto_announce(db: Session) -> Dict[str, Any]:
         return {"status": "waiting", "now": now_hhmm, "target": target_hhmm}
 
     tomorrow = now.date() + timedelta(days=1)
-    if is_date_published(db, tomorrow):
+    state = get_dispatch_date_state(db, tomorrow)
+    if state["published"]:
         return {"status": "already_published", "date": tomorrow.isoformat()}
-
-    has_confirmed = (
-        db.query(Dispatch.id)
-        .filter(Dispatch.target_date == tomorrow, Dispatch.status == "CONFIRMED")
-        .first()
-        is not None
-    )
-    if not has_confirmed:
-        return {"status": "waiting_confirmation", "date": tomorrow.isoformat()}
+    if state["was_published"]:
+        return {"status": "manual_republish_required", "date": tomorrow.isoformat()}
+    if not state["confirmed"]:
+        return {
+            "status": "waiting_confirmation",
+            "date": tomorrow.isoformat(),
+            "confirmed_count": state["confirmed_count"],
+            "total_count": state["total_count"],
+        }
 
     return announce_tomorrow_dispatch(db, force=False)
 
@@ -973,7 +1112,7 @@ def build_driver_work_stats(db: Session, target_date: date) -> Dict[str, Any]:
         )
     )
     if not settings.get("stats_include_draft", True):
-        q = q.filter(Dispatch.status == "CONFIRMED")
+        q = q.filter(Dispatch.status.in_(("CONFIRMED", "ANNOUNCED")))
 
     rows = q.all()
 

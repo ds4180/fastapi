@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, joinedload
 from database import get_db
 from core.deps import require_app_permission
 from domain.v1.admin import admin_schema
-from models import RouteMaster, RouteSegment, RouteTimetable, User
+from models import Dispatch, RouteMaster, RouteSegment, RouteTimetable, User
 
 router = APIRouter(tags=["Admin Route Master"])
 
@@ -241,46 +241,136 @@ def append_route_roster(
         )
 
         prev_day = payload.start_date - timedelta(days=1)
+        same_day_master = None
+
         for prev in existing_versions:
             if prev.start_date < payload.start_date and (
                 prev.end_date is None or prev.end_date >= payload.start_date
             ):
                 prev.end_date = prev_day
+            elif prev.start_date == payload.start_date:
+                # 동일 (route_name, start_date)는 항상 1개 로번만 유지 (배차 참조가 있어도 seq 기준 제자리 갱신)
+                if same_day_master is None:
+                    same_day_master = prev
+                else:
+                    # 혹시 과거에 중복 생성된 잉여 당일 행이 있다면 배차 미참조 건만 정리
+                    dup_tt_ids = [
+                        tid
+                        for (tid,) in db.query(RouteTimetable.id)
+                        .filter(RouteTimetable.route_master_id == prev.id)
+                        .all()
+                    ]
+                    has_disp = (
+                        bool(dup_tt_ids)
+                        and db.query(Dispatch.id)
+                        .filter(Dispatch.timetable_id.in_(dup_tt_ids))
+                        .first()
+                        is not None
+                    )
+                    if not has_disp:
+                        db.query(RouteTimetable).filter(
+                            RouteTimetable.route_master_id == prev.id
+                        ).delete(synchronize_session=False)
+                        db.delete(prev)
 
-        next_version = (payload.version or "").strip() or f"v{len(existing_versions) + 1}"
+        if same_day_master is not None:
+            db_master = same_day_master
+            db_master.route_type = payload.route_type
+            db_master.end_date = payload.end_date
+            db_master.vehicle_count = payload.vehicle_count
+            db_master.is_regular_duty = payload.is_regular_duty
+            db_master.start_turn_seq = max(1, payload.start_turn_seq or 1)
+            next_version = db_master.version or f"v{len(existing_versions)}"
 
-        db_master = RouteMaster(
-            route_name=payload.route_name,
-            route_type=payload.route_type,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            vehicle_count=payload.vehicle_count,
-            version=next_version,
-            is_regular_duty=payload.is_regular_duty,
-            start_turn_seq=max(1, payload.start_turn_seq or 1),
-        )
-        db.add(db_master)
-        db.flush()
-
-        for t in payload.timetables:
-            db.add(
-                RouteTimetable(
-                    route_master_id=db_master.id,
-                    route_name=payload.route_name,
-                    seq=t.seq,
-                    start_time=t.start_time,
-                    end_time=t.end_time,
-                    start_location=t.start_location,
-                    end_location=t.end_location,
-                    version=next_version,
-                    start_garage=t.start_garage,
-                    end_garage=t.end_garage,
-                    is_regular_duty=t.is_regular_duty,
-                )
+            # 기존 시간표를 seq 기준으로 매칭해 ID를 보존한 채 제자리(In-place) 갱신 -> 기존 Dispatch 참조 100% 유지
+            existing_tts = (
+                db.query(RouteTimetable)
+                .filter(RouteTimetable.route_master_id == db_master.id)
+                .all()
             )
+            tt_by_seq = {tt.seq: tt for tt in existing_tts}
+            incoming_seqs = set()
+
+            for t in payload.timetables:
+                incoming_seqs.add(t.seq)
+                tt = tt_by_seq.get(t.seq)
+                if tt:
+                    tt.start_time = t.start_time
+                    tt.end_time = t.end_time
+                    tt.start_location = t.start_location
+                    tt.end_location = t.end_location
+                    tt.version = next_version
+                    tt.start_garage = t.start_garage
+                    tt.end_garage = t.end_garage
+                    tt.is_regular_duty = t.is_regular_duty
+                else:
+                    db.add(
+                        RouteTimetable(
+                            route_master_id=db_master.id,
+                            route_name=payload.route_name,
+                            seq=t.seq,
+                            start_time=t.start_time,
+                            end_time=t.end_time,
+                            start_location=t.start_location,
+                            end_location=t.end_location,
+                            version=next_version,
+                            start_garage=t.start_garage,
+                            end_garage=t.end_garage,
+                            is_regular_duty=t.is_regular_duty,
+                        )
+                    )
+
+            # 삭제된 회차(seq)는 배차 참조가 없는 경우에만 제거
+            for seq_val, tt in tt_by_seq.items():
+                if seq_val not in incoming_seqs:
+                    used = (
+                        db.query(Dispatch.id)
+                        .filter(Dispatch.timetable_id == tt.id)
+                        .first()
+                        is not None
+                    )
+                    if not used:
+                        db.delete(tt)
+        else:
+            next_version = (payload.version or "").strip() or f"v{len(existing_versions) + 1}"
+            db_master = RouteMaster(
+                route_name=payload.route_name,
+                route_type=payload.route_type,
+                start_date=payload.start_date,
+                end_date=payload.end_date,
+                vehicle_count=payload.vehicle_count,
+                version=next_version,
+                is_regular_duty=payload.is_regular_duty,
+                start_turn_seq=max(1, payload.start_turn_seq or 1),
+            )
+            db.add(db_master)
+            db.flush()
+
+            for t in payload.timetables:
+                db.add(
+                    RouteTimetable(
+                        route_master_id=db_master.id,
+                        route_name=payload.route_name,
+                        seq=t.seq,
+                        start_time=t.start_time,
+                        end_time=t.end_time,
+                        start_location=t.start_location,
+                        end_location=t.end_location,
+                        version=next_version,
+                        start_garage=t.start_garage,
+                        end_garage=t.end_garage,
+                        is_regular_duty=t.is_regular_duty,
+                    )
+                )
 
         db.commit()
         db.refresh(db_master)
+        try:
+            from domain.v1.dispatch.dispatch_service import invalidate_timetable_rotation_cache
+
+            invalidate_timetable_rotation_cache()
+        except Exception:
+            pass
         return {"message": "success", "id": db_master.id, "version": next_version}
     except HTTPException:
         raise

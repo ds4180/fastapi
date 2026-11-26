@@ -80,13 +80,32 @@ def save_daily_dispatch(
 ):
     """일괄 배차 정보(금일 및 익일)를 생성하거나 업데이트(Upsert) 합니다."""
     try:
-        from domain.v1.dispatch.dispatch_service import _now_kst
+        from domain.v1.dispatch.dispatch_service import _now_kst, is_date_published
 
         today_kst = _now_kst().date()
+        tomorrow_kst = today_kst + timedelta(days=1)
         if payload.target_date < today_kst:
             raise HTTPException(
                 status_code=400,
                 detail="과거 날짜(어제 이전)의 배차 데이터는 수정·저장할 수 없습니다.",
+            )
+
+        # 🔒 [상태 머신 규칙]
+        # 1) 미래 예고 날짜(D+2 이상): 언제든 DRAFT 저장 가능, 확정/배포 불가
+        if payload.target_date > tomorrow_kst and payload.status in ("CONFIRMED", "ANNOUNCED"):
+            raise HTTPException(
+                status_code=400,
+                detail="배차 확정 및 배포는 운행 전날(D-1)에만 수행할 수 있습니다. 미래 날짜는 저장(DRAFT)만 가능합니다.",
+            )
+        # 2) 전날(D-1) 현재 배포(공개) 중인 상태에서 확정 취소(DRAFT 강등) 시도 차단
+        if (
+            payload.target_date == tomorrow_kst
+            and payload.status == "DRAFT"
+            and is_date_published(db, tomorrow_kst)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="현재 배포(공개) 중인 배차는 확정 취소할 수 없습니다. 먼저 '배포 취소'를 실행해 주세요.",
             )
 
         role_map, vehicle_map, _ = load_drivers_metadata()

@@ -94,54 +94,8 @@ def get_admin_dispatch_publish_status(
     db: Session = Depends(get_db),
     admin: User = Depends(check_dispatch_admin),
 ):
-    """특정 날짜의 배차 공개(배포) 상태 및 저장 건수를 반환합니다."""
-    from domain.v1.dispatch.dispatch_builder import query_active_routes_for_date
-    from models import Dispatch, RouteTimetable
-
-    date_key = target_date.isoformat()
-    pub_map = service.get_published_dates_map(db)
-    active_routes = query_active_routes_for_date(db, target_date)
-    route_ids = [r["id"] for r in active_routes if isinstance(r, dict) and r.get("id")]
-    total_count = 0
-    saved_count = 0
-    confirmed_count = 0
-    if route_ids:
-        tt_ids = [
-            tid
-            for (tid,) in db.query(RouteTimetable.id)
-            .filter(RouteTimetable.route_master_id.in_(route_ids))
-            .all()
-        ]
-        total_count = len(tt_ids)
-        if tt_ids:
-            saved_count = (
-                db.query(Dispatch.id)
-                .filter(Dispatch.target_date == target_date, Dispatch.timetable_id.in_(tt_ids))
-                .count()
-            )
-            confirmed_count = (
-                db.query(Dispatch.id)
-                .filter(
-                    Dispatch.target_date == target_date,
-                    Dispatch.timetable_id.in_(tt_ids),
-                    Dispatch.status.in_(("CONFIRMED", "ANNOUNCED")),
-                )
-                .count()
-            )
-    meta = pub_map.get(date_key) if isinstance(pub_map.get(date_key), dict) else None
-    publish_count = int((meta or {}).get("publish_count") or (1 if meta else 0))
-    was_published = bool(meta and (meta.get("unpublished_at") or publish_count > 0))
-    return {
-        "target_date": date_key,
-        "published": service.is_date_published(db, target_date),
-        "was_published": was_published,
-        "publish_count": publish_count,
-        "confirmed": bool(total_count > 0 and confirmed_count >= total_count),
-        "confirmed_count": confirmed_count,
-        "meta": meta,
-        "saved_count": saved_count,
-        "total_count": total_count,
-    }
+    """특정 날짜의 배차 저장·확정·배포/재배포 상태 머신(SSOT)을 반환합니다."""
+    return service.get_dispatch_date_state(db, target_date)
 
 
 @admin_router.post("/publish-status")
