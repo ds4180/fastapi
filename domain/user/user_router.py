@@ -37,7 +37,8 @@ from core.session import (
     check_login_rate_limit,
     record_login_failure,
     clear_login_failures,
-    SESSION_EXPIRE_SECONDS,
+    set_session_cookie,
+    clear_session_cookie,
 )
 from core.deps import (
     get_current_user,
@@ -135,16 +136,8 @@ def login_for_access_token(
     # 🚀 [5단계] 핵심 세션 생성 (내부에서 이전 쿠키 세션 폐기 + 동일 기기 카테고리 중복 세션 KICKED_OUT 수행)
     jti = create_user_session(db=db, user=user, request=request)
 
-    # 브라우저에 session_id 쿠키 설정 (HttpOnly + SameSite=Lax + 환경별 Secure 적용)
-    response.set_cookie(
-        key="session_id",
-        value=jti,
-        httponly=True,
-        max_age=SESSION_EXPIRE_SECONDS,
-        samesite="lax",
-        secure=settings.COOKIE_SECURE,
-        path="/"
-    )
+    # 브라우저에 session_id 쿠키 설정 (HttpOnly + SameSite=Lax + HTTPS 자동 Secure 적용)
+    set_session_cookie(response=response, session_id=jti, request=request)
 
     return {
         "message": "Login successful",
@@ -266,7 +259,7 @@ def logout(
     if session_id:
         terminate_session(db=db, session_id=session_id)
 
-    response.delete_cookie(key="session_id", path="/")
+    clear_session_cookie(response=response, request=request)
     return {"message": "Logout successful"}
 
 

@@ -279,6 +279,9 @@ def delete_group_master_item(db: Session, group_id: int) -> Tuple[str, str, Dict
     db.delete(group)
     db.commit()
 
+    from core.session import invalidate_user_session_caches
+    invalidate_user_session_caches(db, None)
+
     return deleted_code, deleted_name, {"member_refs": member_refs, "resource_refs": resource_refs}
 
 
@@ -341,6 +344,8 @@ def set_user_primary_group(db: Session, user_id: int, primary_group: Optional[st
         profile.primary_group = None
 
     db.commit()
+    from core.session import invalidate_user_session_caches
+    invalidate_user_session_caches(db, user_id)
     return profile.primary_group
 
 
@@ -385,6 +390,8 @@ def add_user_secondary_group_item(db: Session, user_id: int, code: str) -> Tuple
     profile.secondary_groups = current_sec
     flag_modified(profile, "secondary_groups")
     db.commit()
+    from core.session import invalidate_user_session_caches
+    invalidate_user_session_caches(db, user_id)
     return current_sec, True
 
 
@@ -401,6 +408,8 @@ def remove_user_secondary_group_item(db: Session, user_id: int, code: str) -> Tu
     profile.secondary_groups = updated
     flag_modified(profile, "secondary_groups")
     db.commit()
+    from core.session import invalidate_user_session_caches
+    invalidate_user_session_caches(db, user_id)
     return updated, True
 
 
@@ -444,6 +453,8 @@ def set_user_groups_batch(db: Session, user_id: int, req: UserGroupBatchReq) -> 
     profile.secondary_groups = dedup_sec
     flag_modified(profile, "secondary_groups")
     db.commit()
+    from core.session import invalidate_user_session_caches
+    invalidate_user_session_caches(db, user_id)
     return profile.primary_group, profile.secondary_groups
 
 

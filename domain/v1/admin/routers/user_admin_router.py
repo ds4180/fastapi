@@ -75,6 +75,9 @@ def update_user_rank(
     user.profile.rank_level = rank_in.rank_level
     db.commit()
 
+    from core.session import invalidate_user_session_caches
+    invalidate_user_session_caches(db, user.id)
+
     # 🛡️ 전역 보안 감사로그 영구 기록
     safe_log_audit(
         db=db,
@@ -258,6 +261,9 @@ def restore_user_by_admin(
     target.profile.is_active = True
     target.profile.rank_level = 1
     db.commit()
+
+    from core.session import invalidate_user_session_caches
+    invalidate_user_session_caches(db, target.id)
 
     safe_log_audit(
         db=db,

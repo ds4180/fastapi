@@ -21,6 +21,7 @@
      구버전 워커 프로세스가 좀비처럼 남는 현상을 원천 차단합니다.
 """
 
+from typing import Iterable
 from fastapi import WebSocket, WebSocketDisconnect
 import json
 import asyncio
@@ -29,10 +30,14 @@ import asyncio
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
-        # 각 웹소켓 인스턴스별 메타데이터: { ws: {"user_id": int, "username": str, "device_category": "DESKTOP"|"MOBILE"} }
+        # 각 웹소켓 인스턴스별 메타데이터: { ws: {"user_id": int, "username": str, "device_category": str, "session_id": str|None} }
         self.connection_meta: dict[WebSocket, dict] = {}
         # 사용자(user_id)별 대기 중인 원격 지문 공조 요청: { user_id: dict }
         self.pending_coop_requests: dict[int, dict] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
 
     async def connect(
         self,
@@ -40,13 +45,19 @@ class ConnectionManager:
         user_id: int | None = None,
         username: str | None = None,
         device_category: str = "DESKTOP",
+        session_id: str | None = None,
     ):
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         await websocket.accept()
         self.active_connections.append(websocket)
         self.connection_meta[websocket] = {
             "user_id": user_id,
             "username": username or "user",
             "device_category": device_category,
+            "session_id": session_id,
         }
 
     def disconnect(self, websocket: WebSocket):
@@ -99,6 +110,107 @@ class ConnectionManager:
                 sent_count += 1
         return sent_count
 
+    async def send_to_users(
+        self,
+        user_ids: Iterable[int],
+        message: dict,
+        exclude_ws: WebSocket | None = None,
+    ) -> int:
+        """지정된 다중 사용자(user_ids)의 소켓들로만 메시지를 정밀 타겟 전송합니다."""
+        if not self.active_connections:
+            return 0
+        uid_set = {int(u) for u in user_ids if u is not None}
+        if not uid_set:
+            return 0
+
+        data_str = json.dumps(message, ensure_ascii=False)
+        target_connections: list[WebSocket] = []
+        for ws in list(self.active_connections):
+            if ws is exclude_ws:
+                continue
+            meta = self.connection_meta.get(ws)
+            if not meta or meta.get("user_id") not in uid_set:
+                continue
+            target_connections.append(ws)
+
+        if not target_connections:
+            return 0
+
+        tasks = [ws.send_text(data_str) for ws in target_connections]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        sent_count = 0
+        for ws, result in zip(target_connections, results):
+            if isinstance(result, (WebSocketDisconnect, Exception)):
+                self.disconnect(ws)
+            else:
+                sent_count += 1
+        return sent_count
+
+    def send_to_users_sync(self, user_ids: Iterable[int], message: dict) -> None:
+        """동기 컨텍스트에서 특정 사용자 집합 대상 웹소켓 전송을 안전하게 스케줄링합니다."""
+        uids = list(user_ids)
+        if not uids:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.send_to_users(uids, message))
+            return
+        except RuntimeError:
+            pass
+        if self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(self.send_to_users(uids, message), self._loop)
+            except Exception:
+                pass
+
+    async def close_by_session_ids(
+        self,
+        session_ids: Iterable[str],
+        code: int = 1008,
+    ) -> int:
+        """폐기/추방/로그아웃된 session_id로 연결된 웹소켓을 즉시 강제 종료합니다."""
+        jti_set = {str(s) for s in session_ids if s}
+        if not jti_set or not self.active_connections:
+            return 0
+
+        targets: list[WebSocket] = []
+        for ws in list(self.active_connections):
+            meta = self.connection_meta.get(ws)
+            if meta and meta.get("session_id") in jti_set:
+                targets.append(ws)
+                self.disconnect(ws)
+
+        if not targets:
+            return 0
+
+        await asyncio.gather(*(ws.close(code=code) for ws in targets), return_exceptions=True)
+        return len(targets)
+
+    def schedule_close_by_session_ids(
+        self,
+        session_ids: Iterable[str],
+        code: int = 1008,
+    ) -> None:
+        """동기 라우터/워커 스레드에서도 안전하게 특정 세션의 웹소켓 종료를 예약합니다."""
+        jtis = [str(s) for s in session_ids if s]
+        if not jtis or not self.active_connections:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.close_by_session_ids(jtis, code=code))
+            return
+        except RuntimeError:
+            pass
+        if self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.close_by_session_ids(jtis, code=code),
+                    self._loop,
+                )
+            except Exception:
+                pass
+
     async def broadcast(self, message: dict, exclude_ws: WebSocket | None = None):
         """프로젝트 어디서든 이 함수를 호출하여 전체 클라이언트에게 메시지 브로드캐스트 (특정 발신 소켓 제외 가능)"""
         if not self.active_connections:
@@ -132,7 +244,43 @@ class ConnectionManager:
             pass
 
     async def ping_all(self):
-        """연결 유지 확인 (Heartbeat)"""
+        """연결 유지 확인 (Heartbeat) 및 만료·추방된 세션 소켓 정기 정리"""
+        if not self.active_connections:
+            return
+
+        # 1) 연결된 소켓들의 session_id가 여전히 DB에서 ACTIVE 상태인지 일괄 점검
+        session_jtis = {
+            meta.get("session_id")
+            for meta in self.connection_meta.values()
+            if meta and meta.get("session_id")
+        }
+        if session_jtis:
+            try:
+                def _fetch_active_jtis(jtis: set[str]) -> set[str]:
+                    from database import SessionLocal
+                    from models import UserSession, User, UserProfile
+
+                    with SessionLocal() as db:
+                        rows = (
+                            db.query(UserSession.session_key)
+                            .outerjoin(User, UserSession.user_id == User.id)
+                            .outerjoin(UserProfile, User.id == UserProfile.user_id)
+                            .filter(
+                                UserSession.session_key.in_(jtis),
+                                UserSession.status == "ACTIVE",
+                                (UserProfile.is_active == None) | (UserProfile.is_active == True),
+                            )
+                            .all()
+                        )
+                        return {r[0] for r in rows if r and r[0]}
+
+                valid_jtis = await asyncio.to_thread(_fetch_active_jtis, session_jtis)
+                revoked_jtis = session_jtis - valid_jtis
+                if revoked_jtis:
+                    await self.close_by_session_ids(revoked_jtis, code=1008)
+            except Exception:
+                pass
+
         if not self.active_connections:
             return
         data_str = json.dumps({"type": "ping"})
@@ -160,6 +308,10 @@ manager = ConnectionManager()
 
 async def ping_loop():
     """주기적으로 모든 클라이언트에게 ping을 보내 연결을 유지합니다."""
+    try:
+        manager.bind_loop(asyncio.get_running_loop())
+    except RuntimeError:
+        pass
     while True:
         await manager.ping_all()
         await asyncio.sleep(60)

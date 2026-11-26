@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Union
 
 from sqlalchemy.orm import Session
+from redis.exceptions import RedisError
 from domain.user.user_schema import UserCreate
 from models import User, UserSession, UserProfile # UserProfile 임포트 추가
 from redis_config import rd
@@ -62,9 +63,24 @@ def kick_session(db: Session, session_id: Union[int, str]):
     db_session.logout_at = datetime.now()
     db.commit()
 
-    # 2. Redis Set에서 해당 JTI 삭제
+    # 2. Redis Set 및 세션 캐시에서 해당 JTI 즉시 삭제 (Redis 순단 시에도 DB 추방 상태는 유지)
     redis_key = f"session:{db_session.user_id}:{db_session.device_category}"
-    rd.srem(redis_key, db_session.session_key)
+    try:
+        rd.srem(redis_key, db_session.session_key)
+    except RedisError:
+        pass
+    try:
+        from core.session import invalidate_session_cache
+        invalidate_session_cache([db_session.session_key])
+    except Exception:
+        pass
+
+    # 3. 열려 있는 실시간 웹소켓(/ws)도 즉시 강제 종료
+    try:
+        from domain.ws.ws_service import manager
+        manager.schedule_close_by_session_ids([db_session.session_key], code=1008)
+    except Exception:
+        pass
 
     return db_session
 

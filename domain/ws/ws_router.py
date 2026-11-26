@@ -66,6 +66,7 @@ async def websocket_endpoint(websocket: WebSocket):
         user_id=user_id,
         username=username,
         device_category=device_category,
+        session_id=session_id,
     )
 
     # 📱 모바일 기기가 슬립 복귀 등으로 뒤늦게 연결된 경우, 본인(user_id)의 60초 이내 대기 요청이 있으면 즉시 전달

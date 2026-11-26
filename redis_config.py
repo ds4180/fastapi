@@ -7,13 +7,18 @@ REDIS_PORT = settings.REDIS_PORT
 REDIS_PASSWORD = settings.REDIS_PASSWORD
 
 # Redis 클라이언트 객체 생성
-# decode_responses=True: Redis 데이터를 파이썬 문자열(str)로 자동 디코딩합니다.
+# - decode_responses=True: Redis 데이터를 파이썬 문자열(str)로 자동 디코딩합니다.
+# - socket_connect_timeout / socket_timeout: Redis 무응답(Hang) 시 워커 스레드 무한 대기 및
+#   DB 커넥션 풀 연쇄 고갈을 차단하기 위해 1.5초 Fail-Fast 타임아웃을 강제합니다.
 rd = redis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
     password=REDIS_PASSWORD,
     db=0,
-    decode_responses=True
+    decode_responses=True,
+    socket_connect_timeout=1.5,
+    socket_timeout=1.5,
+    health_check_interval=30,
 )
 
 def get_redis():

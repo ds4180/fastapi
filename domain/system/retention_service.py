@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 
 from models.system import SystemConfig, SystemTask
 from models.user import UserSession
@@ -86,9 +86,13 @@ def clean_redis_keys(rd, dynamic_ttl_hours: int = 48) -> Dict[str, int]:
             except Exception:
                 pass
 
-        # 2. Redis 내 group:data:* 키 전체 스캔
-        keys = rd.keys("group:data:*")
-        for k_bytes in keys:
+        # 2. Redis 내 group:data:* 키 비블로킹 스캔 (싱글 스레드 블로킹을 유발하는 KEYS 대신 SCAN 사용)
+        key_iter = (
+            rd.scan_iter(match="group:data:*", count=100)
+            if hasattr(rd, "scan_iter")
+            else rd.keys("group:data:*")
+        )
+        for k_bytes in key_iter:
             k = k_bytes.decode("utf-8") if isinstance(k_bytes, bytes) else str(k_bytes)
             group_name = k.replace("group:data:", "")
 
@@ -126,6 +130,13 @@ def run_data_retention_gc(db: Session, rd=None) -> Dict[str, Any]:
     cfg = get_retention_settings(db)
     now = datetime.now()
 
+    # 0. 비활동 만료 기간(SESSION_EXPIRE_DAYS)을 초과한 방치 ACTIVE 세션을 먼저 EXPIRED로 전환
+    try:
+        from core.session import sync_expired_sessions
+        sync_expired_sessions(db)
+    except Exception as sync_err:
+        logger.warning(f"⚠️ [Retention GC] 만료 세션 사전 동기화 오류 (무시됨): {sync_err}")
+
     # 1. Redis 인메모리 GC
     redis_res = clean_redis_keys(rd, dynamic_ttl_hours=cfg["retention_redis_dynamic_hours"])
 
@@ -138,12 +149,15 @@ def run_data_retention_gc(db: Session, rd=None) -> Dict[str, Any]:
         )
     ).delete(synchronize_session=False)
 
-    # 3. 만료 세션 이력 정리
+    # 3. 종료·추방·자연만료(EXPIRED 포함) 세션 이력 정리
     session_threshold = now - timedelta(days=cfg["retention_session_history_days"])
     deleted_sessions = db.query(UserSession).filter(
         and_(
-            UserSession.status.in_(["LOGOUT", "KICKED_OUT"]),
-            UserSession.login_at <= session_threshold
+            UserSession.status.in_(["LOGOUT", "KICKED_OUT", "EXPIRED"]),
+            or_(
+                and_(UserSession.logout_at.isnot(None), UserSession.logout_at <= session_threshold),
+                and_(UserSession.logout_at.is_(None), UserSession.login_at <= session_threshold),
+            ),
         )
     ).delete(synchronize_session=False)
 

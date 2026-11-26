@@ -76,8 +76,9 @@ class Settings:
     # - 계정+IP 기준 연속 로그인 실패 허용 횟수 (기본 5회 실패 시 300초=5분 잠금)
     LOGIN_MAX_ATTEMPTS: int = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
     LOGIN_LOCKOUT_SECONDS: int = int(os.getenv("LOGIN_LOCKOUT_SECONDS", "300"))
-    # - 단일 IP 기준 무차별 대입(다중 계정 스캐닝) 허용 횟수 (기본 15회 실패 시 900초=15분 잠금)
-    LOGIN_IP_MAX_ATTEMPTS: int = int(os.getenv("LOGIN_IP_MAX_ATTEMPTS", "15"))
+    # - 단일 IP 기준 무차별 대입(다중 계정 스캐닝) 허용 횟수
+    #   (차고지/사무실 공용 공유기 NAT 환경을 고려하여 기본 80회 실패 시 900초=15분 잠금)
+    LOGIN_IP_MAX_ATTEMPTS: int = int(os.getenv("LOGIN_IP_MAX_ATTEMPTS", "80"))
     LOGIN_IP_LOCKOUT_SECONDS: int = int(os.getenv("LOGIN_IP_LOCKOUT_SECONDS", "900"))
 
     # 📌 [5] 파일 및 미디어 저장소 경로

@@ -106,10 +106,8 @@ def _resolve_rp_and_origin(request: Request) -> tuple[str, str]:
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    from core.session import get_client_ip
+    return get_client_ip(request)
 
 
 def _add_log(

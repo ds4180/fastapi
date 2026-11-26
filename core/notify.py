@@ -205,7 +205,7 @@ def notify(
     db.commit()
 
     # --------------------------------------------------------------------------
-    # 3. 실시간 WebSocket 브로드캐스트 (상단 헤더 🔴 뱃지 0.1초 점등)
+    # 3. 실시간 WebSocket 전송 (대상 지정 시 해당 대상자 소켓만, 전사 공지 시 전체 브로드캐스트)
     # --------------------------------------------------------------------------
     try:
         from domain.ws.ws_service import manager
@@ -216,19 +216,19 @@ def notify(
             "message": message,
             "level": level
         }
-        if background_tasks:
-            background_tasks.add_task(manager.broadcast, ws_msg)
+        if len(resolved_uids) > 0:
+            target_uid_list = list(resolved_uids)
+            if background_tasks:
+                background_tasks.add_task(manager.send_to_users, target_uid_list, ws_msg)
+            else:
+                manager.send_to_users_sync(target_uid_list, ws_msg)
         else:
-            # 동기 환경에서는 asyncio 이벤트 루프가 있을 때 비동기 전송 시도
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(manager.broadcast(ws_msg))
-            except Exception:
-                pass
+            if background_tasks:
+                background_tasks.add_task(manager.broadcast, ws_msg)
+            else:
+                manager.broadcast_sync(ws_msg)
     except Exception as e:
-        logger.warning(f"⚠️ [core.notify] WebSocket 브로드캐스트 실패 (무시됨): {e}")
+        logger.warning(f"⚠️ [core.notify] WebSocket 전송 실패 (무시됨): {e}")
 
     # --------------------------------------------------------------------------
     # 4. 백그라운드 Web Push 발송

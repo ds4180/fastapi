@@ -126,7 +126,7 @@ from core.config import settings
 from core.exceptions import CoreException
 from core.middleware import RequestIDMiddleware
 from core.audit import safe_log_audit
-from core.session import validate_session
+from core.session import validate_session, get_client_ip
 from database import SessionLocal
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -138,7 +138,7 @@ from datetime import datetime
 @app.exception_handler(CoreException)
 async def core_exception_handler(request: Request, exc: CoreException):
     req_id = getattr(request.state, "request_id", None)
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request)
     session_id = request.cookies.get("session_id")
 
     # 🚨 단일 DB 세션에서 유저 검증 및 403/500 감사로그를 원자적으로 처리 (Fail-Safe 격리)
@@ -205,7 +205,7 @@ async def core_exception_handler(request: Request, exc: CoreException):
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     req_id = getattr(request.state, "request_id", None)
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request)
     session_id = request.cookies.get("session_id")
 
     with SessionLocal() as db:
@@ -271,7 +271,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     req_id = getattr(request.state, "request_id", None)
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request)
     stack_trace = traceback.format_exc()
 
     session_id = request.cookies.get("session_id")

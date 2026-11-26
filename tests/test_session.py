@@ -240,9 +240,18 @@ def test_middleware_sets_sliding_cookie_header():
 
 
 def test_get_client_ip_extracts_forwarded_headers():
-    """SvelteKit SSR 및 리버스 프록시 환경에서 X-Forwarded-For / X-Real-IP 실제 IP 추출 검증"""
+    """Cloudflare Tunnel(CF-Connecting-IP), 리버스 프록시(X-Real-IP / XFF) 우선순위 및 스푸핑 방어 검증"""
     from unittest.mock import MagicMock
     from core.session import get_client_ip
+
+    # CF-Connecting-IP가 존재하면 공격자가 위조한 X-Forwarded-For보다 최우선 적용되어야 함
+    req_cf = MagicMock()
+    req_cf.headers = {
+        "cf-connecting-ip": "211.36.140.88",
+        "x-forwarded-for": "1.2.3.4, 211.36.140.88",
+    }
+    req_cf.client.host = "172.18.0.5"
+    assert get_client_ip(req_cf) == "211.36.140.88"
 
     req_xff = MagicMock()
     req_xff.headers = {"x-forwarded-for": "203.0.113.10, 172.18.0.5"}
@@ -298,11 +307,10 @@ def test_login_rate_limit_and_lockout(monkeypatch):
     assert kwargs["severity"] == "CRITICAL"
     assert kwargs["action"] == "LOGIN_LOCKOUT"
 
-    # 4. 로그인 성공 시 계정+IP 및 단일 IP 실패 카운터 초기화 검증
+    # 4. 로그인 성공 시 해당 계정+IP 실패 카운터만 초기화 (공용 IP 전역 카운터 리셋 우회 방어)
     clear_login_failures("alice", "203.0.113.10")
     mock_rd.delete.assert_called_once_with(
         "login_fail:user:alice:203.0.113.10",
-        "login_fail:ip:203.0.113.10",
     )
 
 
@@ -374,6 +382,116 @@ def test_validate_session_revokes_deactivated_user_and_device_mismatch(monkeypat
     assert validate_session(mock_db, "Hijacked-desktop-jti", request=mobile_req) is None
     assert desktop_session.status == "KICKED_OUT"
     mock_rd.srem.assert_called_once_with("session:11:DESKTOP", "Hijacked-desktop-jti")
+
+
+def test_create_and_terminate_session_db_ssot_and_redis_fail_safe(monkeypatch):
+    """
+    [1번 결함 회귀 검증]:
+    1) Redis 메모리가 비워진 상태에서도 새 로그인 시 DB ACTIVE 세션이 반드시 KICKED_OUT 되어 좀비 부활이 차단되는지 검증
+    2) Redis 일시 장애(RedisError) 중에도 로그인/로그아웃/강제추방이 500 에러 없이 정상 동작하는지 검증
+    """
+    from unittest.mock import MagicMock
+    from redis.exceptions import RedisError
+    from models import User, UserSession
+    from core.session import create_user_session, terminate_session
+    from domain.user import user_crud
+
+    user = User(id=21, username="driver21")
+    old_db_session = UserSession(
+        id=501,
+        user_id=21,
+        session_key="old-zombie-jti",
+        device_category="MOBILE",
+        status="ACTIVE",
+    )
+
+    mock_db = MagicMock()
+    session_query = MagicMock()
+    session_query.filter.return_value.all.return_value = [old_db_session]
+    session_query.filter.return_value.first.return_value = old_db_session
+    user_query = MagicMock()
+    user_query.filter.return_value.first.return_value = user
+    mock_db.query.side_effect = lambda model: user_query if model is User else session_query
+
+    # 1) Redis가 비어 있어도(smembers -> set()) DB ACTIVE 세션이 KICKED_OUT 되어야 함
+    mock_rd = MagicMock()
+    mock_rd.smembers.return_value = set()
+    monkeypatch.setattr("core.session.rd", mock_rd)
+    monkeypatch.setattr("core.session.safe_log_audit", MagicMock())
+
+    req = MagicMock()
+    req.headers = {"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile"}
+    req.cookies = {}
+    req.client.host = "203.0.113.77"
+
+    new_jti = create_user_session(mock_db, user, req)
+    assert new_jti and new_jti != "old-zombie-jti"
+    assert old_db_session.status == "KICKED_OUT"
+    assert old_db_session.logout_at is not None
+
+    # 2) Redis가 완전히 다운(RedisError)되어도 로그인/로그아웃/강제추방이 예외 없이 통과해야 함
+    failing_rd = MagicMock()
+    failing_rd.smembers.side_effect = RedisError("Redis down")
+    failing_rd.delete.side_effect = RedisError("Redis down")
+    failing_rd.sadd.side_effect = RedisError("Redis down")
+    failing_rd.srem.side_effect = RedisError("Redis down")
+    monkeypatch.setattr("core.session.rd", failing_rd)
+    monkeypatch.setattr("domain.user.user_crud.rd", failing_rd)
+
+    session_query.filter.return_value.all.return_value = []
+    fallback_jti = create_user_session(mock_db, user, req)
+    assert isinstance(fallback_jti, str) and len(fallback_jti) > 10
+    assert terminate_session(mock_db, "old-zombie-jti") is True
+    assert user_crud.kick_session(mock_db, 501) is old_db_session
+
+
+def test_redis_first_session_cache_and_db_fallback(monkeypatch):
+    """
+    [8번 개선 검증]:
+    1) Redis에 session:cache:{jti}가 존재하면 DB 쿼리(db.query)를 단 1회도 호출하지 않고 User+Profile을 반환하는가?
+    2) 캐시가 없거나 Redis가 다운(RedisError)되면 자동으로 DB를 조회하고 캐시를 다시 적재하는가?
+    """
+    import json
+    from unittest.mock import MagicMock
+    from redis.exceptions import RedisError
+    from core.session import validate_session
+
+    cached_payload = json.dumps({
+        "user_id": 6,
+        "username": "superuser",
+        "email": "root@jeju.live",
+        "real_name": "ROOT",
+        "phone": None,
+        "has_profile": True,
+        "rank_level": 9,
+        "primary_group": "임원",
+        "secondary_groups": ["관리자"],
+        "is_active": True,
+        "device_category": "DESKTOP",
+    })
+
+    mock_db = MagicMock()
+    mock_rd = MagicMock()
+    mock_rd.get.return_value = cached_payload
+    monkeypatch.setattr("core.session.rd", mock_rd)
+
+    # 1) 캐시 히트: DB 쿼리가 0회 호출되어야 함!
+    user = validate_session(mock_db, "cached-jti-999")
+    assert user is not None
+    assert user.id == 6
+    assert user.username == "superuser"
+    assert user.rank() == 9
+    assert user.primary_group == "임원"
+    assert user.secondary_groups == ["관리자"]
+    mock_db.query.assert_not_called()
+
+    # 2) Redis 기동 불가(RedisError) 시: 즉시 DB 조회로 자동 폴백되어야 함!
+    mock_rd.get.side_effect = RedisError("Redis unreachable")
+    mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = None
+    assert validate_session(mock_db, "cached-jti-999") is None
+    mock_db.query.assert_called_once()
+
+
 
 
 

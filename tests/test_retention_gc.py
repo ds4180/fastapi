@@ -74,8 +74,8 @@ def test_clean_redis_keys():
         "manual_1": json.dumps({"name": "manual_1", "type": "manual"})
     }
 
-    # 실제 키: today_dayoff, manual_1, orphan_group
-    mock_rd.keys.return_value = [
+    # 실제 키: today_dayoff, manual_1, orphan_group (비블로킹 scan_iter 반환)
+    mock_rd.scan_iter.return_value = [
         "group:data:today_dayoff",
         "group:data:manual_1",
         "group:data:orphan_group"
@@ -114,11 +114,13 @@ def test_data_retention_db_cleanup(db_session):
 
     # 2. UserSession:
     # - s1: 70일 전 로그아웃된 세션 (삭제 대상: 보존 60일 초과)
-    # - s2: 10일 전 로그아웃된 세션 (보존 대상)
-    # - s3: 100일 전 로그인했으나 현재 ACTIVE 상태인 세션 (보존 대상)
+    # - s_exp: 65일 전 자연 만료(EXPIRED)된 세션 (삭제 대상: EXPIRED 누락 방지 검증)
+    # - s2: 10일 전 강제추방된 세션 (보존 대상)
+    # - s3: 100일 전 로그인했으나 현재 활동 중(last_activity=now)인 ACTIVE 세션 (보존 대상)
     s1 = UserSession(user_id=1, session_key="key-old", device_category="DESKTOP", status="LOGOUT", login_at=now - timedelta(days=70))
+    s_exp = UserSession(user_id=1, session_key="key-expired-old", device_category="MOBILE", status="EXPIRED", login_at=now - timedelta(days=68), logout_at=now - timedelta(days=65))
     s2 = UserSession(user_id=1, session_key="key-recent", device_category="DESKTOP", status="KICKED_OUT", login_at=now - timedelta(days=10))
-    s3 = UserSession(user_id=1, session_key="key-active", device_category="DESKTOP", status="ACTIVE", login_at=now - timedelta(days=100))
+    s3 = UserSession(user_id=1, session_key="key-active", device_category="DESKTOP", status="ACTIVE", login_at=now - timedelta(days=100), last_activity=now)
 
     # 3. AuditLog:
     # - a1: 200일 전 감사로그 (삭제 대상: 보존 180일 초과)
@@ -126,7 +128,7 @@ def test_data_retention_db_cleanup(db_session):
     a1 = AuditLog(id=1, app_id="test", log_type="ACCESS", title="오래된 로그", action="LOGIN", created_at=now - timedelta(days=200))
     a2 = AuditLog(id=2, app_id="test", log_type="SECURITY", title="최근 로그", action="403", created_at=now - timedelta(days=30))
 
-    db_session.add_all([t1, t2, t3, s1, s2, s3, a1, a2])
+    db_session.add_all([t1, t2, t3, s1, s_exp, s2, s3, a1, a2])
     db_session.commit()
 
     # GC 실행
@@ -134,7 +136,7 @@ def test_data_retention_db_cleanup(db_session):
 
     assert report["status"] == "SUCCESS"
     assert report["deleted_tasks"] == 1
-    assert report["deleted_sessions"] == 1
+    assert report["deleted_sessions"] == 2
     assert report["deleted_audit_logs"] == 1
 
     # 남아있는 레코드 검증

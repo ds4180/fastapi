@@ -53,12 +53,13 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
                 try:
                     from database import SessionLocal
                     from core.audit import safe_log_audit
+                    from core.session import get_client_ip
                     from models import User
                     db = SessionLocal()
                     try:
                         uid = audit_ctx.get("user_id")
                         user_obj = db.query(User).filter(User.id == uid).first() if uid else None
-                        client_ip = request.client.host if request.client else None
+                        client_ip = get_client_ip(request)
                         safe_log_audit(
                             db=db,
                             app_id=audit_ctx["app_id"],
@@ -93,18 +94,9 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             )
             has_session_cookie = any("session_id=" in h for h in set_cookie_headers if h)
             if not has_session_cookie:
-                from core.session import SESSION_EXPIRE_SECONDS
-                from core.config import settings
+                from core.session import set_session_cookie
 
-                response.set_cookie(
-                    key="session_id",
-                    value=renew_jti,
-                    httponly=True,
-                    max_age=SESSION_EXPIRE_SECONDS,
-                    samesite="lax",
-                    secure=settings.COOKIE_SECURE,
-                    path="/",
-                )
+                set_session_cookie(response=response, session_id=renew_jti, request=request)
 
         # 4. 응답 헤더에 X-Request-ID를 탑재하여 브라우저에 회신
         response.headers["X-Request-ID"] = request_id

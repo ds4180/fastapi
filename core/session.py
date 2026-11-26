@@ -17,12 +17,13 @@ FastAPI 라우터에 섞여 있던 '멀티 디바이스 세션(DESKTOP/MOBILE)' 
 """
 
 import uuid
+import json
 import logging
 import redis
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
-from fastapi import Request
-from sqlalchemy.orm import Session, joinedload
+from typing import Optional, Tuple, Iterable, Dict, Any
+from fastapi import Request, Response
+from sqlalchemy.orm import Session, joinedload, make_transient_to_detached
 from redis.exceptions import RedisError
 from redis_config import rd
 from models import User, UserSession
@@ -37,8 +38,121 @@ SESSION_EXPIRE_SECONDS = 60 * 60 * 24 * SESSION_EXPIRE_DAYS
 
 # 📌 DB 최근 활동 시각(last_activity) 갱신 최소 주기 (5분 = 300초)
 # 매 API 요청마다 DB COMMIT을 수행하면 동시 요청 시 Row Lock 경합이 발생하므로,
-# Redis 만료 시간은 매번 즉시 연장하되 DB 기록은 5분 주기로 스로틀링(Throttling)합니다.
+# Redis 캐시(session:cache:{jti})로 5분간 DB 무쿼리 고속 응답을 제공하고,
+# 캐시 만료(5분 주기) 또는 Redis 장애 시에만 DB 조회 및 슬라이딩 갱신을 수행합니다.
 ACTIVITY_UPDATE_INTERVAL_SECONDS = 300
+SESSION_CACHE_PREFIX = "session:cache:"
+
+
+def _session_cache_key(session_id: str) -> str:
+    return f"{SESSION_CACHE_PREFIX}{session_id}"
+
+
+def invalidate_session_cache(session_ids: Iterable[str]) -> None:
+    """특정 세션 키(JTI)들의 Redis 유저 캐시를 즉시 무효화합니다."""
+    keys = [_session_cache_key(str(s)) for s in session_ids if s]
+    if not keys:
+        return
+    try:
+        rd.delete(*keys)
+    except RedisError:
+        pass
+
+
+def invalidate_user_session_caches(db: Session, user_id: Optional[int] = None) -> None:
+    """사용자 권한(랭크·그룹·활성상태) 변경 시 해당 사원(또는 전체)의 활성 세션 캐시를 즉시 파기합니다."""
+    try:
+        q = db.query(UserSession.session_key).filter(UserSession.status == "ACTIVE")
+        if user_id is not None:
+            q = q.filter(UserSession.user_id == int(user_id))
+        jtis = [row[0] for row in q.all() if row and row[0]]
+        if jtis:
+            invalidate_session_cache(jtis)
+    except Exception:
+        pass
+
+
+def _save_session_cache(
+    session_id: str,
+    user: User,
+    device_category: str,
+    ttl_seconds: int = ACTIVITY_UPDATE_INTERVAL_SECONDS,
+) -> None:
+    """검증된 세션·유저·프로필 스냅샷을 Redis에 단기 캐싱하여 후속 API의 DB 쿼리를 0회로 줄입니다."""
+    if not session_id or not user:
+        return
+    profile = getattr(user, "profile", None)
+    payload = {
+        "user_id": user.id,
+        "username": user.username,
+        "email": getattr(user, "email", "") or "",
+        "real_name": getattr(user, "real_name", None),
+        "phone": getattr(user, "phone", None),
+        "has_profile": profile is not None,
+        "rank_level": int(getattr(profile, "rank_level", 0) or 0) if profile else 0,
+        "primary_group": getattr(profile, "primary_group", None) if profile else None,
+        "secondary_groups": list(getattr(profile, "secondary_groups", None) or []) if profile else [],
+        "is_active": bool(getattr(profile, "is_active", True)) if profile is not None else True,
+        "device_category": device_category,
+    }
+    safe_ttl = max(15, min(int(ttl_seconds), ACTIVITY_UPDATE_INTERVAL_SECONDS))
+    try:
+        rd.setex(_session_cache_key(session_id), safe_ttl, json.dumps(payload, ensure_ascii=False))
+    except RedisError:
+        pass
+
+
+def _load_session_cache(session_id: str) -> Optional[Dict[str, Any]]:
+    """Redis에서 캐싱된 세션 스냅샷을 초고속 조회합니다. (미스 또는 장애 시 None 반환 -> DB 폴백)"""
+    try:
+        raw = rd.get(_session_cache_key(session_id))
+        if not raw or not isinstance(raw, (str, bytes)):
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) and "user_id" in data else None
+    except (RedisError, ValueError, TypeError):
+        return None
+
+
+def _hydrate_cached_user(db: Session, data: Dict[str, Any]) -> User:
+    """
+    캐시 스냅샷으로부터 SQLAlchemy 세션 호환 User + UserProfile 객체를 무쿼리(load=False) 복원합니다.
+    - db.merge(..., load=False)를 통해 SQL 쿼리를 단 1회도 실행하지 않으면서도
+      라우터에서 `Alert(user=current_user)` 등 ORM 관계 할당 시 정상 동작하도록 보장합니다.
+    """
+    from models import UserProfile
+
+    user = User(
+        id=int(data["user_id"]),
+        username=data.get("username") or "",
+        email=data.get("email") or "",
+        password="",
+        real_name=data.get("real_name"),
+        phone=data.get("phone"),
+    )
+    profile = None
+    if data.get("has_profile", True):
+        profile = UserProfile(
+            user_id=int(data["user_id"]),
+            rank_level=int(data.get("rank_level", 0) or 0),
+            primary_group=data.get("primary_group"),
+            secondary_groups=list(data.get("secondary_groups") or []),
+            is_active=bool(data.get("is_active", True)),
+        )
+
+    if isinstance(db, Session):
+        make_transient_to_detached(user)
+        user = db.merge(user, load=False)
+        if profile is not None:
+            make_transient_to_detached(profile)
+            profile = db.merge(profile, load=False)
+        user.__dict__["profile"] = profile
+    else:
+        user.profile = profile
+
+    return user
 
 
 # ============================================================================
@@ -58,23 +172,77 @@ def get_client_ip(request: Optional[Request]) -> str:
     if request is None:
         return "unknown"
 
-    # 1순위: X-Forwarded-For ("client, proxy1, proxy2" 중 가장 앞의 원본 클라이언트 IP)
+    # 1순위: Cloudflare Tunnel이 검증하여 주입한 원본 클라이언트 IP (외부 XFF 스푸핑 원천 방어)
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip and cf_ip.strip():
+        return cf_ip.strip()
+
+    # 2순위: X-Real-IP (Nginx 리버스 프록시가 확정한 단일 클라이언트 IP)
+    x_real_ip = request.headers.get("x-real-ip")
+    if x_real_ip and x_real_ip.strip():
+        return x_real_ip.strip()
+
+    # 3순위: X-Forwarded-For ("client, proxy1, proxy2" 중 가장 앞의 원본 클라이언트 IP)
     xff = request.headers.get("x-forwarded-for")
     if xff:
         first_ip = xff.split(",")[0].strip()
         if first_ip:
             return first_ip
 
-    # 2순위: X-Real-IP (Nginx 등에서 단일 클라이언트로 지정한 헤더)
-    x_real_ip = request.headers.get("x-real-ip")
-    if x_real_ip and x_real_ip.strip():
-        return x_real_ip.strip()
-
-    # 3순위: 직접 연결된 소켓 클라이언트 호스트
+    # 4순위: 직접 연결된 소켓 클라이언트 호스트
     if request.client and request.client.host:
         return request.client.host
 
     return "unknown"
+
+
+def is_cookie_secure(request: Optional[Request] = None) -> bool:
+    """
+    session_id 쿠키에 Secure 플래그를 부여할지 자동 판별합니다.
+    1. 환경변수 COOKIE_SECURE=True가 명시된 경우 무조건 True
+    2. 프록시(Cloudflare Tunnel / Nginx)의 X-Forwarded-Proto가 https이거나 요청 스킴이 https인 경우 True
+    3. 로컬 개발(http://localhost) 직통 접속 시에만 False
+    """
+    if settings.COOKIE_SECURE:
+        return True
+    if request is None:
+        return False
+    proto_header = request.headers.get("x-forwarded-proto", "")
+    if proto_header:
+        first_proto = proto_header.split(",")[0].strip().lower()
+        if first_proto == "https":
+            return True
+    scheme = getattr(getattr(request, "url", None), "scheme", "") or ""
+    return scheme.lower() == "https"
+
+
+def set_session_cookie(
+    response: Response,
+    session_id: str,
+    request: Optional[Request] = None,
+    max_age: int = SESSION_EXPIRE_SECONDS,
+) -> None:
+    """로그인 및 슬라이딩 윈도우 공통 session_id 쿠키 발급 헬퍼."""
+    response.set_cookie(
+        key="session_id",
+        value=session_id,
+        httponly=True,
+        max_age=max_age,
+        samesite="lax",
+        secure=is_cookie_secure(request),
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response, request: Optional[Request] = None) -> None:
+    """로그아웃 시 발급 당시와 동일한 속성(secure/samesite/httponly/path)으로 쿠키를 확실히 제거합니다."""
+    response.delete_cookie(
+        key="session_id",
+        path="/",
+        secure=is_cookie_secure(request),
+        httponly=True,
+        samesite="lax",
+    )
 
 
 # ============================================================================
@@ -209,11 +377,12 @@ def record_login_failure(
 
 def clear_login_failures(username: str, ip_address: str) -> None:
     """
-    정상 로그인 성공 시 해당 계정+IP 및 단일 IP의 실패 카운터를 즉시 초기화합니다.
+    정상 로그인 성공 시 해당 계정+IP의 실패 카운터만 초기화합니다.
+    (단일 IP 전역 카운터 ip_key는 유지하여, 공격자가 정상 계정 1개로 로그인해 IP 스캐닝 카운터를 리셋하는 우회를 차단합니다.)
     """
-    user_key, ip_key = _get_login_fail_keys(username, ip_address)
+    user_key, _ = _get_login_fail_keys(username, ip_address)
     try:
-        rd.delete(user_key, ip_key)
+        rd.delete(user_key)
     except RedisError as redis_err:
         logger.warning(f"⚠️ [Login RateLimit] Redis 실패 카운터 초기화 오류: {redis_err}")
 
@@ -254,16 +423,46 @@ def create_user_session(db: Session, user: User, request: Request) -> str:
             logger.warning(f"⚠️ [Session Fixation Guard] 기존 세션 정리 중 무시 가능한 오류: {term_err}")
 
     redis_key = f"session:{user.id}:{device_category}"
+    now = datetime.now()
 
-    # [1단계] 기존 세션이 있다면 DB에서 KICKED_OUT 처리 및 Redis에서 즉시 추방
-    existing_jtis = rd.smembers(redis_key)
-    for jti_item in existing_jtis:
-        old_jti = jti_item.decode("utf-8") if isinstance(jti_item, bytes) else str(jti_item)
-        db.query(UserSession).filter(UserSession.session_key == old_jti).update({
-            "status": "KICKED_OUT",
-            "logout_at": datetime.now()
-        })
-        rd.srem(redis_key, old_jti)
+    # [1단계] DB(진실 공급원) + Redis 양쪽에서 기존 동일 기기 ACTIVE 세션을 전수 조회하여 KICKED_OUT 처리
+    # 💡 Redis 재부팅/휘발 직후 로그인하더라도 DB의 기존 ACTIVE 세션이 누락되어 자가치유로 부활하는 현상을 원천 차단합니다.
+    db_active_sessions = (
+        db.query(UserSession)
+        .filter(
+            UserSession.user_id == user.id,
+            UserSession.device_category == device_category,
+            UserSession.status == "ACTIVE",
+        )
+        .all()
+    )
+    kicked_jtis = set()
+    for old_sess in db_active_sessions:
+        old_sess.status = "KICKED_OUT"
+        old_sess.logout_at = now
+        if old_sess.session_key:
+            kicked_jtis.add(str(old_sess.session_key))
+
+    try:
+        existing_jtis = rd.smembers(redis_key)
+        for jti_item in existing_jtis:
+            old_jti = jti_item.decode("utf-8") if isinstance(jti_item, bytes) else str(jti_item)
+            if old_jti not in kicked_jtis:
+                updated = (
+                    db.query(UserSession)
+                    .filter(
+                        UserSession.session_key == old_jti,
+                        UserSession.status == "ACTIVE",
+                    )
+                    .update({"status": "KICKED_OUT", "logout_at": now})
+                )
+                if updated:
+                    kicked_jtis.add(old_jti)
+        rd.delete(redis_key)
+    except RedisError as redis_err:
+        logger.warning(f"⚠️ [Session Create] 기존 Redis 세션 정리 실패 (DB 기준으로 계속 진행): {redis_err}")
+
+    for old_jti in kicked_jtis:
         # 📜 [감사로그]: 중복 로그인으로 인한 이전 세션 강제 추방 자동 기록
         safe_log_audit(
             db=db,
@@ -277,12 +476,22 @@ def create_user_session(db: Session, user: User, request: Request) -> str:
             metadata={"device": device_category, "session_key": old_jti[:8] + "..."},
             commit=False
         )
-    db.commit()
+    if kicked_jtis:
+        db.commit()
+        invalidate_session_cache(kicked_jtis)
+        try:
+            from domain.ws.ws_service import manager
+            manager.schedule_close_by_session_ids(kicked_jtis, code=1008)
+        except Exception:
+            pass
 
-    # [2단계] 새로운 고유 세션 키(JTI) 발급
+    # [2단계] 새로운 고유 세션 키(JTI) 발급 (Redis 장애 시에도 DB 세션으로 로그인 성공 보장)
     new_jti = str(uuid.uuid4())
-    rd.sadd(redis_key, new_jti)
-    rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
+    try:
+        rd.sadd(redis_key, new_jti)
+        rd.expire(redis_key, SESSION_EXPIRE_SECONDS)
+    except RedisError as redis_err:
+        logger.warning(f"⚠️ [Session Create] 신규 세션 Redis 적재 실패 (추후 자가치유로 복구됨): {redis_err}")
 
     # [3단계] DB에 새로운 세션 기록 저장
     db_session = UserSession(
@@ -292,8 +501,8 @@ def create_user_session(db: Session, user: User, request: Request) -> str:
         status="ACTIVE",
         device_name=user_agent[:200], # 너무 긴 UA는 자름
         ip_address=ip_address,
-        login_at=datetime.now(),
-        last_activity=datetime.now()
+        login_at=now,
+        last_activity=now
     )
     db.add(db_session)
 
@@ -311,6 +520,7 @@ def create_user_session(db: Session, user: User, request: Request) -> str:
         commit=False
     )
     db.commit()
+    _save_session_cache(new_jti, user, device_category, ACTIVITY_UPDATE_INTERVAL_SECONDS)
 
     return new_jti
 
@@ -383,7 +593,32 @@ def validate_session(
     if not session_id:
         return None
 
-    # 🚀 [개선 1] joinedload로 UserSession + User + UserProfile을 단 1번의 쿼리로 초고속 로드 (N+1 제거)
+    # ⚡ [0단계: Redis-First 무쿼리 캐시 조회]
+    # Redis가 정상이고 5분 내 검증된 캐시가 있으면 PostgreSQL 쿼리 없이 0.1ms 만에 즉시 반환합니다.
+    # (단, 기기 불일치나 비활성 계정이 감지되면 캐시를 파기하고 아래 DB 정밀 검증·차단 경로로 넘깁니다.)
+    cached = _load_session_cache(session_id)
+    if cached is not None:
+        if cached.get("is_active") is False:
+            invalidate_session_cache([session_id])
+        else:
+            device_ok = True
+            if request is not None:
+                req_ua = request.headers.get("user-agent", "")
+                if req_ua and (
+                    "mozilla/" in req_ua.lower()
+                    or "mobi" in req_ua.lower()
+                    or "iphone" in req_ua.lower()
+                    or "android" in req_ua.lower()
+                ):
+                    expected_dev = cached.get("device_category")
+                    if expected_dev and detect_device_category(req_ua) != expected_dev:
+                        device_ok = False
+                        invalidate_session_cache([session_id])
+            if device_ok:
+                return _hydrate_cached_user(db, cached)
+
+    # 🚀 [1단계: 캐시 미스 또는 Redis 기동 불가 시 DB 폴백 조회]
+    # joinedload로 UserSession + User + UserProfile을 단 1번의 쿼리로 로드합니다.
     db_session = (
         db.query(UserSession)
         .options(
@@ -413,6 +648,11 @@ def validate_session(
         except RedisError:
             pass
         db.commit()
+        try:
+            from domain.ws.ws_service import manager
+            manager.schedule_close_by_session_ids([session_id], code=1008)
+        except Exception:
+            pass
         logger.warning(
             f"🚫 [Session Security] 비활성화된 계정(is_active=False)의 활성 세션 즉시 차단 "
             f"(User: {user.username}, Device: {db_session.device_category}, Session: {session_id[:8]}...)"
@@ -478,15 +718,22 @@ def validate_session(
         log_context="Session Self-Healing",
     )
 
-    # [3단계] DB 최근 활동 시각(last_activity) 스로틀링 갱신 + 브라우저 쿠키 슬라이딩 갱신 마킹
-    if (
-        not db_session.last_activity
-        or (now - db_session.last_activity).total_seconds() >= ACTIVITY_UPDATE_INTERVAL_SECONDS
-    ):
+    # [3단계] DB 최근 활동 시각(last_activity) 스로틀링 갱신 + 브라우저 쿠키 슬라이딩 갱신 마킹 + Redis 캐시 적재
+    elapsed_sec = (
+        (now - db_session.last_activity).total_seconds()
+        if db_session.last_activity
+        else ACTIVITY_UPDATE_INTERVAL_SECONDS
+    )
+    if not db_session.last_activity or elapsed_sec >= ACTIVITY_UPDATE_INTERVAL_SECONDS:
         db_session.last_activity = now
         db.commit()
         if request is not None:
             request.state.renew_session_id = session_id
+        cache_ttl = ACTIVITY_UPDATE_INTERVAL_SECONDS
+    else:
+        cache_ttl = max(15, int(ACTIVITY_UPDATE_INTERVAL_SECONDS - elapsed_sec))
+
+    _save_session_cache(session_id, user, db_session.device_category, cache_ttl)
 
     return user
 
@@ -499,11 +746,15 @@ def terminate_session(db: Session, session_id: Optional[str]) -> bool:
     if not session_id:
         return False
 
+    invalidate_session_cache([session_id])
     db_session = db.query(UserSession).filter(UserSession.session_key == session_id).first()
     if db_session:
-        # Redis Set에서 세션 삭제
+        # Redis Set에서 세션 삭제 (Redis 순단 시에도 DB 로그아웃은 정상 완료)
         redis_key = f"session:{db_session.user_id}:{db_session.device_category}"
-        rd.srem(redis_key, session_id)
+        try:
+            rd.srem(redis_key, session_id)
+        except RedisError as redis_err:
+            logger.warning(f"⚠️ [Session Logout] Redis 세션 키 제거 실패 (DB 로그아웃은 완료): {redis_err}")
 
         # DB 세션 상태 업데이트
         db_session.status = "LOGOUT"
@@ -524,6 +775,11 @@ def terminate_session(db: Session, session_id: Optional[str]) -> bool:
             commit=False
         )
         db.commit()
+        try:
+            from domain.ws.ws_service import manager
+            manager.schedule_close_by_session_ids([session_id], code=1008)
+        except Exception:
+            pass
         return True
 
     return False
