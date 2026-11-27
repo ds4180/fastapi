@@ -18,8 +18,9 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 from core.deps import get_current_user, require_app_permission
+from core.permission import ROOT_RANK, can_access_app, get_user_rank
 from core.audit import safe_log_audit
-from models import SurveyCampaign, SurveyResponse, User
+from models import AppRegistry, SurveyCampaign, SurveyResponse, User
 
 from . import survey_schema as schema
 from . import survey_service as service
@@ -29,6 +30,30 @@ admin_router = APIRouter(prefix="/v1/admin/survey", tags=["Admin Survey"])
 
 check_survey_read = require_app_permission("survey", action="read")
 check_survey_write = require_app_permission("survey", action="write")
+
+
+def _is_survey_admin(user: User, db: Session, action: str = "read") -> bool:
+    """AppRegistry('survey') 4단계 거버넌스 기반 설문 관리자 권한 판별 (랭크 하드코딩 제거)"""
+    if get_user_rank(user) == ROOT_RANK:
+        return True
+    app_meta = db.query(AppRegistry).filter(AppRegistry.app_id == "survey").first()
+    if not app_meta:
+        return get_user_rank(user) >= 4
+    return can_access_app(user, app_meta, action=action)
+
+
+def _ensure_survey_readable(
+    db: Session,
+    campaign: SurveyCampaign,
+    current_user: User,
+    my_rows: List[SurveyResponse],
+) -> None:
+    """미배포 초안(DRAFT) 및 비대상 사원의 설문 열람·현황 조회를 차단합니다."""
+    is_admin = _is_survey_admin(current_user, db, action="read")
+    if campaign.status == "DRAFT" and not is_admin:
+        raise HTTPException(status_code=403, detail="아직 배포되지 않은 조사입니다.")
+    if not is_admin and not my_rows and not service.is_user_targeted(campaign, current_user):
+        raise HTTPException(status_code=403, detail="이 조사의 열람 권한이 없습니다.")
 
 
 def _notify_survey_targets(
@@ -120,7 +145,7 @@ def list_my_surveys(
         my_by_campaign.setdefault(r.campaign_id, []).append(service.serialize_response(r))
 
     result = []
-    is_admin = current_user.rank() >= 4
+    is_admin = _is_survey_admin(current_user, db, action="read")
     for c in campaigns:
         my_list = my_by_campaign.get(c.id, [])
         if not service.is_user_targeted(c, current_user) and not my_list and not is_admin:
@@ -167,6 +192,7 @@ def get_survey_by_code(
         .order_by(SurveyResponse.submitted_at.desc())
         .all()
     )
+    _ensure_survey_readable(db, c, current_user, my_rows)
     serialized = [service.serialize_response(r) for r in my_rows]
     target_status = service.build_campaign_target_status(db, c)
     return {
@@ -207,8 +233,7 @@ def get_survey_detail(
         .order_by(SurveyResponse.submitted_at.desc())
         .all()
     )
-    if c.status == "DRAFT" and current_user.rank() < 4:
-        raise HTTPException(status_code=403, detail="아직 배포되지 않은 조사입니다.")
+    _ensure_survey_readable(db, c, current_user, my_rows)
 
     serialized = [service.serialize_response(r) for r in my_rows]
     target_status = service.build_campaign_target_status(db, c)
@@ -242,7 +267,7 @@ def submit_survey_response(
         raise HTTPException(status_code=404, detail="조사 양식을 찾을 수 없습니다.")
 
     settings = service.get_survey_settings(db)
-    is_admin_submit = current_user.rank() >= 4 and settings.get("allow_untargeted_admin_submit", True)
+    is_admin_submit = _is_survey_admin(current_user, db, action="write") and settings.get("allow_untargeted_admin_submit", True)
     if not service.is_user_targeted(c, current_user) and not is_admin_submit:
         raise HTTPException(status_code=403, detail="이 조사의 참여 대상이 아닙니다.")
 

@@ -237,6 +237,7 @@ def update_miniapp_item(
 
             now_dt = datetime.now()
             if not read_rec:
+                from sqlalchemy.exc import IntegrityError
                 read_rec = MiniappRead(
                     item_id=item_id,
                     user_id=user_id,
@@ -244,13 +245,26 @@ def update_miniapp_item(
                     confirmed_at=now_dt
                 )
                 db.add(read_rec)
+                try:
+                    db.commit()
+                    db.refresh(read_rec)
+                except IntegrityError:
+                    db.rollback()
+                    read_rec = db.query(MiniappRead).filter(
+                        MiniappRead.item_id == item_id,
+                        MiniappRead.user_id == user_id
+                    ).first()
+                    if read_rec:
+                        read_rec.status = item_update.status
+                        read_rec.confirmed_at = now_dt
+                        db.commit()
+                        db.refresh(read_rec)
             else:
                 read_rec.status = item_update.status
                 read_rec.confirmed_at = now_dt
-
-            db.commit()
-            db.refresh(read_rec)
-            return MiniappUpdateResult(item, read_rec.status, read_rec.confirmed_at)
+                db.commit()
+                db.refresh(read_rec)
+            return MiniappUpdateResult(item, read_rec.status if read_rec else item_update.status, read_rec.confirmed_at if read_rec else now_dt)
         return MiniappUpdateResult(item, "PENDING", None)
 
     # 2. 👤 1:1 수신자 또는 작성자 권한 검증

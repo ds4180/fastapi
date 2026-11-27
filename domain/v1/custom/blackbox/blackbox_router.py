@@ -193,6 +193,16 @@ def admin_update_video(
     admin: User = Depends(check_blackbox_write),
 ):
     obj = crud.update_video(db, video_id, payload)
+    safe_log_audit(
+        db=db,
+        app_id="blackbox",
+        log_type="CHANGE",
+        action="BLACKBOX_VIDEO_UPDATED",
+        title=f"[블랙박스] 비디오 수정 {obj.video_no} (#{obj.display_num})",
+        user=admin,
+        resource_type="blackbox_video",
+        resource_id=str(obj.id),
+    )
     return {"message": "수정 완료", "video": crud.serialize_video(obj)}
 
 
@@ -203,6 +213,16 @@ def admin_delete_video(
     admin: User = Depends(check_blackbox_write),
 ):
     crud.delete_video(db, video_id)
+    safe_log_audit(
+        db=db,
+        app_id="blackbox",
+        log_type="CHANGE",
+        action="BLACKBOX_VIDEO_DELETED",
+        title=f"[블랙박스] 비디오 삭제 (#{video_id})",
+        user=admin,
+        resource_type="blackbox_video",
+        resource_id=str(video_id),
+    )
     return {"message": "삭제 완료", "id": video_id}
 
 
