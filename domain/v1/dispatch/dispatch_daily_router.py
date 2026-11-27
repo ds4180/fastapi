@@ -97,15 +97,15 @@ def save_daily_dispatch(
                 status_code=400,
                 detail="배차 확정 및 배포는 운행 전날(D-1)에만 수행할 수 있습니다. 미래 날짜는 저장(DRAFT)만 가능합니다.",
             )
-        # 2) 전날(D-1) 현재 배포(공개) 중인 상태에서 확정 취소(DRAFT 강등) 시도 차단
+        # 2) 전날(D-1) 현재 배포(공개) 중인 상태에서 DRAFT/CONFIRMED 강등 시도 차단
         if (
             payload.target_date == tomorrow_kst
-            and payload.status == "DRAFT"
+            and payload.status in ("DRAFT", "CONFIRMED")
             and is_date_published(db, tomorrow_kst)
         ):
             raise HTTPException(
                 status_code=409,
-                detail="현재 배포(공개) 중인 배차는 확정 취소할 수 없습니다. 먼저 '배포 취소'를 실행해 주세요.",
+                detail="현재 배포(공개) 중인 배차는 확정 변경·취소할 수 없습니다. 먼저 '공개 취소'를 실행해 주세요.",
             )
 
         # 🔒 [동시성 제어] 동일 날짜 동시 배차 저장 시 UniqueConstraint 충돌 방지 (PostgreSQL Advisory Lock)
@@ -198,26 +198,13 @@ def save_daily_dispatch(
 
         db.commit()
 
-        # 17시 이후 전 노선 확정 완료 시 크론 1분 대기 없이 즉시 자동 공개/재공개 평가
-        auto_announce_res = None
-        if payload.target_date == tomorrow_kst and payload.status == "CONFIRMED":
-            try:
-                from domain.v1.dispatch.dispatch_service import check_and_run_auto_announce
-                auto_announce_res = check_and_run_auto_announce(db)
-            except Exception as auto_err:
-                print(f"⚠️ [AdminDispatch] Immediate auto-announce check failed: {auto_err}")
-
         try:
             from domain.v1.dispatch.dispatch_service import invalidate_driver_work_stats_cache
             invalidate_driver_work_stats_cache()
         except Exception:
             pass
 
-        result = {"message": "success"}
-        if isinstance(auto_announce_res, dict) and auto_announce_res.get("status") == "announced":
-            result["auto_announced"] = True
-            result["is_reannounce"] = bool(auto_announce_res.get("is_reannounce", False))
-        return result
+        return {"message": "success"}
     except HTTPException:
         raise
     except Exception as e:

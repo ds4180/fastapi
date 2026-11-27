@@ -145,8 +145,8 @@ def test_save_daily_dispatch_protects_confirmed_tomorrow(monkeypatch):
     assert tomorrow_row.driver_name == "김철수"
 
 
-def test_auto_announce_republishes_after_unpublish_and_reconfirm(monkeypatch):
-    """공개 취소(was_published=True) 후 재확정(confirmed=True)된 명일 배차도 17시 이후 자동 재공개되어야 한다."""
+def test_auto_announce_requires_manual_republish_after_unpublish(monkeypatch):
+    """공개 취소(was_published=True) 후 재확정된 명일 배차는 자동 재공개하지 않고 수동 재공개만 허용한다."""
     from datetime import datetime
     from domain.v1.dispatch import dispatch_service
 
@@ -179,6 +179,5 @@ def test_auto_announce_republishes_after_unpublish_and_reconfirm(monkeypatch):
     )
 
     res = dispatch_service.check_and_run_auto_announce(MagicMock())
-    assert called == [False]
-    assert res["status"] == "announced"
-    assert res["is_reannounce"] is True
+    assert called == []
+    assert res["status"] == "manual_republish_required"

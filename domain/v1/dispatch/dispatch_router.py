@@ -175,6 +175,11 @@ def get_custom_dispatch_settings(
     """사용자 배차 뷰에서 필요한 예고 범위, 표시 옵션 및 차량 풀을 반환합니다."""
     res = service.get_dispatch_resources(db)
     settings = res["settings"]
+    driver_vehicle_map = {
+        str(d.get("name") or "").strip(): str(d.get("vehicle_no") or "").strip()
+        for d in (res.get("drivers") or [])
+        if isinstance(d, dict) and str(d.get("name") or "").strip()
+    }
     return {
         "preview_window": service.compute_preview_window(settings),
         "show_substitute_columns": settings.get("show_substitute_columns", True),
@@ -183,4 +188,6 @@ def get_custom_dispatch_settings(
         "confirm_d_day_always_open": settings.get("confirm_d_day_always_open", True),
         "confirm_d1_require_announced": settings.get("confirm_d1_require_announced", True),
         "preview_allow_draft": settings.get("preview_allow_draft", True),
+        "driver_assign_colors": settings.get("driver_assign_colors"),
+        "driver_vehicle_map": driver_vehicle_map,
     }

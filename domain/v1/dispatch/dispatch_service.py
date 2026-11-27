@@ -877,10 +877,9 @@ def announce_tomorrow_dispatch(
 
 def check_and_run_auto_announce(db: Session) -> Dict[str, Any]:
     """
-    1분 주기 크론에서 호출되어 설정된 자동 고지 시각(D-1 xx:yy) 이후에 명일 배차를 자동 공개/재공개합니다.
-    - 이미 공개(published=True) 중인 날짜는 중복 실행하지 않습니다.
-    - 공개 취소 후 수정·재확정(confirmed=True, was_published=True)된 경우에도 설정 시각 이후면
-      자동 재공개 및 재공지 알림(is_reannounce=True)을 발송합니다.
+    1분 주기 크론에서 호출되어 설정된 자동 고지 시각(D-1 xx:yy)에 명일 배차를 최초 1회 자동 공개합니다.
+    - 이미 공개 중(published=True)이거나 공개 취소 이력이 있는(was_published=True) 날짜는
+      자동 재공개하지 않으며, 반드시 관리자가 수동 [재공개] 버튼으로만 처리합니다.
     - 전 노선 확정 완료(confirmed=True) 상태일 때만 실행됩니다.
     """
     settings = get_dispatch_settings(db)
@@ -898,6 +897,8 @@ def check_and_run_auto_announce(db: Session) -> Dict[str, Any]:
     state = get_dispatch_date_state(db, tomorrow)
     if state["published"]:
         return {"status": "already_published", "date": tomorrow.isoformat()}
+    if state["was_published"]:
+        return {"status": "manual_republish_required", "date": tomorrow.isoformat()}
     if not state["confirmed"]:
         return {
             "status": "waiting_confirmation",
