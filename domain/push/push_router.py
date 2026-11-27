@@ -47,7 +47,7 @@ def update_push_domain_options(
 
 # Endpoint to subscribe to push notifications
 @router.post("/subscribe", status_code=status.HTTP_200_OK)
-async def subscribe_push_notification(
+def subscribe_push_notification(
     subscription_data: schemas.PushSubscriptionCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user) # Assuming current user is authenticated
@@ -58,7 +58,7 @@ async def subscribe_push_notification(
     - VAPID 키 교환 등의 로직이 필요할 수 있습니다.
     """
     # Pass user_id to the service function
-    saved_subscription = await push_service.save_subscription(
+    saved_subscription = push_service.save_subscription(
         db, subscription_data, user_id=current_user.id
     )
     safe_log_audit(
@@ -75,7 +75,7 @@ async def subscribe_push_notification(
 
 
 @router.post("/unsubscribe", status_code=status.HTTP_200_OK)
-async def unsubscribe_push_notification(
+def unsubscribe_push_notification(
     payload: schemas.PushUnsubscribeRequest,
     db: Session = Depends(get_db),
 ):
@@ -83,12 +83,12 @@ async def unsubscribe_push_notification(
     로그아웃 또는 세션 종료 시 해당 기기(endpoint)의 푸시 알림 구독을 DB에서 제거합니다.
     (쿠키 만료 직후에도 안전하게 호출될 수 있도록 고유 endpoint 기반으로 삭제)
     """
-    deleted_count = await push_service.delete_subscription_by_endpoint(db, payload.endpoint)
+    deleted_count = push_service.delete_subscription_by_endpoint(db, payload.endpoint)
     return {"message": "Unsubscribed successfully", "deleted": deleted_count}
 
 # Endpoint to send push notifications to all subscribers
 @router.post("/send-all", status_code=status.HTTP_200_OK)
-async def send_all_push_notifications(
+def send_all_push_notifications(
     db: Session = Depends(get_db),
     # Assuming only admin can send to all, requiring authentication
     current_user: User = Depends(get_current_user) 
@@ -102,7 +102,7 @@ async def send_all_push_notifications(
     if current_user.rank() < 4: # Assuming rank 4 is admin
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="관리자 권한이 필요합니다.")
         
-    result = await push_service.send_to_all_subscribers(db)
+    result = push_service.send_to_all_subscribers(db)
     safe_log_audit(
         db=db,
         app_id="pushs",

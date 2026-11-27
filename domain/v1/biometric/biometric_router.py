@@ -60,7 +60,10 @@ def _save_challenge(purpose: str, user_id: int, challenge_bytes: bytes) -> None:
             return
         except Exception:
             pass
-    _FALLBACK_CHALLENGES[key] = (challenge_b64, datetime.now().timestamp() + 300)
+    now_ts = datetime.now().timestamp()
+    for expired_k in [k for k, (_, exp) in _FALLBACK_CHALLENGES.items() if exp < now_ts]:
+        _FALLBACK_CHALLENGES.pop(expired_k, None)
+    _FALLBACK_CHALLENGES[key] = (challenge_b64, now_ts + 300)
 
 
 def _pop_challenge(purpose: str, user_id: int) -> Optional[bytes]:
@@ -68,9 +71,13 @@ def _pop_challenge(purpose: str, user_id: int) -> Optional[bytes]:
     rd = _get_redis()
     if rd is not None:
         try:
-            val = rd.get(key)
+            # 🔒 단일 원자적 GETDEL로 동시 요청 Replay Race Condition 원천 차단
+            val = rd.getdel(key) if hasattr(rd, "getdel") else None
+            if val is None and not hasattr(rd, "getdel"):
+                val = rd.get(key)
+                if val:
+                    rd.delete(key)
             if val:
-                rd.delete(key)
                 if isinstance(val, bytes):
                     val = val.decode("utf-8")
                 return base64url_to_bytes(val)
@@ -82,8 +89,11 @@ def _pop_challenge(purpose: str, user_id: int) -> Optional[bytes]:
     return None
 
 
+ALLOWED_WEBAUTHN_HOSTS = {"jeju.live", "www.jeju.live", "dev.jeju.live", "localhost", "127.0.0.1"}
+
+
 def _resolve_rp_and_origin(request: Request) -> tuple[str, str]:
-    """접속 Origin/Host 기반으로 RP_ID와 expected_origin을 안전하게 판별합니다."""
+    """접속 Origin/Host 기반으로 허용 도메인 화이트리스트를 검증하고 RP_ID와 expected_origin을 반환합니다."""
     origin = (request.headers.get("origin") or "").strip().rstrip("/")
     if not origin:
         proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
@@ -93,14 +103,15 @@ def _resolve_rp_and_origin(request: Request) -> tuple[str, str]:
     parsed = urlparse(origin)
     hostname = (parsed.hostname or "localhost").lower()
 
+    if hostname not in ALLOWED_WEBAUTHN_HOSTS:
+        raise HTTPException(status_code=400, detail=f"허용되지 않은 WebAuthn Origin 도메인입니다: {hostname}")
+
     if hostname in ("jeju.live", "www.jeju.live"):
         rp_id = "jeju.live"
     elif hostname == "dev.jeju.live":
         rp_id = "dev.jeju.live"
-    elif hostname in ("localhost", "127.0.0.1"):
-        rp_id = "localhost"
     else:
-        rp_id = hostname
+        rp_id = "localhost"
 
     return rp_id, origin
 

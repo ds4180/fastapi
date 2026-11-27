@@ -232,6 +232,11 @@ def delete_user_by_admin(
     for s in active_sessions:
         kick_session(db, session_id=s.id)
 
+    # 퇴사/비활성 계정의 Web Push 구독도 함께 제거하여 이후 사내 공지 푸시 유출 차단
+    from models import PushSubscription
+    db.query(PushSubscription).filter(PushSubscription.user_id == target.id).delete(synchronize_session=False)
+    db.commit()
+
     safe_log_audit(
         db=db,
         app_id="user_manage",

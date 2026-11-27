@@ -4,16 +4,16 @@ from . import schemas
 from pywebpush import webpush, WebPushException
 from typing import Iterable, Optional, Callable, Any
 import json
+import os
 import threading
 import logging
 from database import SessionLocal
 
 logger = logging.getLogger("push_service")
 
-# TODO: Configure these securely, preferably via environment variables
-# For now, using placeholder values. Replace with your actual VAPID keys and email.
-VAPID_PRIVATE_KEY = "4pEtY2AYOArlBnYTWlv8-w8pRS21VhiQCZHD2rwUH74"
-VAPID_CLAIMS = {"sub": "mailto:admin@jeju.live"}
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "4pEtY2AYOArlBnYTWlv8-w8pRS21VhiQCZHD2rwUH74")
+VAPID_CLAIMS = {"sub": os.getenv("VAPID_SUBJECT", "mailto:admin@jeju.live")}
+WEBPUSH_TIMEOUT_SEC = int(os.getenv("WEBPUSH_TIMEOUT_SEC", "10"))
 
 
 def get_subscription_by_endpoint(db: Session, endpoint: str):
@@ -24,7 +24,7 @@ def get_all_subscriptions(db: Session):
     return db.query(PushSubscription).all()
 
 
-async def save_subscription(db: Session, subscription_data: schemas.PushSubscriptionCreate, user_id: int):
+def save_subscription(db: Session, subscription_data: schemas.PushSubscriptionCreate, user_id: int):
     existing_sub = get_subscription_by_endpoint(db, subscription_data.endpoint)
 
     if existing_sub:
@@ -56,7 +56,7 @@ async def save_subscription(db: Session, subscription_data: schemas.PushSubscrip
     return new_sub
 
 
-async def delete_subscription_by_endpoint(db: Session, endpoint: str) -> int:
+def delete_subscription_by_endpoint(db: Session, endpoint: str) -> int:
     """
     로그아웃 시 해당 기기 브라우저의 푸시 엔드포인트를 DB 발송 명단에서 즉시 제거합니다.
     """
@@ -101,6 +101,7 @@ def _dispatch_push(db: Session, subscriptions: list, title: str, body: str, url:
                 data=payload,
                 vapid_private_key=VAPID_PRIVATE_KEY,
                 vapid_claims=VAPID_CLAIMS,
+                timeout=WEBPUSH_TIMEOUT_SEC,
             )
             sent += 1
         except WebPushException as e:
@@ -142,7 +143,7 @@ def dispatch_push_async(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> No
     threading.Thread(target=_runner, daemon=True).start()
 
 
-async def send_to_all_subscribers(db: Session):
+def send_to_all_subscribers(db: Session):
     all_subscriptions = get_all_subscriptions(db)
     return _dispatch_push(
         db,
