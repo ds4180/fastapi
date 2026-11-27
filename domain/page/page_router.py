@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from domain.page import page_schema, page_crud
 from domain.user.user_router import get_current_user, get_current_user_optional, check_rank
+from core.audit import safe_log_audit
 from core.deps import require_app_permission
 from core.permission import can_access_page
 from core.view_counter import should_count_view
@@ -39,7 +40,18 @@ def admin_create_page(
     existing = page_crud.get_page_by_slug(db, page_in.slug)
     if existing:
         raise HTTPException(status_code=400, detail="이미 존재하는 슬러그입니다.")
-    return page_crud.create_page(db, page_in)
+    created = page_crud.create_page(db, page_in)
+    safe_log_audit(
+        db=db,
+        app_id="page",
+        log_type="CHANGE",
+        action="PAGE_CREATE",
+        title=f"페이지 생성: {created.title} ({created.slug})",
+        user=current_admin,
+        resource_type="page",
+        resource_id=str(created.id),
+    )
+    return created
 
 @router.put("/admin/update", response_model=page_schema.PageResponse)
 def admin_update_page(
@@ -58,7 +70,18 @@ def admin_update_page(
         if existing:
             raise HTTPException(status_code=400, detail="이미 사용 중인 슬러그입니다.")
             
-    return page_crud.update_page(db, db_page, page_in)
+    updated = page_crud.update_page(db, db_page, page_in)
+    safe_log_audit(
+        db=db,
+        app_id="page",
+        log_type="CHANGE",
+        action="PAGE_UPDATE",
+        title=f"페이지 수정: {updated.title} ({updated.slug})",
+        user=current_admin,
+        resource_type="page",
+        resource_id=str(updated.id),
+    )
+    return updated
 
 @router.delete("/admin/delete/{page_id}")
 def admin_delete_page(
@@ -70,7 +93,18 @@ def admin_delete_page(
     db_page = page_crud.get_page_by_id(db, page_id)
     if not db_page:
         raise HTTPException(status_code=404, detail="페이지를 찾을 수 없습니다.")
+    title_snapshot, slug_snapshot = db_page.title, db_page.slug
     page_crud.delete_page(db, db_page)
+    safe_log_audit(
+        db=db,
+        app_id="page",
+        log_type="CHANGE",
+        action="PAGE_DELETE",
+        title=f"페이지 삭제: {title_snapshot} ({slug_snapshot})",
+        user=current_admin,
+        resource_type="page",
+        resource_id=str(page_id),
+    )
     return {"message": "success"}
 
 # --- [사용자용 API] ---

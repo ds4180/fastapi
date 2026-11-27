@@ -94,17 +94,20 @@ def get_post_detail(
         db.commit()
         db.refresh(post)
     
-    # 4. 읽음 처리 (로그인 유저인 경우)
+    # 4. 읽음 처리 (로그인 유저인 경우 - 동시 요청 중복 INSERT 방어)
     if current_user:
-        # PostRead 로직은 crud에 분리 가능하지만 여기선 일단 직접 처리
+        from sqlalchemy.exc import IntegrityError
         from models import PostRead
         read_history = db.query(PostRead).filter(
             PostRead.post_id == post.id, 
             PostRead.user_id == current_user.id
         ).first()
         if not read_history:
-            db.add(PostRead(post_id=post.id, user_id=current_user.id))
-            db.commit()
+            try:
+                db.add(PostRead(post_id=post.id, user_id=current_user.id))
+                db.commit()
+            except IntegrityError:
+                db.rollback()
 
     setattr(post, "user_name", board_crud.mask_post_author_name(post, current_user, post.board, db=db))
 

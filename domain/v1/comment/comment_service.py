@@ -21,10 +21,26 @@ def _get_active_post_or_404(db: Session, post_id: int) -> Post:
 
 
 def _get_comment_or_404(db: Session, comment_id: int) -> Comment:
-    db_comment = db.query(Comment).filter(Comment.id == comment_id).first()
+    db_comment = (
+        db.query(Comment)
+        .filter(Comment.id == comment_id, Comment.is_deleted == False)
+        .first()
+    )
     if not db_comment:
         raise HTTPException(status_code=404, detail="댓글을 찾을 수 없습니다.")
     return db_comment
+
+
+def _ensure_post_viewable(db: Session, post: Post, current_user: Optional[User]) -> None:
+    """비밀글·예약글·만료글·특정 그룹 전용글에 대한 댓글 API 우회 접근을 차단합니다."""
+    if post.board is not None:
+        from domain.v1.board import board_crud
+
+        if not board_crud.can_view_post(post, current_user, post.board, db=db):
+            raise HTTPException(
+                status_code=403,
+                detail="이 게시물을 열람할 권한이 없거나 게시 기간이 아닙니다.",
+            )
 
 
 def _ensure_comment_owner_or_admin(db_comment: Comment, current_user: User, action_label: str) -> None:
@@ -36,6 +52,7 @@ def _ensure_comment_owner_or_admin(db_comment: Comment, current_user: User, acti
 def list_post_comments(db: Session, post_id: int, current_user: Optional[User]):
     post = _get_active_post_or_404(db, post_id)
     enforce_post_service_permission(db, post, current_user, "comment", action="read")
+    _ensure_post_viewable(db, post, current_user)
     return comment_crud.get_comments_by_post(db, post_id=post_id)
 
 
@@ -47,6 +64,7 @@ def create_post_comment(
 ):
     post = _get_active_post_or_404(db, post_id)
     enforce_post_service_permission(db, post, current_user, "comment", action="write")
+    _ensure_post_viewable(db, post, current_user)
 
     created = comment_crud.create_comment(
         db, post_id=post_id, user_id=current_user.id, comment_in=comment_in
