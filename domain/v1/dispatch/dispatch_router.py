@@ -6,7 +6,7 @@
 
 from datetime import date
 from typing import Any, Dict
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -112,7 +112,17 @@ def update_admin_dispatch_publish_status(
         raise HTTPException(status_code=400, detail="유효한 날짜(YYYY-MM-DD)를 입력해 주세요.")
 
     published = bool(payload.get("published", False))
-    res = service.set_date_published(db, parsed_date, published, mode="manual")
+    if published:
+        from datetime import timedelta
+        tomorrow_kst = service._now_kst().date() + timedelta(days=1)
+        if parsed_date != tomorrow_kst:
+            raise HTTPException(
+                status_code=400,
+                detail="배차 배포 및 배포 취소는 운행 전날(D-1, 내일 배차)에만 수행할 수 있습니다.",
+            )
+        res = service.announce_tomorrow_dispatch(db, force=True, trigger_user=admin)
+    else:
+        res = service.set_date_published(db, parsed_date, False, mode="manual")
     safe_log_audit(
         db=db,
         app_id="dispatch",
