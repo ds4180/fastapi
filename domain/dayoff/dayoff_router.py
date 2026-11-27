@@ -50,25 +50,30 @@ def dayoff_create(
         message=f"'{current_user.username}'이(가) {_dayoff_create.type.value} 휴무 {len(_dayoff_create.dates)}일을 신청했습니다.",
     )
 
-    # 🔔 [통합 알림] 허가제(APPROVAL -> PENDING) 휴무 신청 시 담당 관리자/사무실 직원에게 알림함 + 푸시 발송
+    # 🔔 [통합 알림] 허가제(APPROVAL -> REQUESTED) 휴무 신청 시 담당 관리자/사무실 직원에게 알림함 + 푸시 발송
+    #    (결근·휴무 정책 설정의 etc.notify_on_request 토글이 활성화된 경우에만 발송)
     try:
         from models import DayOff
         from core.notify import safe_notify
         from domain.push.push_service import is_push_domain_enabled
 
         if _dayoff_create.dates:
-            has_pending = (
+            today_policy = dayoff_policy_service.get_dayoff_policy(db)
+            etc_cfg = today_policy.get("etc") if isinstance(today_policy.get("etc"), dict) else {}
+            notify_enabled = etc_cfg.get("notify_on_request", True) is not False
+
+            has_requested = (
                 db.query(DayOff.id)
                 .filter(
                     DayOff.user_id == current_user.id,
                     DayOff.date.in_(_dayoff_create.dates),
-                    DayOff.status == "PENDING",
+                    DayOff.status == dayoff_schema.DayOffStatus.REQUESTED.value,
                     DayOff.is_deleted == False,
                 )
                 .first()
                 is not None
             )
-            if has_pending:
+            if notify_enabled and has_requested:
                 applicant_name = current_user.real_name or current_user.username
                 safe_notify(
                     db=db,

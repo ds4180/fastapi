@@ -108,6 +108,19 @@ def save_daily_dispatch(
                 detail="현재 배포(공개) 중인 배차는 확정 취소할 수 없습니다. 먼저 '배포 취소'를 실행해 주세요.",
             )
 
+        # 🔒 [동시성 제어] 동일 날짜 동시 배차 저장 시 UniqueConstraint 충돌 방지 (PostgreSQL Advisory Lock)
+        tomorrow_date = payload.target_date + timedelta(days=1)
+        if db.bind and db.bind.dialect.name == "postgresql":
+            from sqlalchemy import text
+            for lock_d in (payload.target_date, tomorrow_date):
+                db.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                    {"k": f"dispatch_save_{lock_d.isoformat()}"},
+                )
+
+        # 🛡️ [익일 보호] 익일 배차가 이미 배포(공개) 중이거나 확정된 행은 금일 저장 시 자동 덮어쓰기/삭제를 차단
+        tomorrow_is_published = is_date_published(db, tomorrow_date)
+
         role_map, vehicle_map, _ = load_drivers_metadata()
 
         for r in payload.rows:
@@ -138,7 +151,9 @@ def save_daily_dispatch(
                 )
                 db.add(db_dispatch)
 
-            tomorrow_date = payload.target_date + timedelta(days=1)
+            if tomorrow_is_published:
+                continue
+
             db_dispatch_tomorrow = (
                 db.query(models.Dispatch)
                 .filter(
@@ -147,6 +162,10 @@ def save_daily_dispatch(
                 )
                 .first()
             )
+
+            # 이미 확정/배포된 익일 슬롯은 금일 배차 저장을 통한 간접 수정·삭제에서 보호
+            if db_dispatch_tomorrow and db_dispatch_tomorrow.status in ("CONFIRMED", "ANNOUNCED"):
+                continue
 
             if r.tomorrow_driver_name and r.tomorrow_driver_name.strip():
                 tomorrow_driver = r.tomorrow_driver_name.strip()

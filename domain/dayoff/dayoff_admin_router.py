@@ -25,7 +25,7 @@ from domain.dayoff.dayoff_policy_service import (
     save_dayoff_policy,
     update_date_overrides,
 )
-from domain.dayoff.dayoff_schema import DayOffDateOverrideReq, DayOffPolicySchema
+from domain.dayoff.dayoff_schema import DayOffDateOverrideReq, DayOffPolicySchema, DayOffStatus
 from models import DayOff, User, UserProfile
 
 router = APIRouter(tags=["Admin Dayoff"])
@@ -79,11 +79,26 @@ def admin_update_dayoff_status(
     db: Session = Depends(get_db),
     admin: User = Depends(check_dayoff_admin_write),
 ):
-    """휴무 신청 상태 변경 (승인/반려 등 - 해당 사원의 동일 신청 묶음만 안전하게 동기화)"""
-    new_status = status_update.get("status")
-    db_dayoff = db.query(DayOff).filter(DayOff.id == dayoff_id).first()
+    """휴무 신청 상태 변경 (승인/반려 등 - 허용 상태값 검증·감사로그·알림 토글 연동)"""
+    raw_status = str(status_update.get("status") or "").strip().upper()
+    valid_statuses = {s.value for s in DayOffStatus}
+    if raw_status not in valid_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"유효하지 않은 휴무 상태값입니다: '{raw_status}' (허용: {', '.join(sorted(valid_statuses))})",
+        )
+    new_status = raw_status
+
+    db_dayoff = (
+        db.query(DayOff)
+        .filter(DayOff.id == dayoff_id, DayOff.is_deleted == False)
+        .first()
+    )
     if not db_dayoff:
         raise HTTPException(status_code=404, detail="내역을 찾을 수 없습니다.")
+
+    old_status = db_dayoff.status
+    affected_count = 1
 
     if db_dayoff.group_id:
         items = (
@@ -95,6 +110,7 @@ def admin_update_dayoff_status(
             )
             .all()
         )
+        affected_count = len(items)
         for item in items:
             item.status = new_status
     else:
@@ -102,24 +118,42 @@ def admin_update_dayoff_status(
 
     db.commit()
 
+    safe_log_audit(
+        db=db,
+        app_id="dayoff",
+        log_type="CHANGE",
+        action="DAYOFF_STATUS_UPDATE",
+        title=f"휴무 신청 상태 변경 (#{dayoff_id}: {old_status} → {new_status})",
+        user=admin,
+        resource_type="dayoff",
+        resource_id=str(dayoff_id),
+        message=f"관리자 '{admin.username}'이(가) 사원(#{db_dayoff.user_id})의 {db_dayoff.date} 휴무 {affected_count}건을 {new_status}(으)로 처리했습니다.",
+        diff_payload=[{"field": "status", "from": old_status, "to": new_status}],
+    )
+
     if new_status in ("APPROVED", "REJECTED"):
         try:
-            from core.notify import safe_notify
-            from domain.push.push_service import is_push_domain_enabled
+            today_policy = get_dayoff_policy(db)
+            etc_cfg = today_policy.get("etc") if isinstance(today_policy.get("etc"), dict) else {}
+            notify_result_enabled = etc_cfg.get("notify_on_result", True) is not False
 
-            status_label = "승인" if new_status == "APPROVED" else "반려"
-            date_label = str(db_dayoff.date) if getattr(db_dayoff, "date", None) else "신청일"
-            safe_notify(
-                db=db,
-                category="NOTIFICATION",
-                title=f"휴무 신청이 {status_label}되었습니다",
-                message=f"{date_label} 휴무 신청 건이 {status_label} 처리되었습니다.",
-                sender=admin,
-                target_user_ids=[db_dayoff.user_id],
-                level=2 if new_status == "APPROVED" else 3,
-                link="/v1/custom/dayoff",
-                extra_payload={"send_web_push": is_push_domain_enabled(db, "dayoff_result")},
-            )
+            if notify_result_enabled:
+                from core.notify import safe_notify
+                from domain.push.push_service import is_push_domain_enabled
+
+                status_label = "승인" if new_status == "APPROVED" else "반려"
+                date_label = str(db_dayoff.date) if getattr(db_dayoff, "date", None) else "신청일"
+                safe_notify(
+                    db=db,
+                    category="NOTIFICATION",
+                    title=f"휴무 신청이 {status_label}되었습니다",
+                    message=f"{date_label} 휴무 신청 건이 {status_label} 처리되었습니다.",
+                    sender=admin,
+                    target_user_ids=[db_dayoff.user_id],
+                    level=2 if new_status == "APPROVED" else 3,
+                    link="/v1/custom/dayoff",
+                    extra_payload={"send_web_push": is_push_domain_enabled(db, "dayoff_result")},
+                )
         except Exception:
             pass
 

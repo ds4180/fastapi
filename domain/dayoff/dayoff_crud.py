@@ -13,7 +13,7 @@ from datetime import datetime, date
 from typing import Dict, List
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, text
 
 from models import DayOff, User
 from domain.dayoff.dayoff_schema import DayOffCreate, DayOffStatus
@@ -90,6 +90,13 @@ def create_dayoff_list(db: Session, dayoff_create: DayOffCreate, user_id: int):
                 status_code=400,
                 detail=f"1회 결근계 최대 신청 일수({max_days}일)를 초과할 수 없습니다. (선택: {len(sorted_dates)}일)"
             )
+
+    # 🔒 [동시성 제어] PostgreSQL 환경에서는 신청 일자(오름차순)별로 트랜잭션 단위 Advisory Lock을 획득하여
+    #    동시 클릭 시 선착순(FCFS) 정원 초과(TOCTOU Race Condition) 및 데드락을 원천 차단합니다.
+    if db.bind and db.bind.dialect.name == "postgresql":
+        for lock_date in sorted_dates:
+            lock_key = f"dayoff_fcfs_{lock_date.isoformat()}"
+            db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
 
     # 1. 본인 중복 신청 검사 및 일자별 정책 기준 선착순 정원 검사
     target_Dates_to_insert: List[tuple] = []
