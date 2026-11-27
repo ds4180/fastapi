@@ -143,3 +143,42 @@ def test_save_daily_dispatch_protects_confirmed_tomorrow(monkeypatch):
     res = dispatch_daily_router.save_daily_dispatch(payload, db=db, admin=admin)
     assert res == {"message": "success"}
     assert tomorrow_row.driver_name == "김철수"
+
+
+def test_auto_announce_republishes_after_unpublish_and_reconfirm(monkeypatch):
+    """공개 취소(was_published=True) 후 재확정(confirmed=True)된 명일 배차도 17시 이후 자동 재공개되어야 한다."""
+    from datetime import datetime
+    from domain.v1.dispatch import dispatch_service
+
+    monkeypatch.setattr(
+        dispatch_service,
+        "get_dispatch_settings",
+        lambda db: {"auto_announce_enabled": True, "auto_announce_time": "17:00"},
+    )
+    monkeypatch.setattr(
+        dispatch_service,
+        "_now_kst",
+        lambda: datetime(2026, 11, 27, 17, 5, 0),
+    )
+    monkeypatch.setattr(
+        dispatch_service,
+        "get_dispatch_date_state",
+        lambda db, target_date: {
+            "published": False,
+            "was_published": True,
+            "confirmed": True,
+            "confirmed_count": 3,
+            "total_count": 3,
+        },
+    )
+    called = []
+    monkeypatch.setattr(
+        dispatch_service,
+        "announce_tomorrow_dispatch",
+        lambda db, force=False: called.append(force) or {"status": "announced", "is_reannounce": True},
+    )
+
+    res = dispatch_service.check_and_run_auto_announce(MagicMock())
+    assert called == [False]
+    assert res["status"] == "announced"
+    assert res["is_reannounce"] is True
