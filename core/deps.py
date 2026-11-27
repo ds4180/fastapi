@@ -212,3 +212,64 @@ def require_app_permission(app_id: str, action: str = "read"):
         set_audit_target(app_id, getattr(current_user, "id", None))
         return current_user
     return _guard
+
+
+def require_any_app_permission(app_ids: Iterable[str], action: str = "read"):
+    """
+    [연관 앱 교차 읽기(OR) 인가 가드]
+    - 지정된 app_ids 중 하나라도 활성 상태이며 접근 권한(action)을 충족하면 통과시킵니다.
+    - 예: menu 관리자가 드롭다운용으로 GET /v1/admin/apps를 호출하거나,
+          survey 관리자가 대상자 선택용으로 경량 후보 목록(GET /v1/admin/groups/candidates)을 호출할 때 사용합니다.
+    - 쓰기(POST/PUT/DELETE)는 각 앱의 단독 require_app_permission(..., action="write")를 유지합니다.
+    """
+    normalized_ids = [str(aid).strip() for aid in app_ids if str(aid).strip()]
+    primary_app_id = normalized_ids[0] if normalized_ids else "system"
+
+    def _guard(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> User:
+        if get_user_rank(current_user) == ROOT_RANK:
+            from core.audit import set_audit_target
+            set_audit_target(primary_app_id, getattr(current_user, "id", None))
+            return current_user
+
+        candidates = list(normalized_ids)
+        if "board" in candidates and "boards" not in candidates:
+            candidates.append("boards")
+        elif "boards" in candidates and "board" not in candidates:
+            candidates.append("board")
+
+        app_rows = (
+            db.query(AppRegistry)
+            .filter(AppRegistry.app_id.in_(candidates))
+            .all()
+        )
+        apps_by_id = {row.app_id: row for row in app_rows}
+
+        for aid in normalized_ids:
+            app_meta = apps_by_id.get(aid)
+            if not app_meta and aid in ("board", "boards"):
+                app_meta = apps_by_id.get("boards" if aid == "board" else "board")
+            if not app_meta:
+                continue
+            if getattr(app_meta, "is_active", True) is False:
+                continue
+            if can_access_app(user=current_user, app_obj=app_meta, action=action):
+                from core.audit import set_audit_target
+                set_audit_target(aid, getattr(current_user, "id", None))
+                return current_user
+
+        primary_meta = apps_by_id.get(primary_app_id)
+        app_title = (
+            getattr(primary_meta, "title", None)
+            or getattr(primary_meta, "name", None)
+            or primary_app_id
+        )
+        raise AccessDeniedError(
+            message=f"'{app_title}' 시스템 앱 접근 권한이 없습니다.",
+            resource=primary_app_id,
+            resource_id=current_user.id,
+        )
+
+    return _guard

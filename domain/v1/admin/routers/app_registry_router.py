@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from core.audit import safe_log_audit
-from core.deps import get_current_user, require_app_permission
+from core.deps import get_current_user, require_any_app_permission, require_app_permission
 from database import get_db
 from domain.system.app_service import migrate_boards_to_board
 from domain.v1.admin import admin_schema
@@ -12,10 +12,11 @@ from models import AppRegistry, User
 router = APIRouter()
 
 check_app_admin = require_app_permission("apps")
+check_app_admin_read = require_any_app_permission(["apps", "menu"], action="read")
 
 
 @router.get("/apps", response_model=List[admin_schema.AppRegistrySchema])
-def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_app_admin)):
+def get_all_apps(db: Session = Depends(get_db), admin: User = Depends(check_app_admin_read)):
     """시스템에 등록된 모든 App 엔진 목록 조회 (관리자용)"""
     migrate_boards_to_board(db)
     return db.query(AppRegistry).order_by(AppRegistry.app_id).all()

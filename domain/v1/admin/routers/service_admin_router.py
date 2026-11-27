@@ -2,14 +2,14 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from core.deps import require_app_permission
+from core.deps import require_any_app_permission, require_app_permission
 from database import get_db
 from domain.v1.admin import admin_schema
 from models import ServiceApp, ServiceEngine, ServiceInstance, ServiceRegistry, User
 
 router = APIRouter()
 
-check_service_admin = require_app_permission("services", action="read")
+check_service_admin = require_any_app_permission(["services", "board"], action="read")
 check_service_admin_write = require_app_permission("services", action="write")
 
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 from database import get_db
 from redis_config import get_redis
-from core.deps import require_app_permission
+from core.deps import require_any_app_permission, require_app_permission
 from core.audit import safe_log_audit
 from models.user import User, UserProfile
 from domain.system.group_service import (
@@ -29,13 +29,15 @@ router = APIRouter(prefix="/v1/admin/groups", tags=["Admin Groups Management"])
 
 # 🏛️ AppRegistry 거버넌스 연동 (target_groups)
 check_target_groups_read = require_app_permission("target_groups", action="read")
+check_target_groups_candidates_read = require_any_app_permission(["target_groups", "survey"], action="read")
+check_target_groups_list_read = require_any_app_permission(["target_groups", "alerts", "survey"], action="read")
 check_target_groups_write = require_app_permission("target_groups", action="write")
 
 
 @router.get("/candidates")
 def get_group_candidates(
     db: Session = Depends(get_db),
-    admin=Depends(check_target_groups_read)
+    admin=Depends(check_target_groups_candidates_read)
 ):
     """
     [수동 타겟 그룹 생성용 사원 후보 목록 조회]
@@ -62,7 +64,7 @@ def get_group_candidates(
 def get_all_groups(
     db: Session = Depends(get_db),
     rd=Depends(get_redis),
-    admin=Depends(check_target_groups_read)
+    admin=Depends(check_target_groups_list_read)
 ):
     """현재 생성된 모든 그룹(수동, 다이나믹, 복합) 목록 조회 (동적 그룹 기본 세트 누락 시 자동 1회 연산 복구)"""
     groups = get_all_redis_groups(rd)
