@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import posixpath
 from typing import Any, Dict, List, Tuple
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -234,20 +235,31 @@ def check_is_media_admin(user: User, db: Session, action: str = "read") -> bool:
     return can_access_app(user, app_meta, action=action)
 
 
+def _normalize_clean_sub_path(sub_path: str) -> str:
+    """상대 경로(../) 및 역슬래시를 정규화하고 상위 탈출 시도가 있으면 빈 문자열 대신 안전하게 차단합니다."""
+    raw = (sub_path or "").replace("\\", "/").strip("/")
+    if not raw:
+        return ""
+    norm = posixpath.normpath(raw)
+    if norm in (".", "..") or norm.startswith("../") or "/../" in f"/{norm}/":
+        return "__INVALID_TRAVERSAL__"
+    return norm
+
+
 def is_own_private_path(user: User, tier: str, sub_path: str) -> bool:
-    """사용자가 본인의 개인 폴더(PRIVATE/USERS/{user.id})에 접근 중인지 검증"""
+    """사용자가 본인의 개인 폴더(PRIVATE/USERS/{user.id})에 접근 중인지 검증 (../ 우회 차단)"""
     if (tier or "").upper() != "PRIVATE":
         return False
-    clean = (sub_path or "").strip("/")
+    clean = _normalize_clean_sub_path(sub_path)
     user_root = f"USERS/{user.id}"
     return clean == user_root or clean.startswith(f"{user_root}/")
 
 
 def is_shared_office_path(tier: str, sub_path: str) -> bool:
-    """전사 공용폴더(SYSTEM/GLOBAL/OFFICE) 경로 여부 판별"""
+    """전사 공용폴더(SYSTEM/GLOBAL/OFFICE) 경로 여부 판별 (../ 우회 차단)"""
     if (tier or "").upper() != "SYSTEM":
         return False
-    clean = (sub_path or "").strip("/")
+    clean = _normalize_clean_sub_path(sub_path)
     return clean == "GLOBAL/OFFICE" or clean.startswith("GLOBAL/OFFICE/")
 
 

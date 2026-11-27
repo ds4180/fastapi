@@ -8,6 +8,7 @@
 
 from datetime import datetime
 from typing import List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
@@ -57,14 +58,18 @@ check_media_admin_write = require_app_permission("media", action="write")
 
 
 @router.get("/serve/{asset_id}")
-async def media_secure_serve(
+def media_secure_serve(
     asset_id: int,
     size: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """보안 Tier 미디어 서빙 — 동적 정책 권한 검증 후 Nginx X-Accel-Redirect 전달"""
-    asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id).first()
+    asset = (
+        db.query(MediaAsset)
+        .filter(MediaAsset.id == asset_id, MediaAsset.is_deleted == False)
+        .first()
+    )
     if not asset:
         raise HTTPException(status_code=404, detail="자산을 찾을 수 없습니다.")
 
@@ -75,16 +80,19 @@ async def media_secure_serve(
     if not redirect_path:
         return RedirectResponse(url="/default-thumbnail.png")
 
+    # 한글·공백 등 비ASCII 파일명에서 HTTP 헤더 latin-1 인코딩 500 오류를 방지하기 위해 URI 인코딩
+    encoded_redirect = quote(redirect_path, safe="/")
     return Response(
         headers={
-            "X-Accel-Redirect": redirect_path,
+            "X-Accel-Redirect": encoded_redirect,
             "Content-Type": content_type,
+            "X-Content-Type-Options": "nosniff",
         }
     )
 
 
 @router.get("/admin/settings")
-async def media_get_settings_api(
+def media_get_settings_api(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -103,7 +111,7 @@ async def media_get_settings_api(
 
 
 @router.put("/admin/settings")
-async def media_update_settings_api(
+def media_update_settings_api(
     payload: MediaSettingsUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_media_admin_write),
@@ -133,7 +141,7 @@ async def media_update_settings_api(
 
 
 @router.get("/admin/stats")
-async def media_admin_stats(
+def media_admin_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(check_media_admin),
 ):
@@ -141,7 +149,7 @@ async def media_admin_stats(
 
 
 @router.get("/admin/recent")
-async def media_admin_recent(
+def media_admin_recent(
     limit: int = 12,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_media_admin),
@@ -180,7 +188,7 @@ async def media_upload(
 
 
 @router.post("/publish")
-async def media_publish(
+def media_publish(
     req: PublishRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -218,7 +226,7 @@ async def media_publish(
 
 
 @router.get("/admin/list")
-async def media_admin_list(
+def media_admin_list(
     tier: str = "PUBLIC",
     sub_path: str = "",
     recursive: bool = True,
@@ -237,7 +245,7 @@ async def media_admin_list(
 
 
 @router.post("/admin/folder/create")
-async def media_admin_create_folder(
+def media_admin_create_folder(
     req: FolderCreateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -265,7 +273,7 @@ async def media_admin_create_folder(
 
 
 @router.post("/admin/zip-download")
-async def media_admin_zip_download(
+def media_admin_zip_download(
     req: BulkActionRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -298,7 +306,7 @@ async def media_admin_zip_download(
 
 
 @router.post("/admin/backup")
-async def media_admin_backup(
+def media_admin_backup(
     req: BulkActionRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_media_admin_write),
@@ -329,7 +337,7 @@ async def media_admin_backup(
 
 
 @router.post("/admin/bulk-delete")
-async def media_admin_bulk_delete(
+def media_admin_bulk_delete(
     req: BulkActionRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -357,7 +365,7 @@ async def media_admin_bulk_delete(
 
 
 @router.post("/admin/gc")
-async def media_admin_run_gc(
+def media_admin_run_gc(
     req: GCRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_media_admin_write),
@@ -389,7 +397,7 @@ async def media_admin_run_gc(
 
 
 @router.post("/delete/{asset_id}")
-async def media_admin_delete(
+def media_admin_delete(
     asset_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),

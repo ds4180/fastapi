@@ -1,12 +1,13 @@
 import logging
 import os
+import posixpath
 import shutil
 import uuid
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 import aiofiles
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from PIL import Image
 from sqlalchemy.orm import Session
 
@@ -69,6 +70,30 @@ def media_generate_path(access_level: str, category: str, user_id: int) -> str:
     return os.path.join(tier_folder, category_folder, date_path)
 
 
+def sanitize_sub_path(tier_folder: str, sub_path: str) -> str:
+    """sub_path의 ../ 경로 이탈을 차단하고 tier_folder 기준 안전한 상대 경로를 반환합니다."""
+    raw = (sub_path or "").replace("\\", "/").strip("/")
+    if not raw:
+        return tier_folder
+    norm = posixpath.normpath(raw)
+    if norm in (".", "..") or norm.startswith("../"):
+        raise HTTPException(status_code=400, detail="유효하지 않은 저장 경로입니다 (Path traversal blocked).")
+    candidate_rel = os.path.join(tier_folder, norm).replace("\\", "/")
+    real_tier_root = os.path.realpath(os.path.join(config.MEDIA_ROOT, tier_folder))
+    real_target = os.path.realpath(os.path.join(config.MEDIA_ROOT, candidate_rel))
+    if not (real_target == real_tier_root or real_target.startswith(real_tier_root + os.sep)):
+        raise HTTPException(status_code=400, detail="유효하지 않은 저장 경로입니다 (Path traversal blocked).")
+    return candidate_rel
+
+
+def sanitize_original_filename(original_name: str) -> str:
+    """업로드 원본 파일명에서 경로 구분자(/, \\) 및 상위 이동(..)을 제거합니다."""
+    base = os.path.basename((original_name or "unnamed").replace("\\", "/")).strip()
+    if not base or base in (".", ".."):
+        return "unnamed"
+    return base
+
+
 def get_unique_filename(directory: str, filename: str) -> str:
     name, ext = os.path.splitext(filename)
     counter = 1
@@ -102,7 +127,7 @@ async def media_process_upload(
     # 1차: 스트림 읽기 및 정책 제약 조건 선행 검증 (부분 저장 방지)
     prepared_files = []
     for file in files:
-        original_name = file.filename or "unnamed"
+        original_name = sanitize_original_filename(file.filename or "unnamed")
         content = await file.read()
         validate_upload_file_constraints(original_name, len(content), settings)
         prepared_files.append((file, original_name, content))
@@ -115,9 +140,8 @@ async def media_process_upload(
         category = classify_media_category(mime_type, raw_ext.lower())
 
         if sub_path:
-            safe_sub_path = sub_path.strip("/")
             tier_folder = config.MEDIA_TIERS.get(final_access_level, "PUBLIC")
-            relative_dir = os.path.join(tier_folder, safe_sub_path).replace("\\", "/")
+            relative_dir = sanitize_sub_path(tier_folder, sub_path)
         else:
             relative_dir = media_generate_path(final_access_level, category, user.id)
 
@@ -294,7 +318,7 @@ def media_publish_assets(
             continue
 
         src_abs_path = os.path.join(config.MEDIA_ROOT, src_asset.file_path)
-        original_name = src_asset.original_name
+        original_name = sanitize_original_filename(src_asset.original_name)
         raw_ext = os.path.splitext(original_name)[1] or os.path.splitext(src_asset.file_path)[1]
         file_ext_upper = raw_ext.upper()
         mime_type = src_asset.mime_type or "application/octet-stream"
@@ -305,9 +329,8 @@ def media_publish_assets(
             continue
 
         if sub_path:
-            safe_sub_path = sub_path.strip("/")
             tier_folder = config.MEDIA_TIERS.get(final_access_level, "PUBLIC")
-            relative_dir = os.path.join(tier_folder, safe_sub_path).replace("\\", "/")
+            relative_dir = sanitize_sub_path(tier_folder, sub_path)
         else:
             relative_dir = media_generate_path(final_access_level, category, user.id)
 
