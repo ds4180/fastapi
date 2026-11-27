@@ -66,6 +66,11 @@ def update_user_rank(
     target_rank = get_user_rank(user)
     if target_rank >= ROOT_RANK and admin_rank < ROOT_RANK:
         raise HTTPException(status_code=403, detail="최고 관리자(root)의 랭크는 수정할 수 없습니다.")
+    if admin_rank < ROOT_RANK and target_rank >= admin_rank:
+        raise HTTPException(
+            status_code=403,
+            detail="자신보다 높거나 같은 랭크의 사용자 권한은 변경할 수 없습니다.",
+        )
 
     if not user.profile:
         user.profile = UserProfile(user_id=user.id)
@@ -253,6 +258,18 @@ def restore_user_by_admin(
     target = db.query(User).options(joinedload(User.profile)).filter(User.id == user_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="유저를 찾을 수 없습니다.")
+
+    target_rank = get_user_rank(target)
+    admin_rank = get_user_rank(admin)
+    if target_rank >= ROOT_RANK and admin_rank < ROOT_RANK:
+        raise HTTPException(status_code=403, detail="최고 관리자(root) 계정은 복구/변경할 수 없습니다.")
+    if admin_rank < ROOT_RANK and target_rank >= admin_rank:
+        raise HTTPException(
+            status_code=403,
+            detail="자신보다 높거나 같은 랭크의 계정은 복구/변경할 수 없습니다.",
+        )
+    if target.profile and target.profile.is_active:
+        raise HTTPException(status_code=400, detail="이미 활성 상태인 계정입니다.")
 
     if not target.profile:
         target.profile = UserProfile(user_id=target.id)
